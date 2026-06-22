@@ -2,9 +2,9 @@
 set -e
 
 ICON_SRC="/Users/engineer/.gemini/antigravity/brain/5ad97905-f7f0-4f19-9fee-7de735399e54/spoticat_icon_1781870092072.png"
-APP_NAME="SpoticatMenuBar.app"
-DMG_NAME="Spoticat-Universal.dmg"
-VOL_NAME="Spoticat"
+APP_NAME="Lyrics Menu Bar.app"
+DMG_NAME="LyricsMenuBar-Universal.dmg"
+VOL_NAME="LyricsMenuBar"
 
 echo "Generating ICNS..."
 rm -rf MyIcon.iconset

@@ -25,10 +25,30 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
     private var fftWindow:    [Float] = []
     private var fftWindowed:  [Float] = []
     private var fftActual:    [Float] = []
+    
+    // Silence Detection
+    private var silenceFrames: Int = 0
+    private let silenceThresholdFrames: Int = 300 // ~5 seconds at 60fps
+    private var diagnosticShown: Bool = false
+    
+    private var bassPeak: Float = 0.0001
     private var cachedFFTSetup: FFTSetup?
     private var cachedLog2n: vDSP_Length = 0
+    private var observers: [Any] = []
 
-    public init() {}
+    public init() {
+        // Observe audio engine configuration changes (e.g. sleep/wake, device changes)
+        observers.append(
+            NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+                print("🔄 Audio engine configuration changed (e.g., wake from sleep). Restarting...")
+                self?.restartEngine()
+            }
+        )
+    }
+    
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
 
     // MARK: - Public API
     
@@ -82,12 +102,18 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
             self.amplitudes = Array(repeating: 0.0, count: 10)
         }
     }
+    
+    private func restartEngine() {
+        guard isRunning else { return }
+        stop()
+        start()
+    }
 
     #if os(macOS)
     private func showPermissionAlert() {
         let alert = NSAlert()
         alert.messageText = "Microphone Access Required"
-        alert.informativeText = "Spoticat needs Microphone access to read audio from BlackHole for the visualizer. Please enable it in System Settings -> Privacy & Security -> Microphone."
+        alert.informativeText = "Lyrics Menu Bar needs Microphone access to read audio from BlackHole for the visualizer. Please enable it in System Settings -> Privacy & Security -> Microphone."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Cancel")
@@ -107,6 +133,9 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
         engine = AVAudioEngine()
         let inputNode = engine.inputNode
 
+        // Remove forced AudioUnitSetProperty. Since BlackHole is the default input,
+        // AVAudioEngine will pick it up automatically, exactly like our test script.
+        /*
         #if os(macOS)
         if let blackHoleID = getBlackHoleDeviceID() {
             var deviceID = blackHoleID
@@ -124,6 +153,7 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
             }
         }
         #endif
+        */
 
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
@@ -132,7 +162,7 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
         }
         print("📻 Audio format: \(format.sampleRate)Hz, \(format.channelCount)ch")
 
-        inputNode.installTap(onBus: 0, bufferSize: 512, format: format) { [weak self] buf, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
             self?.process(buffer: buf)
         }
 
@@ -178,20 +208,6 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
                   (cfName as String).lowercased().contains("blackhole")
             else { continue }
 
-            // Verify device has INPUT channels using kAudioDevicePropertyStreams
-            var streamAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyStreams,
-                mScope:    kAudioObjectPropertyScopeInput,
-                mElement:  kAudioObjectPropertyElementMain)
-            var streamSize: UInt32 = 0
-            guard AudioObjectGetPropertyDataSize(id, &streamAddr, 0, nil, &streamSize) == noErr else { continue }
-            
-            let streamCount = Int(streamSize) / MemoryLayout<AudioStreamID>.size
-            guard streamCount > 0 else {
-                print("   ↳ \(cfName as String) found but has \(streamCount) input streams — skipping")
-                continue
-            }
-
             print("✅ Found BlackHole input device: \(cfName as String) (id=\(id))")
             return id
         }
@@ -200,29 +216,58 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
     #endif
 
     // MARK: - FFT Processing
+    
+    // Sliding Window Buffer for low latency + high resolution
+    private let fftSize = 4096
+    private var circularBuffer: [Float] = Array(repeating: 0, count: 4096)
+    private var circularIndex: Int = 0
+
+    private var lastPrintTime = Date()
 
     private func process(buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else { return }
         let frameLength = Int(buffer.frameLength)
-        let halfLen = frameLength / 2
+        let halfLen = fftSize / 2
+        
+        if Date().timeIntervalSince(lastPrintTime) > 1.0 {
+            let maxVal = (0..<frameLength).reduce(0.0 as Float) { max($0, abs(channelData[$1])) }
+            print("🔊 Tap running. FrameLength: \(frameLength), Max Amplitude: \(maxVal)")
+            lastPrintTime = Date()
+        }
 
-        // Lazy-init cached FFT (once per frame size)
+        // Lazy-init cached FFT
         if cachedFFTSetup == nil || fftRealP.count != halfLen {
             if let old = cachedFFTSetup { vDSP_destroy_fftsetup(old) }
-            cachedLog2n   = vDSP_Length(log2(Float(frameLength)))
+            cachedLog2n   = vDSP_Length(log2(Float(fftSize)))
             cachedFFTSetup = vDSP_create_fftsetup(cachedLog2n, FFTRadix(kFFTRadix2))
             fftRealP      = [Float](repeating: 0, count: halfLen)
             fftImagP      = [Float](repeating: 0, count: halfLen)
             fftMagnitudes = [Float](repeating: 0, count: halfLen)
-            fftWindow     = [Float](repeating: 0, count: frameLength)
-            fftWindowed   = [Float](repeating: 0, count: frameLength)
+            fftWindow     = [Float](repeating: 0, count: fftSize)
+            fftWindowed   = [Float](repeating: 0, count: fftSize)
             fftActual     = [Float](repeating: 0, count: halfLen)
-            vDSP_hann_window(&fftWindow, vDSP_Length(frameLength), Int32(vDSP_HANN_NORM))
+            vDSP_hann_window(&fftWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
         }
         guard let fftSetup = cachedFFTSetup else { return }
 
+        // 1. Insert new frames into circular buffer
+        for i in 0..<frameLength {
+            circularBuffer[circularIndex] = channelData[i]
+            circularIndex = (circularIndex + 1) % fftSize
+        }
+        
+        // 2. Extract latest `fftSize` frames chronologically
+        var latestFrames = [Float](repeating: 0, count: fftSize)
+        let tailLen = fftSize - circularIndex
+        if tailLen > 0 {
+            latestFrames[0..<tailLen] = circularBuffer[circularIndex..<fftSize]
+        }
+        if circularIndex > 0 {
+            latestFrames[tailLen..<fftSize] = circularBuffer[0..<circularIndex]
+        }
+
         // Window + FFT (zero allocation)
-        vDSP_vmul(channelData, 1, &fftWindow, 1, &fftWindowed, 1, vDSP_Length(frameLength))
+        vDSP_vmul(latestFrames, 1, &fftWindow, 1, &fftWindowed, 1, vDSP_Length(fftSize))
 
         fftWindowed.withUnsafeBufferPointer { wPtr in
             wPtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfLen) { cPtr in
@@ -242,12 +287,11 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
         vvsqrtf(&fftActual, &fftMagnitudes, &halfLenI)
 
         // --- Frequency band mapping ---
-        // sampleRate ÷ frameLength = Hz per bin
-        // We map 60 Hz – 16 kHz logarithmically across bandCount bands
+        // sampleRate ÷ fftSize = Hz per bin (e.g. 44100 / 4096 = 10.76 Hz)
         let sampleRate = Float(44100)  // conservative default
         let minHz: Float = 60.0
         let maxHz: Float = 16000.0
-        let hzPerBin = sampleRate / Float(frameLength)
+        let hzPerBin = sampleRate / Float(fftSize)
 
         lock.lock()
         let currentBandCount = bandCount
@@ -286,6 +330,32 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
             if boosted > frameMax { frameMax = boosted }
         }
 
+        // --- Raw Bass Extraction for Haptics ---
+        if UserDefaults.standard.bool(forKey: "hapticEnabled") {
+            let deepMinBin = max(1, Int(20.0 / hzPerBin))
+            let deepMaxBin = min(halfLen - 1, Int(50.0 / hzPerBin))
+            let stdMinBin = deepMaxBin
+            let stdMaxBin = min(halfLen - 1, Int(120.0 / hzPerBin))
+            
+            var deepSum: Float = 0
+            if deepMaxBin > deepMinBin {
+                for j in deepMinBin..<deepMaxBin { deepSum += fftActual[j] }
+            }
+            let deepAvg = deepSum / max(1.0, Float(deepMaxBin - deepMinBin))
+            
+            var stdSum: Float = 0
+            if stdMaxBin > stdMinBin {
+                for j in stdMinBin..<stdMaxBin { stdSum += fftActual[j] }
+            }
+            let stdAvg = stdSum / max(1.0, Float(stdMaxBin - stdMinBin))
+            
+            bassPeak = max(bassPeak * 0.92, max(deepAvg, stdAvg))
+            let deepNorm = min(1.0, deepAvg / max(bassPeak, 0.0001))
+            let stdNorm = min(1.0, stdAvg / max(bassPeak, 0.0001))
+            
+            HapticManager.shared.updateHapticFeedback(deepBass: deepNorm, standardBass: stdNorm)
+        }
+
         // Remove global auto-gain logic
         var newAmplitudes = [CGFloat](repeating: 0.01, count: currentBandCount)
         
@@ -315,6 +385,19 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
             newAmplitudes[i] = CGFloat(spectrumBuffer[i])
         }
         lock.unlock()
+        
+        // Silence detection logic
+        if frameMax < 0.00005 {
+            silenceFrames += 1
+            if silenceFrames >= silenceThresholdFrames && !diagnosticShown {
+                diagnosticShown = true
+                DispatchQueue.main.async {
+                    DiagnosticWindowManager.shared.showDiagnostic(issue: .silentAudio)
+                }
+            }
+        } else {
+            silenceFrames = 0
+        }
 
         DispatchQueue.main.async {
             self.amplitudes = newAmplitudes

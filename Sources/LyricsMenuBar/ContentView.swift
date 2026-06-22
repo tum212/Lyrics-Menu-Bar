@@ -28,6 +28,7 @@ struct ContentView: View {
     @AppStorage("showLyrics") private var showLyrics = true
     @AppStorage("waveformBars") private var waveformBars = 14
     @AppStorage("showAlbumArt") private var showAlbumArt = true
+    @AppStorage("hapticEnabled") private var hapticEnabled = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -119,43 +120,54 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Menu {
                     Toggle("Lyrics in Menu Bar", isOn: $showLyrics)
-                    Toggle("Album Cover", isOn: $showAlbumArt)
+                    Toggle(isOn: $showAlbumArt) {
+                        Text("Album Cover")
+                    }
                     
                     Divider()
-                    
-                    Picker("Waveform", selection: $waveformBars) {
-                        Text("Waveform: Off").tag(0)
-                        Text("Waveform: 6 Bars").tag(6)
-                        Text("Waveform: 10 Bars").tag(10)
-                        Text("Waveform: 14 Bars").tag(14)
-                        Text("Waveform: 24 Bars").tag(24)
-                        Text("Waveform: 32 Bars").tag(32)
-                        Text("Waveform: 48 Bars").tag(48)
-                        Text("Waveform: 128 Bars").tag(128)
+                        
+                        Toggle(isOn: $hapticEnabled) {
+                            Text("Trackpad Haptics")
+                        }
+                        Picker("Waveform", selection: $waveformBars) {
+                            Text("Waveform: Off").tag(0)
+                            Text("Waveform: 6 Bars").tag(6)
+                            Text("Waveform: 10 Bars").tag(10)
+                            Text("Waveform: 14 Bars").tag(14)
+                            Text("Waveform: 24 Bars").tag(24)
+                            Text("Waveform: 32 Bars").tag(32)
+                            Text("Waveform: 48 Bars").tag(48)
+                            Text("Waveform: 128 Bars").tag(128)
+                        }
+                        .pickerStyle(.inline)
+                        
+                        Divider()
+                        
+                        Button("Quit LyricsMenuBar") {
+                            NSApplication.shared.terminate(nil)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(Color.white.opacity(0.8))
+                            .frame(width: 28, height: 28)
+                            .background(.ultraThinMaterial, in: Circle())
                     }
-                    .pickerStyle(.inline)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(Color.white.opacity(0.8))
-                        .frame(width: 28, height: 28)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .menuStyle(BorderlessButtonMenuStyle())
-                .menuIndicator(.hidden)
-                .fixedSize()
+                    .menuStyle(BorderlessButtonMenuStyle())
+                    .menuIndicator(.hidden)
+                    .fixedSize()
 
-                Button(action: { NSApplication.shared.terminate(nil) }) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(Color.white.opacity(0.8))
-                        .frame(width: 28, height: 28)
-                        .background(.ultraThinMaterial, in: Circle())
+                    Button(action: { NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil) }) {
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(Color.white.opacity(0.8))
+                            .frame(width: 28, height: 28)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .focusable(false)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .focusable(false)
-            }
-            .padding(12)
+                .padding([.top, .trailing], 16)
         }
         // Dynamic Blurred Album Art Background
         .background(

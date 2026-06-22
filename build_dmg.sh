@@ -37,22 +37,22 @@ build_dmg() {
         -Xlinker "-macos_version_min" -Xlinker "${MIN_OS}" \
         2>&1 | grep -v "^warning:" || true
     # Try without target flags if above fails (older Xcode)
-    if [ ! -f "$SCRIPT_DIR/.build/release/SpoticatMenuBar" ]; then
-        DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build -c release || true
+    if [ ! -f "$SCRIPT_DIR/.build/release/LyricsMenuBar" ]; then
+        DEVELOPER_DIR="/Applications/Xcode 00.17.43.app/Contents/Developer" swift build -c release || true
     fi
 
     echo "   Build complete ✓"
 
     # ----- 2. ASSEMBLE APP BUNDLE -----------------------------------------
     echo "=== Packaging app bundle ==="
-    cp .build/release/SpoticatMenuBar SpoticatMenuBar.app/Contents/MacOS/SpoticatMenuBar
-    cp icon.icns SpoticatMenuBar.app/Contents/Resources/AppIcon.icns 2>/dev/null || true
-    cp Sources/SpoticatMenuBar/Info.plist SpoticatMenuBar.app/Contents/Info.plist
+    cp .build/release/LyricsMenuBar "Lyrics Menu Bar.app/Contents/MacOS/LyricsMenuBar"
+    cp icon.icns "Lyrics Menu Bar.app/Contents/Resources/AppIcon.icns" 2>/dev/null || true
+    cp Sources/LyricsMenuBar/Info.plist "Lyrics Menu Bar.app/Contents/Info.plist"
 
     # ----- 3. SIGN (ad-hoc) + STRIP QUARANTINE ---------------------------
     echo "=== Signing ==="
-    xattr -cr SpoticatMenuBar.app
-    codesign --force --deep --sign - --entitlements "$SCRIPT_DIR/SpoticatMenuBar.entitlements" SpoticatMenuBar.app
+    xattr -cr "Lyrics Menu Bar.app"
+    codesign --force --deep --sign - --entitlements "$SCRIPT_DIR/LyricsMenuBar.entitlements" "Lyrics Menu Bar.app"
     echo "   Signed ✓"
 
     # ----- 4. STAGING AREA -----------------------------------------------

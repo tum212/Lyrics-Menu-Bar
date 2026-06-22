@@ -4,15 +4,15 @@
 import PackageDescription
 
 let package = Package(
-    name: "SpoticatMenuBar",
+    name: "LyricsMenuBar",
     platforms: [
         .macOS(.v12)
     ],
     targets: [
         .executableTarget(
-            name: "SpoticatMenuBar",
+            name: "LyricsMenuBar",
             linkerSettings: [
-                .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Sources/SpoticatMenuBar/Info.plist"])
+                .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Sources/LyricsMenuBar/Info.plist"])
             ]
         ),
     ]

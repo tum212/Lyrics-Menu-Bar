@@ -1,6 +1,9 @@
 import SwiftUI
 import AppKit
 import Combine
+import CoreAudio
+import AVFoundation
+import AudioToolbox
 
 @main
 struct SpoticatApp {
@@ -55,7 +58,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.register(defaults: [
             "waveformBars": 14,
             "showAlbumArt": true,
-            "showLyrics": true
+            "showLyrics": true,
+            "hapticEnabled": false,
+            "audioFeaturesEnabled": true
         ])
         
         let contentView = ContentView(
@@ -69,6 +74,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: contentView)
         self.popover = popover
+        
+        NotificationCenter.default.addObserver(forName: Notification.Name("ClosePopover"), object: nil, queue: .main) { [weak self] _ in
+            self?.popover.performClose(nil)
+        }
+        
+        NotificationCenter.default.addObserver(forName: Notification.Name("AudioFeaturesDisabled"), object: nil, queue: .main) { [weak self] _ in
+            self?.audioAnalyzer.stop()
+        }
+        
+        if UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
+            runAudioDiagnostics()
+        }
         
         self.artStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = self.artStatusItem.button {
@@ -119,7 +136,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateMenuBar()
         }
         if let timer = updateTimer {
-            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.current.add(timer, forMode: .common)
+        }
+    }
+    
+    private func runAudioDiagnostics() {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var dataSize: UInt32 = 0
+        AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize)
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, &ids)
+        
+        var foundBlackHole = false
+        var blackHoleID: AudioDeviceID = 0
+        
+        for id in ids {
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            var name: Unmanaged<CFString>?
+            var nameAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceNameCFString, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            if AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nameSize, &name) == noErr, let cfName = name?.takeRetainedValue(), (cfName as String).lowercased().contains("blackhole") {
+                foundBlackHole = true
+                blackHoleID = id
+                break
+            }
+        }
+        
+        if !foundBlackHole {
+            DiagnosticWindowManager.shared.showDiagnostic(issue: .missingBlackHole)
+            return
+        }
+        
+        var defaultInputID: AudioDeviceID = 0
+        var inputSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var inputAddr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &inputAddr, 0, nil, &inputSize, &defaultInputID)
+        
+        if defaultInputID != blackHoleID {
+            DiagnosticWindowManager.shared.showDiagnostic(issue: .notDefaultInput)
         }
     }
     
@@ -425,6 +479,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                     self?.cachedAlbumArtImage = roundedImage
                                 }
                             }
+                        } else {
+                            Task { @MainActor in
+                                let fallback = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
+                                fallback?.isTemplate = true
+                                self?.cachedAlbumArtImage = fallback
+                                self?.cachedBlurredAlbumArtImage = fallback
+                            }
                         }
                     }.resume()
                 } else {
@@ -462,9 +523,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             if spotify.isPlaying && cachedAlbumArtImage != nil && barCount > 0 {
                 let startX: CGFloat = 0
-                let totalAmps = audioAnalyzer.amplitudes.count
-                let clipPath = NSBezierPath()
-                let motionClipPath = NSBezierPath()
+                
+                if UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
+                    let totalAmps = audioAnalyzer.amplitudes.count
+                    let clipPath = NSBezierPath()
+                    let motionClipPath = NSBezierPath()
                 
                 for i in 0..<barCount {
                     let ampIndex = totalAmps > 0 ? (i * totalAmps / barCount) : 0
@@ -536,6 +599,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     clipPath.fill()
                 }
                 NSGraphicsContext.current?.restoreGraphicsState()
+                
+                } else {
+                    // Flat baseline if audio disabled
+                    NSGraphicsContext.current?.saveGraphicsState()
+                    let flatClipPath = NSBezierPath()
+                    for i in 0..<barCount {
+                        let rect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: (20.0 - 2.0) / 2.0, width: barW, height: 2.0)
+                        flatClipPath.append(NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1))
+                    }
+                    flatClipPath.addClip()
+                    NSColor.white.withAlphaComponent(0.3).setFill()
+                    let fillRect = NSRect(x: startX, y: 0, width: vizWidth, height: 20)
+                    fillRect.fill()
+                    NSGraphicsContext.current?.restoreGraphicsState()
+                }
             }
             
             if let art = cachedAlbumArtImage, showAlbumArt {
