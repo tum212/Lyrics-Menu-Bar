@@ -379,8 +379,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             
             // Lerp marqueeOffset to smooth out AppleScript polling jitter
+            let previousMarqueeOffset = marqueeOffset
             let offsetSmoothing = CGFloat(1.0 - exp(-15.0 * deltaTime))
             marqueeOffset += (targetOffset - marqueeOffset) * offsetSmoothing
+            let distanceMoved = marqueeOffset - previousMarqueeOffset
             
             if animatedWidth > 2 {
                 let lyricsImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
@@ -445,16 +447,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     var whiteAttributes = attributes
                     whiteAttributes[.foregroundColor] = NSColor.white.withAlphaComponent(alphaNew)
                     
-                    // Add brilliant glowing halo effect requested by user
+                    // Draw Motion Blur Ghost Trail for ultra-fast silky smooth perception (120Hz feel on 60Hz)
+                    let blurSteps = min(8, Int(abs(distanceMoved) * 1.5))
+                    if blurSteps > 0 {
+                        let stepDist = distanceMoved / CGFloat(blurSteps + 1)
+                        for i in 1...blurSteps {
+                            let ghostOffset = marqueeOffset - stepDist * CGFloat(i)
+                            let ghostRect = NSRect(x: glowPad + ghostOffset, y: ((20 - textSize.height) / 2) + yOffsetNew, width: textSize.width, height: textSize.height)
+                            
+                            var ghostAttr = attributes
+                            let ghostAlpha = alphaNew * (0.4 / CGFloat(blurSteps)) // Faint trail
+                            ghostAttr[.foregroundColor] = NSColor.white.withAlphaComponent(ghostAlpha)
+                            currentLineText.draw(in: ghostRect, withAttributes: ghostAttr)
+                        }
+                    }
+                    
+                    // Add brilliant glowing halo effect requested by user (1.5 layers white)
                     let outerShadow = NSShadow()
-                    outerShadow.shadowColor = NSColor.cyan.withAlphaComponent(0.8 * alphaNew)
+                    outerShadow.shadowColor = NSColor.white.withAlphaComponent(0.5 * alphaNew)
                     outerShadow.shadowOffset = .zero
-                    outerShadow.shadowBlurRadius = 6
+                    outerShadow.shadowBlurRadius = 5
                     outerShadow.set()
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
                     let innerShadow = NSShadow()
-                    innerShadow.shadowColor = NSColor.white.withAlphaComponent(1.0 * alphaNew)
+                    innerShadow.shadowColor = NSColor.white.withAlphaComponent(0.9 * alphaNew)
                     innerShadow.shadowOffset = .zero
                     innerShadow.shadowBlurRadius = 2
                     innerShadow.set()
