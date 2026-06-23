@@ -489,7 +489,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
-                    NSGraphicsContext.current?.compositingOperation = .copy
+                    NSGraphicsContext.current?.compositingOperation = .destinationIn
+                    if let gradient = NSGradient(colors: [.white, .clear]) {
+                        gradient.draw(from: NSPoint(x: currentX1 - fadeWidth, y: 0), to: NSPoint(x: currentX1, y: 0), options: [.drawsBeforeStartingLocation])
+                    }
+                    
+                    whiteImage.unlockFocus()
+                    
+                    NSGraphicsContext.current?.saveGraphicsState()
+                    NSGraphicsContext.current?.compositingOperation = .sourceOver
+                    whiteImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
+                    NSGraphicsContext.current?.restoreGraphicsState()
                 }
                 
                 // Always apply Edge Masking for a premium fade at the boundaries
