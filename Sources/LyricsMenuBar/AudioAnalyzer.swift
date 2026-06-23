@@ -110,7 +110,12 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
     }
 
     #if os(macOS)
+    private var hasShownPermissionAlert = false
+
     private func showPermissionAlert() {
+        guard !hasShownPermissionAlert else { return }
+        hasShownPermissionAlert = true
+        
         let alert = NSAlert()
         alert.messageText = "Microphone Access Required"
         alert.informativeText = "Lyrics Menu Bar needs Microphone access to read audio from BlackHole for the visualizer. Please enable it in System Settings -> Privacy & Security -> Microphone."

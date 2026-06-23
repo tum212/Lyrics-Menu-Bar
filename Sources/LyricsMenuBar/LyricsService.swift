@@ -23,6 +23,11 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     private var currentRequestID: Int = 0
     private var cache: [String: [LyricLine]] = [:]
     
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        return URLSession(configuration: config, delegate: SSLBypassDelegate(), delegateQueue: nil)
+    }()
+    
     public init() {}
     
     // MARK: - Public Entry Point
@@ -128,7 +133,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await session.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 print("LRCLib Search failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
                 return []
@@ -162,7 +167,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await session.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 print("LRCLib Get failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
                 return [] 
@@ -190,7 +195,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await session.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 print("OVH Fetch failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
                 return [] 
@@ -244,5 +249,15 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         return lines.map { LyricLine(time: 0, text: $0) }
+    }
+}
+
+final class SSLBypassDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+            return
+        }
+        completionHandler(.performDefaultHandling, nil)
     }
 }
