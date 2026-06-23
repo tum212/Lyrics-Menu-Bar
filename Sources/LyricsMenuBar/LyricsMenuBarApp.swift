@@ -448,7 +448,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 if progress > 0 || animatedOrbAlpha > 0.01 {
                     let clampedProgress = min(1.0, progress)
-                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress)
+                    let fadeWidth: CGFloat = 20
+                    // Push the highlight forward based on progress so it clears the text entirely at 1.0
+                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress) + fadeWidth * CGFloat(clampedProgress)
                     
                     let whiteImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
                     whiteImage.lockFocus()
@@ -487,7 +489,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
-                    let fadeWidth: CGFloat = 20
                     NSGraphicsContext.current?.compositingOperation = .copy
                     NSColor.clear.setFill()
                     
