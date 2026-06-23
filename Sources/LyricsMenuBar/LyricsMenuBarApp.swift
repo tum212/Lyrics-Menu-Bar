@@ -330,17 +330,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             let glowPad: CGFloat = 6  // padding on each side so glow is not clipped
             let maxAllowedWidth: CGFloat = 200.0 // Reduced width per user request
-            let fullTextWidth = textSize.width + glowPad * 2
-            let isMarquee = fullTextWidth > maxAllowedWidth && currentLineText != "♪"
+            let scrollPadding: CGFloat = 20.0
             
-            let targetWidth = min(fullTextWidth, maxAllowedWidth)
-            animatedWidth += (targetWidth - animatedWidth) * 0.2
+            let fullTextWidth = textSize.width + glowPad * 2
+            let effectiveWidth = maxAllowedWidth - scrollPadding * 2
+            let isMarquee = fullTextWidth > effectiveWidth && currentLineText != "♪"
+            
+            let requiredWidth = fullTextWidth + scrollPadding * 2
+            let targetWidth = min(requiredWidth, maxAllowedWidth)
+            
+            var activeTargetWidth = targetWidth
+            if transitionProgress < 1.0 && !oldLineText.isEmpty {
+                let oldTextSize = oldLineText.size(withAttributes: attributes)
+                let oldRequired = oldTextSize.width + glowPad * 2 + scrollPadding * 2
+                activeTargetWidth = max(targetWidth, min(oldRequired, maxAllowedWidth))
+            }
+            animatedWidth += (activeTargetWidth - animatedWidth) * 0.2
+            
+            var targetOffset: CGFloat = scrollPadding
+            if isMarquee {
+                let maxScroll = fullTextWidth - effectiveWidth
+                // Sine easing for ultra-smooth start/stop
+                let smoothedProgress = -(cos(Double.pi * progress) - 1.0) / 2.0
+                targetOffset = scrollPadding - (maxScroll * CGFloat(smoothedProgress))
+            }
             
             if currentLineText != lastRenderedLyricsText {
                 oldLineText = lastRenderedLyricsText
                 oldMarqueeOffset = marqueeOffset
                 lastRenderedLyricsText = currentLineText
                 transitionProgress = 0.0
+                
+                // SNAP marqueeOffset instantly to targetOffset for the new line
+                // This prevents horizontal sweeping/jumping!
+                marqueeOffset = targetOffset
             }
             
             if transitionProgress < 1.0 {
@@ -348,18 +371,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if transitionProgress > 1.0 { transitionProgress = 1.0 }
             }
             
-            // Pan logic synced perfectly with lyrics progress
-            var targetOffset: CGFloat = 0.0
-            if isMarquee {
-                let scrollPadding: CGFloat = 20.0
-                let maxScroll = fullTextWidth - maxAllowedWidth + scrollPadding * 2
-                
-                // Sine easing for ultra-smooth start/stop
-                let smoothedProgress = -(cos(Double.pi * progress) - 1.0) / 2.0
-                targetOffset = scrollPadding - (maxScroll * CGFloat(smoothedProgress))
-            }
-            // Set directly to track absolute time for perfect zero-stutter smoothness
-            marqueeOffset = targetOffset
+            // Lerp marqueeOffset to smooth out AppleScript polling jitter
+            marqueeOffset += (targetOffset - marqueeOffset) * 0.2
             
             if animatedWidth > 2 {
                 let lyricsImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
@@ -372,8 +385,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let yOffsetNew = -15.0 + transitionProgress * 15.0
                 let alphaNew = transitionProgress
                 
-                var grayOld = attributes
-                grayOld[.foregroundColor] = NSColor.white.withAlphaComponent(0.4 * alphaOld)
                 var grayNew = attributes
                 grayNew[.foregroundColor] = NSColor.white.withAlphaComponent(0.4 * alphaNew)
                 
@@ -382,7 +393,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     // Re-calculate old text size for proper alignment
                     let oldTextSize = oldLineText.size(withAttributes: attributes)
                     let oldRect = NSRect(x: glowPad + oldMarqueeOffset, y: ((20 - oldTextSize.height) / 2) + yOffsetOld, width: oldTextSize.width, height: oldTextSize.height)
-                    oldLineText.draw(in: oldRect, withAttributes: grayOld)
+                    
+                    // Fade out with white color to prevent color jump
+                    var oldAttr = attributes
+                    oldAttr[.foregroundColor] = NSColor.white.withAlphaComponent(alphaOld)
+                    oldLineText.draw(in: oldRect, withAttributes: oldAttr)
                 }
                 
                 // 2. Draw new line sliding UP and fading in
@@ -393,7 +408,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let targetOrbAlpha: CGFloat = (progress > 0.0 && progress < 1.0) ? 1.0 : 0.0
                 animatedOrbAlpha += (targetOrbAlpha - animatedOrbAlpha) * 0.15
                 
-                if (progress > 0 || animatedOrbAlpha > 0.01) && transitionProgress > 0.5 {
+                if progress > 0 || animatedOrbAlpha > 0.01 {
                     let clampedProgress = min(1.0, progress)
                     let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress)
                     
@@ -434,7 +449,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 
                 // Always apply Edge Masking for a premium fade at the boundaries
-                let needsMask = isMarquee || transitionProgress < 1.0
+                let needsMask = isMarquee || transitionProgress < 1.0 || (animatedWidth < requiredWidth)
                 if animatedWidth > 16 && needsMask {
                     NSGraphicsContext.current?.saveGraphicsState()
                     NSGraphicsContext.current?.compositingOperation = .destinationIn
