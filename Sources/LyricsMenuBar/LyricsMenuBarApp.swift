@@ -481,64 +481,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                     
-                    // 1. Base Sung Text (1x glow)
-                    let innerShadow = NSShadow()
-                    innerShadow.shadowColor = NSColor.white.withAlphaComponent(0.8 * alphaNew)
-                    innerShadow.shadowOffset = .zero
-                    innerShadow.shadowBlurRadius = 2
-                    innerShadow.set()
+                    let shadow = NSShadow()
+                    shadow.shadowColor = NSColor.white.withAlphaComponent(0.6 * alphaNew)
+                    shadow.shadowOffset = .zero
+                    shadow.shadowBlurRadius = 3
+                    shadow.set()
+                    
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
                     NSGraphicsContext.current?.compositingOperation = .copy
-                    NSColor.clear.setFill()
-                    
-                    // Clear un-sung parts
-                    let copy1End = glowPad + marqueeOffset + textSize.width
-                    if currentX1 < copy1End {
-                        NSRect(x: currentX1, y: 0, width: copy1End - currentX1, height: 20).fill()
-                    }
-                    
-                    NSGraphicsContext.current?.compositingOperation = .destinationIn
-                    if let gradient = NSGradient(colors: [.white, .clear]) {
-                        gradient.draw(from: NSPoint(x: currentX1 - fadeWidth, y: 0), to: NSPoint(x: currentX1, y: 0), options: [])
-                    }
-                    
-                    whiteImage.unlockFocus()
-                    
-                    // 2. The "Current Word" Extra Halo (0.5x)
-                    let haloImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
-                    haloImage.lockFocus()
-                    if let ctx = NSGraphicsContext.current?.cgContext {
-                        ctx.setAllowsFontSubpixelPositioning(true)
-                        ctx.setShouldSubpixelPositionFonts(true)
-                        ctx.setAllowsFontSubpixelQuantization(true)
-                        ctx.setShouldSubpixelQuantizeFonts(false)
-                    }
-                    let outerShadow = NSShadow()
-                    outerShadow.shadowColor = NSColor.white.withAlphaComponent(0.6 * alphaNew)
-                    outerShadow.shadowOffset = .zero
-                    outerShadow.shadowBlurRadius = 6
-                    outerShadow.set()
-                    currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
-                    
-                    NSGraphicsContext.current?.compositingOperation = .copy
-                    NSColor.clear.setFill()
-                    if currentX1 < copy1End {
-                        NSRect(x: currentX1, y: 0, width: copy1End - currentX1, height: 20).fill()
-                    }
-                    
-                    // Mask the halo to ONLY appear near currentX1!
-                    NSGraphicsContext.current?.compositingOperation = .destinationIn
-                    if let haloMask = NSGradient(colors: [.clear, .white, .clear]) {
-                        haloMask.draw(from: NSPoint(x: currentX1 - 35, y: 0), to: NSPoint(x: currentX1 + 10, y: 0), options: [])
-                    }
-                    haloImage.unlockFocus()
-                    
-                    NSGraphicsContext.current?.saveGraphicsState()
-                    NSGraphicsContext.current?.compositingOperation = .sourceOver
-                    whiteImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
-                    haloImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
-                    NSGraphicsContext.current?.restoreGraphicsState()
                 }
                 
                 // Always apply Edge Masking for a premium fade at the boundaries
