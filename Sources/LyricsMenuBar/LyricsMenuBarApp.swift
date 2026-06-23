@@ -45,6 +45,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var forceRedrawLyrics: Bool = false
     var animatedOrbAlpha: CGFloat = 0.0
     
+    // Marquee State
+    var marqueeOffset: CGFloat = 0.0
+    var marqueeWaitFrames: Int = 0
+    
     // Waveform Motion Blur State
     var lastAmplitudes: [Double] = []
     
@@ -323,20 +327,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             
             let glowPad: CGFloat = 6  // padding on each side so glow is not clipped
-            let targetWidth = currentLineText == "♪" ? max(textSize.width + glowPad * 2, 10) : max(textSize.width + glowPad * 2, 10)
+            let maxAllowedWidth: CGFloat = 250.0 // About 4-5 apps width
+            let fullTextWidth = textSize.width + glowPad * 2
+            let isMarquee = fullTextWidth > maxAllowedWidth && currentLineText != "♪"
+            
+            let targetWidth = min(fullTextWidth, maxAllowedWidth)
             animatedWidth += (targetWidth - animatedWidth) * 0.2
+            
+            // Marquee logic
+            let cycleWidth = textSize.width + 40.0
+            if currentLineText != lastRenderedLyricsText {
+                marqueeOffset = 0.0
+                marqueeWaitFrames = 90 // Wait 1.5 seconds before scrolling
+            } else if isMarquee {
+                if marqueeWaitFrames > 0 {
+                    marqueeWaitFrames -= 1
+                } else {
+                    marqueeOffset -= 0.6 // scroll speed
+                    if marqueeOffset <= -cycleWidth {
+                        marqueeOffset += cycleWidth
+                    }
+                }
+            } else {
+                marqueeOffset = 0.0
+                marqueeWaitFrames = 90
+            }
             
             if animatedWidth > 2 {
                 let lyricsImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
                 lyricsImage.isTemplate = false
                 lyricsImage.lockFocus()
                 
-                // Text sits glowPad pixels in from the left edge so glow can spill freely
-                let textRect = NSRect(x: glowPad, y: (20 - textSize.height) / 2, width: textSize.width, height: textSize.height)
-                
                 var grayAttributes = attributes
                 grayAttributes[.foregroundColor] = NSColor.white.withAlphaComponent(0.4)
-                currentLineText.draw(in: textRect, withAttributes: grayAttributes)
+                
+                let textRect1 = NSRect(x: glowPad + marqueeOffset, y: (20 - textSize.height) / 2, width: textSize.width, height: textSize.height)
+                currentLineText.draw(in: textRect1, withAttributes: grayAttributes)
+                
+                if isMarquee {
+                    let textRect2 = NSRect(x: glowPad + marqueeOffset + cycleWidth, y: (20 - textSize.height) / 2, width: textSize.width, height: textSize.height)
+                    currentLineText.draw(in: textRect2, withAttributes: grayAttributes)
+                }
                 
                 // Target alpha based on progress
                 let targetOrbAlpha: CGFloat = (progress > 0.0 && progress < 1.0) ? 1.0 : 0.0
@@ -344,13 +375,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 if progress > 0 || animatedOrbAlpha > 0.01 {
                     let clampedProgress = min(1.0, progress)
-                    let currentX = glowPad + textSize.width * CGFloat(clampedProgress)
+                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress)
                     
-                    // To avoid text ghosting from CGContext transparency layers, we draw the white text into a separate NSImage
                     let whiteImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
                     whiteImage.lockFocus()
                     
-                    // Draw white text with bloom (shadow)
                     let shadow = NSShadow()
                     shadow.shadowColor = NSColor.white.withAlphaComponent(0.6)
                     shadow.shadowOffset = .zero
@@ -359,28 +388,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     var whiteAttributes = attributes
                     whiteAttributes[.foregroundColor] = NSColor.white
-                    currentLineText.draw(in: textRect, withAttributes: whiteAttributes)
+                    currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
-                    // Apple Music fade effect using compositing
+                    if isMarquee {
+                        let textRect2 = NSRect(x: glowPad + marqueeOffset + cycleWidth, y: (20 - textSize.height) / 2, width: textSize.width, height: textSize.height)
+                        currentLineText.draw(in: textRect2, withAttributes: whiteAttributes)
+                    }
+                    
                     let fadeWidth: CGFloat = 20
-                    
-                    // 1. Clear everything after currentX
                     NSGraphicsContext.current?.compositingOperation = .copy
                     NSColor.clear.setFill()
-                    NSRect(x: currentX, y: 0, width: animatedWidth - currentX, height: 20).fill()
                     
-                    // 2. Fade the edge using destinationIn
+                    // Clear un-sung parts for copy 1
+                    let copy1End = glowPad + marqueeOffset + textSize.width
+                    if currentX1 < copy1End {
+                        NSRect(x: currentX1, y: 0, width: copy1End - currentX1, height: 20).fill()
+                    }
+                    
+                    // Clear un-sung parts for copy 2
+                    if isMarquee {
+                        let currentX2 = currentX1 + cycleWidth
+                        let copy2End = copy1End + cycleWidth
+                        if currentX2 < copy2End {
+                            NSRect(x: currentX2, y: 0, width: copy2End - currentX2, height: 20).fill()
+                        }
+                    }
+                    
+                    // Fade edges
                     NSGraphicsContext.current?.compositingOperation = .destinationIn
                     if let gradient = NSGradient(colors: [.white, .clear]) {
-                        gradient.draw(from: NSPoint(x: currentX - fadeWidth, y: 0), to: NSPoint(x: currentX, y: 0), options: [])
+                        gradient.draw(from: NSPoint(x: currentX1 - fadeWidth, y: 0), to: NSPoint(x: currentX1, y: 0), options: [])
+                        if isMarquee {
+                            let currentX2 = currentX1 + cycleWidth
+                            gradient.draw(from: NSPoint(x: currentX2 - fadeWidth, y: 0), to: NSPoint(x: currentX2, y: 0), options: [])
+                        }
                     }
                     
                     whiteImage.unlockFocus()
                     
-                    // Draw the final white masked image over the base image
                     NSGraphicsContext.current?.saveGraphicsState()
                     NSGraphicsContext.current?.compositingOperation = .sourceOver
                     whiteImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
+                    NSGraphicsContext.current?.restoreGraphicsState()
+                }
+                
+                // Marquee Edge Masking to prevent text spilling out of the bounds
+                if isMarquee {
+                    NSGraphicsContext.current?.saveGraphicsState()
+                    NSGraphicsContext.current?.compositingOperation = .destinationIn
+                    if let gradientLeft = NSGradient(colors: [.clear, .white]),
+                       let gradientRight = NSGradient(colors: [.white, .clear]) {
+                        gradientLeft.draw(from: NSPoint(x: 0, y: 0), to: NSPoint(x: 16, y: 0), options: [])
+                        gradientRight.draw(from: NSPoint(x: animatedWidth - 16, y: 0), to: NSPoint(x: animatedWidth, y: 0), options: [])
+                        NSColor.white.setFill()
+                        NSRect(x: 16, y: 0, width: animatedWidth - 32, height: 20).fill()
+                    }
                     NSGraphicsContext.current?.restoreGraphicsState()
                 }
                 
@@ -408,7 +470,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         
                         let delay = Double(rt) * 4.5 // 0 to 4.5s
                         let duration = 0.5 + Double(rd) * 0.7 // 0.5 to 1.2s
-                        let center = NSPoint(x: 8.0 + textW * rx, y: 6.0 + 8.0 * ry) // Constrained to avoid clipping
+                        let center = NSPoint(x: glowPad + marqueeOffset + textW * rx, y: 6.0 + 8.0 * ry) // Constrained to avoid clipping
                         let sizeMult = 0.7 + rs * 0.5 // 0.7 to 1.2
                         
                         let sp = max(0, min(1, (cycleTime - delay) / duration))
