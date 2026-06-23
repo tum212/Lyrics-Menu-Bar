@@ -28,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var lyricsStatusItem: NSStatusItem!
     var artStatusItem: NSStatusItem!
     var updateTimer: Timer?
+    var displayLink: CVDisplayLink?
     private var cachedAlbumArtURL: String?
     private var cachedAlbumArtImage: NSImage?
     private var cachedBlurredAlbumArtImage: NSImage?
@@ -139,12 +140,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func startMenuBarUpdater() {
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
-            self?.updateMenuBar()
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let displayLink = link else {
+            // Fallback
+            updateTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
+                self?.updateMenuBar()
+            }
+            if let timer = updateTimer {
+                RunLoop.current.add(timer, forMode: .common)
+            }
+            return
         }
-        if let timer = updateTimer {
-            RunLoop.current.add(timer, forMode: .common)
+        self.displayLink = displayLink
+        
+        let displayLinkOutputCallback: CVDisplayLinkOutputCallback = { (displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext) -> CVReturn in
+            let appDelegate = unsafeBitCast(displayLinkContext, to: AppDelegate.self)
+            DispatchQueue.main.async {
+                appDelegate.updateMenuBar()
+            }
+            return kCVReturnSuccess
         }
+        
+        CVDisplayLinkSetOutputCallback(displayLink, displayLinkOutputCallback, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
+        CVDisplayLinkStart(displayLink)
     }
     
     private func runAudioDiagnostics() {
@@ -462,16 +481,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                     
-                    // Add brilliant glowing halo effect requested by user (1.5 layers white)
-                    let outerShadow = NSShadow()
-                    outerShadow.shadowColor = NSColor.white.withAlphaComponent(0.5 * alphaNew)
-                    outerShadow.shadowOffset = .zero
-                    outerShadow.shadowBlurRadius = 5
-                    outerShadow.set()
-                    currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
-                    
+                    // 1. Base Sung Text (1x glow)
                     let innerShadow = NSShadow()
-                    innerShadow.shadowColor = NSColor.white.withAlphaComponent(0.9 * alphaNew)
+                    innerShadow.shadowColor = NSColor.white.withAlphaComponent(0.8 * alphaNew)
                     innerShadow.shadowOffset = .zero
                     innerShadow.shadowBlurRadius = 2
                     innerShadow.set()
@@ -493,9 +505,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     whiteImage.unlockFocus()
                     
+                    // 2. The "Current Word" Extra Halo (0.5x)
+                    let haloImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
+                    haloImage.lockFocus()
+                    if let ctx = NSGraphicsContext.current?.cgContext {
+                        ctx.setAllowsFontSubpixelPositioning(true)
+                        ctx.setShouldSubpixelPositionFonts(true)
+                        ctx.setAllowsFontSubpixelQuantization(true)
+                        ctx.setShouldSubpixelQuantizeFonts(false)
+                    }
+                    let outerShadow = NSShadow()
+                    outerShadow.shadowColor = NSColor.white.withAlphaComponent(0.6 * alphaNew)
+                    outerShadow.shadowOffset = .zero
+                    outerShadow.shadowBlurRadius = 6
+                    outerShadow.set()
+                    currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
+                    
+                    NSGraphicsContext.current?.compositingOperation = .copy
+                    NSColor.clear.setFill()
+                    if currentX1 < copy1End {
+                        NSRect(x: currentX1, y: 0, width: copy1End - currentX1, height: 20).fill()
+                    }
+                    
+                    // Mask the halo to ONLY appear near currentX1!
+                    NSGraphicsContext.current?.compositingOperation = .destinationIn
+                    if let haloMask = NSGradient(colors: [.clear, .white, .clear]) {
+                        haloMask.draw(from: NSPoint(x: currentX1 - 35, y: 0), to: NSPoint(x: currentX1 + 10, y: 0), options: [])
+                    }
+                    haloImage.unlockFocus()
+                    
                     NSGraphicsContext.current?.saveGraphicsState()
                     NSGraphicsContext.current?.compositingOperation = .sourceOver
                     whiteImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
+                    haloImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
                     NSGraphicsContext.current?.restoreGraphicsState()
                 }
                 
