@@ -387,6 +387,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 lyricsImage.isTemplate = false
                 lyricsImage.lockFocus()
                 
+                // --- ENABLE SUBPIXEL SMOOTHING FOR ZERO STUTTER ---
+                if let ctx = NSGraphicsContext.current?.cgContext {
+                    ctx.setAllowsFontSubpixelPositioning(true)
+                    ctx.setShouldSubpixelPositionFonts(true)
+                    ctx.setAllowsFontSubpixelQuantization(true)
+                    ctx.setShouldSubpixelQuantizeFonts(false) // Disable pixel-grid snapping for butter-smooth scrolling!
+                }
+                
                 let yOffsetOld = transitionProgress * 15.0
                 let alphaOld = max(0.0, 1.0 - transitionProgress)
                 
@@ -426,14 +434,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let whiteImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
                     whiteImage.lockFocus()
                     
-                    let shadow = NSShadow()
-                    shadow.shadowColor = NSColor.white.withAlphaComponent(0.6 * alphaNew)
-                    shadow.shadowOffset = .zero
-                    shadow.shadowBlurRadius = 3
-                    shadow.set()
+                    // --- ENABLE SUBPIXEL SMOOTHING FOR ZERO STUTTER ---
+                    if let ctx = NSGraphicsContext.current?.cgContext {
+                        ctx.setAllowsFontSubpixelPositioning(true)
+                        ctx.setShouldSubpixelPositionFonts(true)
+                        ctx.setAllowsFontSubpixelQuantization(true)
+                        ctx.setShouldSubpixelQuantizeFonts(false)
+                    }
                     
                     var whiteAttributes = attributes
                     whiteAttributes[.foregroundColor] = NSColor.white.withAlphaComponent(alphaNew)
+                    
+                    // Add brilliant glowing halo effect requested by user
+                    let outerShadow = NSShadow()
+                    outerShadow.shadowColor = NSColor.cyan.withAlphaComponent(0.8 * alphaNew)
+                    outerShadow.shadowOffset = .zero
+                    outerShadow.shadowBlurRadius = 6
+                    outerShadow.set()
+                    currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
+                    
+                    let innerShadow = NSShadow()
+                    innerShadow.shadowColor = NSColor.white.withAlphaComponent(1.0 * alphaNew)
+                    innerShadow.shadowOffset = .zero
+                    innerShadow.shadowBlurRadius = 2
+                    innerShadow.set()
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
                     NSGraphicsContext.current?.compositingOperation = .copy
