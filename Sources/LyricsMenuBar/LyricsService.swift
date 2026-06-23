@@ -135,8 +135,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         do {
             let (data, response) = try await session.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                print("LRCLib Search failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
-                return []
+                throw URLError(.badServerResponse)
             }
             struct LRCResult: Decodable { let syncedLyrics: String?; let plainLyrics: String? }
             let results = try JSONDecoder().decode([LRCResult].self, from: data)
@@ -148,7 +147,20 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
                 return parsePlain(plain.plainLyrics!)
             }
         } catch {
-            print("LRCLib Search error: \(error)")
+            print("LRCLib Search URLSession failed: \(error). Falling back to curl...")
+            // Fallback to curl to bypass any strict OS-level SSL or URLSession issues
+            if let output = try? await runCurl(urlStr) {
+                struct LRCResult: Decodable { let syncedLyrics: String?; let plainLyrics: String? }
+                if let data = output.data(using: .utf8),
+                   let results = try? JSONDecoder().decode([LRCResult].self, from: data) {
+                    if let synced = results.first(where: { $0.syncedLyrics?.isEmpty == false }) {
+                        return parseLRC(synced.syncedLyrics!)
+                    }
+                    if let plain = results.first(where: { $0.plainLyrics?.isEmpty == false }) {
+                        return parsePlain(plain.plainLyrics!)
+                    }
+                }
+            }
         }
         return []
     }
@@ -169,17 +181,50 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         do {
             let (data, response) = try await session.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                print("LRCLib Get failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
-                return [] 
+                throw URLError(.badServerResponse)
             }
             struct LRCResult: Decodable { let syncedLyrics: String?; let plainLyrics: String? }
             let result = try JSONDecoder().decode(LRCResult.self, from: data)
             if let synced = result.syncedLyrics, !synced.isEmpty { return parseLRC(synced) }
             if let plain = result.plainLyrics, !plain.isEmpty { return parsePlain(plain) }
         } catch {
-            print("LRCLib Get error: \(error)")
+            print("LRCLib Get URLSession failed: \(error). Falling back to curl...")
+            if let output = try? await runCurl(urlStr) {
+                struct LRCResult: Decodable { let syncedLyrics: String?; let plainLyrics: String? }
+                if let data = output.data(using: .utf8),
+                   let result = try? JSONDecoder().decode(LRCResult.self, from: data) {
+                    if let synced = result.syncedLyrics, !synced.isEmpty { return parseLRC(synced) }
+                    if let plain = result.plainLyrics, !plain.isEmpty { return parsePlain(plain) }
+                }
+            }
         }
         return []
+    }
+    
+    private func runCurl(_ urlString: String) async throws -> String {
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+            process.arguments = ["-k", "-s", "-m", "10",
+                "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                urlString]
+            
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let output = String(data: data, encoding: .utf8) {
+                    continuation.resume(returning: output)
+                } else {
+                    continuation.resume(throwing: URLError(.cannotDecodeContentData))
+                }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
     }
     
     // MARK: - Source 4 & 5: lyrics.ovh (unsynced)

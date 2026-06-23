@@ -61,8 +61,11 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
         bandGains = [Float](repeating: 0.05, count: count)
     }
 
+    private var isRequestingAccess = false
+
     public func start() {
         guard !isRunning else { return }
+        guard !isRequestingAccess else { return }
 
         #if os(macOS)
         // Always request mic permission first because macOS requires it for ALL audio input streams (including virtual ones like BlackHole)
@@ -70,9 +73,11 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
         case .authorized:
             setupAudio()
         case .notDetermined:
+            isRequestingAccess = true
             print("🎙️ Microphone permission not determined — requesting access...")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
+                    self?.isRequestingAccess = false
                     if granted {
                         print("✅ Microphone permission granted")
                         self?.setupAudio()
