@@ -317,9 +317,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         let nextStart = allLyrics[currentIndex + 1].time
                         let rawDuration = max(0.1, nextStart - currentStart)
                         
-                        // Cap duration to a realistic singing speed (~0.15s per char)
-                        let estimatedSingingTime = Double(currentLineText.count) * 0.15
-                        let activeDuration = min(rawDuration, max(1.5, estimatedSingingTime))
+                        // Estimate actual singing time (approx 12.5 chars per second)
+                        let estimatedSingingTime = max(1.0, Double(currentLineText.count) * 0.08)
+                        let activeDuration = min(rawDuration, estimatedSingingTime)
                         
                         progress = max(0, min(1, (time - currentStart) / activeDuration))
                     } else {
@@ -351,11 +351,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Pan logic synced perfectly with lyrics progress
             var targetOffset: CGFloat = 0.0
             if isMarquee {
-                let maxScroll = fullTextWidth - maxAllowedWidth
-                targetOffset = -(maxScroll * CGFloat(progress))
+                let scrollPadding: CGFloat = 20.0
+                let maxScroll = fullTextWidth - maxAllowedWidth + scrollPadding * 2
+                
+                // Sine easing for ultra-smooth start/stop
+                let smoothedProgress = -(cos(Double.pi * progress) - 1.0) / 2.0
+                targetOffset = scrollPadding - (maxScroll * CGFloat(smoothedProgress))
             }
-            // Lerp marqueeOffset for buttery smoothness
-            marqueeOffset += (targetOffset - marqueeOffset) * 0.15
+            // Set directly to track absolute time for perfect zero-stutter smoothness
+            marqueeOffset = targetOffset
             
             if animatedWidth > 2 {
                 let lyricsImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
@@ -430,7 +434,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 
                 // Always apply Edge Masking for a premium fade at the boundaries
-                if animatedWidth > 16 {
+                let needsMask = isMarquee || transitionProgress < 1.0
+                if animatedWidth > 16 && needsMask {
                     NSGraphicsContext.current?.saveGraphicsState()
                     NSGraphicsContext.current?.compositingOperation = .destinationIn
                     if let gradientLeft = NSGradient(colors: [.clear, .white]),
