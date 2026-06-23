@@ -25,7 +25,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        return URLSession(configuration: config, delegate: SSLBypassDelegate(), delegateQueue: nil)
+        return URLSession(configuration: config, delegate: InsecureSessionDelegate(), delegateQueue: nil)
     }()
     
     public init() {}
@@ -214,8 +214,8 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
             
             do {
                 try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile() // Read BEFORE waitUntilExit to prevent deadlock
                 process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let output = String(data: data, encoding: .utf8) {
                     continuation.resume(returning: output)
                 } else {
@@ -297,9 +297,10 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     }
 }
 
-final class SSLBypassDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+final class InsecureSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if let trust = challenge.protectionSpace.serverTrust {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust {
             completionHandler(.useCredential, URLCredential(trust: trust))
             return
         }

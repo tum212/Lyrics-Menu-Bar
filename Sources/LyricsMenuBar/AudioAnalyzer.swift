@@ -108,8 +108,19 @@ public final class AudioAnalyzer: ObservableObject, @unchecked Sendable {
         }
     }
     
+    private var lastRestartTime: Date = .distantPast
+
     private func restartEngine() {
         guard isRunning else { return }
+        
+        // Prevent rapid restart loops
+        let now = Date()
+        guard now.timeIntervalSince(lastRestartTime) > 2.0 else {
+            print("⚠️ Skipping rapid engine restart")
+            return
+        }
+        lastRestartTime = now
+        
         stop()
         start()
     }
