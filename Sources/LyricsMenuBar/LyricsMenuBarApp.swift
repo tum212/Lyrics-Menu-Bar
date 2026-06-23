@@ -448,9 +448,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 if progress > 0 || animatedOrbAlpha > 0.01 {
                     let clampedProgress = min(1.0, progress)
-                    let fadeWidth: CGFloat = 20
-                    // Push the highlight forward based on progress so it clears the text entirely at 1.0
-                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress) + fadeWidth * CGFloat(clampedProgress)
+                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress)
                     
                     let whiteImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
                     whiteImage.lockFocus()
@@ -489,9 +487,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
+                    let fadeWidth: CGFloat = 20
+                    NSGraphicsContext.current?.compositingOperation = .copy
+                    NSColor.clear.setFill()
+                    
+                    // Clear un-sung parts
+                    let copy1End = glowPad + marqueeOffset + textSize.width
+                    if currentX1 < copy1End {
+                        NSRect(x: currentX1, y: 0, width: copy1End - currentX1, height: 20).fill()
+                    }
+                    
                     NSGraphicsContext.current?.compositingOperation = .destinationIn
                     if let gradient = NSGradient(colors: [.white, .clear]) {
-                        gradient.draw(from: NSPoint(x: currentX1 - fadeWidth, y: 0), to: NSPoint(x: currentX1, y: 0), options: [.drawsBeforeStartingLocation])
+                        gradient.draw(from: NSPoint(x: currentX1 - fadeWidth, y: 0), to: NSPoint(x: currentX1, y: 0), options: [])
                     }
                     
                     whiteImage.unlockFocus()
