@@ -50,6 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var oldMarqueeOffset: CGFloat = 0.0
     var oldLineText: String = ""
     var transitionProgress: CGFloat = 1.0
+    var lastFrameTime: Date = Date()
     
     // Waveform Motion Blur State
     var lastAmplitudes: [Double] = []
@@ -195,6 +196,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func updateMenuBar() {
+        let now = Date()
+        var deltaTime = now.timeIntervalSince(lastFrameTime)
+        lastFrameTime = now
+        if deltaTime > 0.1 { deltaTime = 0.016 } // Cap deltaTime to prevent huge jumps if app lagged
+        
         let waveformBars = UserDefaults.standard.integer(forKey: "waveformBars")
         let showAlbumArt = UserDefaults.standard.bool(forKey: "showAlbumArt")
         let showLyrics = UserDefaults.standard.bool(forKey: "showLyrics")
@@ -345,7 +351,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let oldRequired = oldTextSize.width + glowPad * 2 + scrollPadding * 2
                 activeTargetWidth = max(targetWidth, min(oldRequired, maxAllowedWidth))
             }
-            animatedWidth += (activeTargetWidth - animatedWidth) * 0.2
+            let widthSmoothing = CGFloat(1.0 - exp(-10.0 * deltaTime))
+            animatedWidth += (activeTargetWidth - animatedWidth) * widthSmoothing
             
             var targetOffset: CGFloat = scrollPadding
             if isMarquee {
@@ -367,12 +374,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             
             if transitionProgress < 1.0 {
-                transitionProgress += 0.08
+                transitionProgress += CGFloat(deltaTime / 0.2)
                 if transitionProgress > 1.0 { transitionProgress = 1.0 }
             }
             
             // Lerp marqueeOffset to smooth out AppleScript polling jitter
-            marqueeOffset += (targetOffset - marqueeOffset) * 0.2
+            let offsetSmoothing = CGFloat(1.0 - exp(-15.0 * deltaTime))
+            marqueeOffset += (targetOffset - marqueeOffset) * offsetSmoothing
             
             if animatedWidth > 2 {
                 let lyricsImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
@@ -406,11 +414,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 // Target alpha based on progress
                 let targetOrbAlpha: CGFloat = (progress > 0.0 && progress < 1.0) ? 1.0 : 0.0
-                animatedOrbAlpha += (targetOrbAlpha - animatedOrbAlpha) * 0.15
+                let alphaSmoothing = CGFloat(1.0 - exp(-15.0 * deltaTime))
+                animatedOrbAlpha += (targetOrbAlpha - animatedOrbAlpha) * alphaSmoothing
                 
                 if progress > 0 || animatedOrbAlpha > 0.01 {
                     let clampedProgress = min(1.0, progress)
-                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress)
+                    let fadeWidth: CGFloat = 20
+                    // Push the highlight forward based on progress so it clears the text entirely at 1.0
+                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress) + fadeWidth * CGFloat(clampedProgress)
                     
                     let whiteImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
                     whiteImage.lockFocus()
@@ -425,7 +436,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     whiteAttributes[.foregroundColor] = NSColor.white.withAlphaComponent(alphaNew)
                     currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
                     
-                    let fadeWidth: CGFloat = 20
                     NSGraphicsContext.current?.compositingOperation = .copy
                     NSColor.clear.setFill()
                     
