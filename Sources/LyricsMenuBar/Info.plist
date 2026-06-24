@@ -20,13 +20,13 @@
 	<string>APPL</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Lyrics Menu Bar ต้องการสิทธิ์เข้าถึง Microphone เพื่อแสดงภาพเสียงแบบ real-time — ไม่มีการบันทึกเสียงใดๆ</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Lyrics Menu Bar requires audio access to visualize live sound as a waveform.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Lyrics Menu Bar ต้องการสิทธิ์ควบคุม Spotify เพื่อแสดงชื่อเพลง เนื้อร้อง และควบคุม playback บน Menu Bar</string>
 	<key>NSAppleScriptEnabled</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
+	<string>13.0</string>
 </dict>
 </plist>

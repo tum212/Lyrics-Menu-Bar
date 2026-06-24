@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 
 enum DiagnosticIssueType {
-    case missingBlackHole
     case notDefaultInput
     case silentAudio
 }
@@ -66,8 +65,6 @@ struct DiagnosticView: View {
     
     private var descriptionText: String {
         switch issueType {
-        case .missingBlackHole:
-            return "We couldn't find BlackHole 2ch on your Mac.\n\nTo enable live waveforms and haptic feedback, you need to install the BlackHole virtual audio driver."
         case .notDefaultInput:
             return "BlackHole 2ch is installed, but it's not set as your Default Input device.\n\nPlease open Sound Settings and select BlackHole 2ch as your Input to allow the app to analyze the audio."
         case .silentAudio:
@@ -77,7 +74,6 @@ struct DiagnosticView: View {
     
     private var resolveButtonText: String {
         switch issueType {
-        case .missingBlackHole: return "Download BlackHole"
         case .notDefaultInput: return "Open Sound Settings"
         case .silentAudio: return "Open Audio MIDI Setup"
         }
@@ -125,10 +121,6 @@ class DiagnosticWindowManager {
     
     private func handleResolve(issue: DiagnosticIssueType) {
         switch issue {
-        case .missingBlackHole:
-            if let url = URL(string: "https://existential.audio/blackhole/") {
-                NSWorkspace.shared.open(url)
-            }
         case .notDefaultInput:
             let url = URL(fileURLWithPath: "/System/Library/PreferencePanes/Sound.prefPane")
             NSWorkspace.shared.open(url)
@@ -139,7 +131,7 @@ class DiagnosticWindowManager {
         closeWindow()
     }
     
-    private func closeWindow() {
+    func closeWindow() {
         window?.close()
         window = nil
     }
