@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "LyricsMenuBar",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v12)
     ],
     targets: [
         .executableTarget(

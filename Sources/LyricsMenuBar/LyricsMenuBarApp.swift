@@ -90,7 +90,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: Notification.Name("AudioFeaturesDisabled"), object: nil, queue: .main) { [weak self] _ in
             self?.audioAnalyzer.stop()
         }
-
+        
+        if UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
+            runAudioDiagnostics()
+        }
         
         self.artStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = self.artStatusItem.button {
@@ -162,7 +165,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CVDisplayLinkSetOutputCallback(displayLink, displayLinkOutputCallback, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
         CVDisplayLinkStart(displayLink)
     }
-
+    
+    private func runAudioDiagnostics() {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var dataSize: UInt32 = 0
+        AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize)
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, &ids)
+        
+        var foundBlackHole = false
+        var blackHoleID: AudioDeviceID = 0
+        
+        for id in ids {
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            var name: Unmanaged<CFString>?
+            var nameAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceNameCFString, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            if AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nameSize, &name) == noErr, let cfName = name?.takeRetainedValue(), (cfName as String).lowercased().contains("blackhole") {
+                foundBlackHole = true
+                blackHoleID = id
+                break
+            }
+        }
+        
+        if !foundBlackHole {
+            DiagnosticWindowManager.shared.showDiagnostic(issue: .silentAudio)
+            return
+        }
+        
+        var defaultInputID: AudioDeviceID = 0
+        var inputSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var inputAddr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &inputAddr, 0, nil, &inputSize, &defaultInputID)
+        
+        if defaultInputID != blackHoleID {
+            DiagnosticWindowManager.shared.showDiagnostic(issue: .notDefaultInput)
+        }
+    }
     
     func roundCorners(of image: NSImage, size: NSSize, radius: CGFloat) -> NSImage {
         let roundedImage = NSImage(size: size)
