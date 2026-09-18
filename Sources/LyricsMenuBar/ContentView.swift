@@ -1,25 +1,13 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Native macOS Blur
-struct VisualEffectView: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .popover
-        view.blendingMode = .behindWindow
-        view.state = .active
-        return view
-    }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.state = .active
-    }
-}
-
 // MARK: - Main View
 struct ContentView: View {
     @ObservedObject var spotify: SpotifyService
     @ObservedObject var lyricsService: LyricsService
     @ObservedObject var audioAnalyzer: AudioAnalyzer
+
+    @Environment(\.colorScheme) var colorScheme
 
     // Track which lyric index is active for scroll animation
     @State private var displayedIndex: Int = 0
@@ -32,173 +20,147 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            HStack(spacing: 24) {
-                // MARK: Left Panel - Player (120px wide, scaled down)
+            // Unified single-piece Optical Liquid Glass surface
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .white.opacity(0.55), location: 0.0),
+                                    .init(color: .white.opacity(0.20), location: 0.25),
+                                    .init(color: .white.opacity(0.06), location: 0.65),
+                                    .init(color: .white.opacity(0.28), location: 1.0)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.0
+                        )
+                )
+
+            // Single unified content container - NO inner cards
+            HStack(spacing: 20) {
+                // MARK: Left Column - Player Info (130pt)
                 VStack(spacing: 0) {
                     // Album Art
                     Group {
-                        if let track = spotify.currentTrack,
-                           let urlString = track.artworkURL,
-                           let url = URL(string: urlString) {
-                            AsyncImage(url: url) { phase in
-                                if let image = phase.image {
-                                    image.resizable().aspectRatio(contentMode: .fill)
-                                } else {
-                                    placeholderArt
+                        if let track = spotify.currentTrack {
+                            if let directImage = track.artworkImage {
+                                Image(nsImage: directImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            } else if let urlString = track.artworkURL, let url = URL(string: urlString) {
+                                AsyncImage(url: url) { phase in
+                                    if let image = phase.image {
+                                        image.resizable().aspectRatio(contentMode: .fill)
+                                    } else {
+                                        placeholderArt
+                                    }
                                 }
+                            } else {
+                                placeholderArt
                             }
                         } else {
                             placeholderArt
                         }
                     }
-                    .frame(width: 120, height: 120)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .shadow(color: Color.black.opacity(0.4), radius: 10, x: 0, y: 5)
+                    .frame(width: 116, height: 116)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 4)
 
                     Spacer().frame(height: 10)
 
-                    // Track Info (Centered)
-                    VStack(spacing: 2) {
-                        Text(spotify.currentTrack?.name ?? "No Music Playing")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .multilineTextAlignment(.center)
+                    // Track Info
+                    Text(spotify.currentTrack?.name ?? "No Music Playing")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 130, alignment: .center)
 
-                        Text(spotify.currentTrack?.artist ?? "Open Spotify to start")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.white.opacity(0.6))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(width: 120, alignment: .center)
+                    Text(spotify.currentTrack?.artist ?? "Open Spotify or Apple Music")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 130, alignment: .center)
 
                     Spacer().frame(height: 10)
 
-                    // Playback Controls — perfectly centered
-                    HStack(spacing: 0) {
-                        Spacer(minLength: 0)
+                    // Playback Controls
+                    HStack(spacing: 16) {
                         Button(action: { spotify.previousTrack() }) {
-                            Image(systemName: "backward.fill").font(.system(size: 14))
+                            Image(systemName: "backward.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.white)
                         }
                         .buttonStyle(PlainButtonStyle()).focusable(false)
-
-                        Spacer(minLength: 0)
 
                         Button(action: { spotify.playPause() }) {
                             Image(systemName: spotify.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 20))
+                                .font(.system(size: 24))
+                                .foregroundColor(.white)
+                                .frame(width: 24)
                         }
                         .buttonStyle(PlainButtonStyle()).focusable(false)
-
-                        Spacer(minLength: 0)
 
                         Button(action: { spotify.nextTrack() }) {
-                            Image(systemName: "forward.fill").font(.system(size: 14))
+                            Image(systemName: "forward.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.white)
                         }
                         .buttonStyle(PlainButtonStyle()).focusable(false)
-
-                        Spacer(minLength: 0)
                     }
-                    .foregroundColor(.white)
-                    .frame(width: 120)
                 }
-                .frame(width: 120)
+                .frame(width: 130)
 
-                // MARK: Right Panel - Lyrics with scroll animation
+                // Delicate vertical glass divider
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [.clear, .white.opacity(0.15), .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: 1, height: 190)
+
+                // MARK: Right Column - Continuous Lyrics Stream
                 TimelineView(.animation) { timeline in
                     lyricsPanel(currentDate: timeline.date)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 24)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
             .frame(width: 480, height: 240)
 
-            // Top Right Controls
+            // Top Right Controls (Glass Buttons)
             HStack(spacing: 8) {
-                Menu {
-                    Toggle("Lyrics in Menu Bar", isOn: $showLyrics)
-                    Toggle(isOn: $showAlbumArt) {
-                        Text("Album Cover")
-                    }
-                    
-                    Divider()
-                        
-                        Toggle(isOn: $hapticEnabled) {
-                            Text("Trackpad Haptics")
-                        }
-                        Picker("Waveform", selection: $waveformBars) {
-                            Text("Waveform: Off").tag(0)
-                            Text("Waveform: 6 Bars").tag(6)
-                            Text("Waveform: 10 Bars").tag(10)
-                            Text("Waveform: 14 Bars").tag(14)
-                            Text("Waveform: 24 Bars").tag(24)
-                            Text("Waveform: 32 Bars").tag(32)
-                            Text("Waveform: 48 Bars").tag(48)
-                            Text("Waveform: 128 Bars").tag(128)
-                        }
-                        .pickerStyle(.inline)
-                        
-                        Divider()
-                        
-                        Button("Quit LyricsMenuBar") {
-                            NSApplication.shared.terminate(nil)
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(Color.white.opacity(0.8))
-                            .frame(width: 28, height: 28)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .menuStyle(BorderlessButtonMenuStyle())
+                NativeSettingsMenu()
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
                     .menuIndicator(.hidden)
                     .fixedSize()
 
-                    Button(action: { NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil) }) {
-                        Image(systemName: "chevron.up")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(Color.white.opacity(0.8))
-                            .frame(width: 28, height: 28)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .focusable(false)
+                Button(action: { NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil) }) {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white.opacity(0.85))
+                        .frame(width: 26, height: 26)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
                 }
-                .padding([.top, .trailing], 16)
-        }
-        // Dynamic Blurred Album Art Background
-        .background(
-            ZStack {
-                VisualEffectView().ignoresSafeArea()
-                if let track = spotify.currentTrack,
-                   let urlString = track.artworkURL,
-                   let url = URL(string: urlString) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image {
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .blur(radius: 60)
-                                .opacity(0.8)
-                        }
-                    }
-                    .frame(width: 480, height: 240)
-                    .clipped()
-                    .ignoresSafeArea()
-
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.15), Color.black.opacity(0.65)],
-                        startPoint: .top, endPoint: .bottom
-                    ).ignoresSafeArea()
-                } else {
-                    Color.black.opacity(0.5).ignoresSafeArea()
-                }
+                .buttonStyle(PlainButtonStyle())
+                .focusable(false)
             }
-        )
+            .padding([.top, .trailing], 14)
+        }
         .onChange(of: spotify.currentTrack?.id) { [spotify] _ in
+            LyricLineLayoutCache.shared.clear()
             if let track = spotify.currentTrack {
                 lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
             } else {
@@ -206,15 +168,19 @@ struct ContentView: View {
             }
             displayedIndex = 0
         }
+        .onChange(of: lyricsService.lyrics.count) { _ in
+            LyricLineLayoutCache.shared.clear()
+        }
         .onChange(of: spotify.isPlaying) { [spotify] _ in
             if spotify.isPlaying { audioAnalyzer.start() } else { audioAnalyzer.stop() }
         }
         .onAppear {
             if spotify.isPlaying { audioAnalyzer.start() }
         }
+        .background(Color.clear)
     }
 
-    // MARK: - Lyrics Panel with Apple Music style scroll
+    // MARK: - Lyrics Panel with Apple Music style scroll & Click-to-Seek
     @ViewBuilder
     private func lyricsPanel(currentDate: Date) -> some View {
         let info = getActiveLyricsInfo(currentDate: currentDate)
@@ -223,43 +189,48 @@ struct ContentView: View {
         if allLyrics.isEmpty {
             Text(lyricsService.isLoading ? "Loading lyrics..." : (spotify.isPlaying ? "♪" : ""))
                 .font(.system(size: 18, weight: .medium))
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundColor(.white.opacity(0.65))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         } else {
-            // Find current index in full lyrics array
             let activeIdx = allLyrics.firstIndex(where: { $0.id == info.activeId }) ?? 0
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(allLyrics.enumerated()), id: \.element.id) { idx, line in
                             let isActive = line.id == info.activeId
                             let isPast = idx < activeIdx
 
-                            Group {
-                                if isActive {
-                                    // Active line with growing light effect
-                                    ActiveLyricView(text: line.text, progress: info.progress)
-                                } else {
-                                    Text(line.text)
-                                        .font(.system(size: 22, weight: .bold))
-                                        .foregroundColor(isPast ? .white.opacity(0.2) : .white.opacity(0.35))
-                                        .fixedSize(horizontal: false, vertical: true)
+                            LyricLineRowView(
+                                line: line,
+                                isActive: isActive,
+                                isPast: isPast,
+                                currentTime: info.currentTime,
+                                fallbackProgress: info.progress,
+                                isUnsynced: info.isUnsynced,
+                                onSeek: {
+                                    let seekTime: TimeInterval
+                                    if line.time > 0 {
+                                        seekTime = line.time
+                                    } else {
+                                        let duration = spotify.currentTrack?.duration ?? 180.0
+                                        seekTime = (Double(idx) / Double(max(1, allLyrics.count))) * duration
+                                    }
+                                    spotify.seek(to: seekTime)
+                                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                                 }
-                            }
+                            )
                             .id(line.id)
-                            .padding(.vertical, 2)
                         }
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 40) // Give shadow room to bleed
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 4)
                 }
-                .padding(.horizontal, -40) // Compensate bounds so ScrollView itself isn't visibly shrunk
-                // Apple Music style: scroll current line to ~30% from top
+                // Apple Music style: scroll current line smoothly to ~35% from top
                 .onChange(of: info.activeId) { [proxy] newId in
                     if let id = newId {
-                        withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-                            proxy.scrollTo(id, anchor: UnitPoint(x: 0, y: 0.3))
+                        withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) {
+                            proxy.scrollTo(id, anchor: UnitPoint(x: 0, y: 0.35))
                         }
                     }
                 }
@@ -296,15 +267,11 @@ struct ContentView: View {
         }
     }
 
-    private func getActiveLyricsInfo(currentDate: Date) -> (lines: [LyricLine], progress: Double, activeId: UUID?) {
-        let rawTime = spotify.isPlaying
-            ? spotify.playbackPosition + currentDate.timeIntervalSince(spotify.lastUpdateDate)
-            : spotify.playbackPosition
-            
-        let time = max(0, rawTime - 0.4)
+    private func getActiveLyricsInfo(currentDate: Date) -> (lines: [LyricLine], progress: Double, activeId: UUID?, activeLine: LyricLine?, currentTime: TimeInterval, isUnsynced: Bool) {
+        let time = spotify.currentTime
 
         let allLyrics = lyricsService.lyrics
-        if allLyrics.isEmpty { return ([], 0.0, nil) }
+        if allLyrics.isEmpty { return ([], 0.0, nil, nil, time, false) }
 
         let isUnsynced = allLyrics.count > 1 && allLyrics.last!.time == 0
         var currentIndex = 0
@@ -316,77 +283,88 @@ struct ContentView: View {
             currentIndex = Int(progress * Double(allLyrics.count))
             if currentIndex >= allLyrics.count { currentIndex = allLyrics.count - 1 }
             progress = 1.0
+            let line = allLyrics[currentIndex]
+            return (allLyrics, progress, line.id, line, time, true)
         } else {
+            // Check if song is still in intro before vocals begin
+            if let firstTime = allLyrics.first?.time, time < firstTime {
+                return (allLyrics, 0.0, nil, nil, time, false)
+            }
+            
             for (index, line) in allLyrics.enumerated() {
                 if line.time <= time { currentIndex = index } else { break }
             }
+            let activeLine = allLyrics[currentIndex]
             if currentIndex < allLyrics.count - 1 {
-                let currentStart = allLyrics[currentIndex].time
+                let currentStart = activeLine.time
                 let nextStart = allLyrics[currentIndex + 1].time
                 let lineDuration = max(0.1, nextStart - currentStart)
                 progress = max(0, min(1, (time - currentStart) / lineDuration))
             } else {
                 progress = 1.0
             }
+            return (allLyrics, progress, activeLine.id, activeLine, time, false)
         }
-
-        return (allLyrics, progress, allLyrics[currentIndex].id)
     }
 }
 
-// MARK: - Active Lyric View (Line-wrapping layout with Orb)
-struct ActiveLyricView: View {
-    let text: String
-    let progress: Double
+// MARK: - Zero-Cost Main Thread Layout Cache (Eliminates frame stutters at 60 FPS)
+@MainActor
+final class LyricLineLayoutCache {
+    static let shared = LyricLineLayoutCache()
+    private var wordsCache: [UUID: [[LyricWord]]] = [:]
+    private var linesCache: [UUID: [String]] = [:]
     
-    var body: some View {
-        let font = NSFont.systemFont(ofSize: 22, weight: .bold)
-        let containerWidth: CGFloat = 288.0
-        let lines = getWrappedLines(text: text, width: containerWidth, font: font)
-        
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(0..<lines.count, id: \.self) { i in
-                let lineText = lines[i]
-                let lineWidth = lineText.size(withAttributes: [.font: font]).width
-                let ls = Double(i) / Double(lines.count)
-                let le = Double(i + 1) / Double(lines.count)
-                
-                // Calculate local progress for this line
-                let rawLp = (progress - ls) / (le - ls)
-                let lp = max(0, min(1, rawLp))
-                
-                ZStack(alignment: .leading) {
-                    // 1. Base Text (Dim)
-                    Text(lineText)
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundColor(.white.opacity(0.3))
-                    
-                    // 2. Highlighted Text (Bright White with soft fade edge)
-                    Text(lineText)
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundColor(.white)
-                        .mask(
-                            HStack(spacing: 0) {
-                                Rectangle().frame(width: max(0, lineWidth * lp - 10))
-                                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                                    .frame(width: 30)
-                                Spacer(minLength: 0)
-                            }
-                        )
-                        // A very subtle bloom to make the text pop, like Apple Music
-                        .shadow(color: .white.opacity(0.4), radius: 4)
-                }
-                .frame(height: 28)
-            }
-        }
-        .frame(width: containerWidth, alignment: .leading)
+    func wrappedWords(for line: LyricLine, width: CGFloat, font: NSFont) -> [[LyricWord]] {
+        if let cached = wordsCache[line.id] { return cached }
+        let result = computeWrappedWords(words: line.words, width: width, font: font)
+        wordsCache[line.id] = result
+        return result
     }
     
-    private func getWrappedLines(text: String, width: CGFloat, font: NSFont) -> [String] {
+    func wrappedLines(for line: LyricLine, width: CGFloat, font: NSFont) -> [String] {
+        if let cached = linesCache[line.id] { return cached }
+        let result = computeWrappedLines(text: line.text, width: width, font: font)
+        linesCache[line.id] = result
+        return result
+    }
+    
+    func clear() {
+        wordsCache.removeAll(keepingCapacity: true)
+        linesCache.removeAll(keepingCapacity: true)
+    }
+    
+    private func computeWrappedWords(words: [LyricWord], width: CGFloat, font: NSFont) -> [[LyricWord]] {
+        var lines: [[LyricWord]] = []
+        var currentLine: [LyricWord] = []
+        var currentLineWidth: CGFloat = 0
+        let spaceWidth = " ".size(withAttributes: [.font: font]).width
+        let safeWidth = max(width - 12.0, 80.0)
+        
+        for word in words {
+            let wordWidth = word.text.size(withAttributes: [.font: font]).width
+            let addedWidth = currentLine.isEmpty ? wordWidth : (spaceWidth + wordWidth)
+            
+            if currentLineWidth + addedWidth > safeWidth && !currentLine.isEmpty {
+                lines.append(currentLine)
+                currentLine = [word]
+                currentLineWidth = wordWidth
+            } else {
+                currentLine.append(word)
+                currentLineWidth += addedWidth
+            }
+        }
+        if !currentLine.isEmpty {
+            lines.append(currentLine)
+        }
+        return lines.isEmpty ? [words] : lines
+    }
+    
+    private func computeWrappedLines(text: String, width: CGFloat, font: NSFont) -> [String] {
         let words = text.split(separator: " ").map(String.init)
         var lines: [String] = []
         var currentLine = ""
-        let safeWidth = max(width, 100)
+        let safeWidth = max(width - 12.0, 80.0)
         
         for word in words {
             let testLine = currentLine.isEmpty ? String(word) : "\(currentLine) \(word)"
@@ -402,6 +380,473 @@ struct ActiveLyricView: View {
             lines.append(currentLine)
         }
         return lines.isEmpty ? [text] : lines
+    }
+}
+
+// MARK: - Unified Lyric Line Row (Apple Music Karaoke + Single-Line + Click-to-Seek)
+struct LyricLineRowView: View {
+    let line: LyricLine
+    let isActive: Bool
+    let isPast: Bool
+    let currentTime: TimeInterval
+    let fallbackProgress: Double
+    let isUnsynced: Bool
+    let onSeek: () -> Void
+    
+    @State private var isHovered = false
+    
+    var body: some View {
+        let font = NSFont.systemFont(ofSize: 20, weight: .bold)
+        let containerWidth: CGFloat = 260.0
+        
+        Group {
+            if isUnsynced {
+                unsyncedView(containerWidth: containerWidth, font: font)
+            } else if !line.words.isEmpty {
+                wordKaraokeView(containerWidth: containerWidth, font: font)
+            } else {
+                fallbackWipeView(containerWidth: containerWidth, font: font)
+            }
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .animation(.easeInOut(duration: 0.35), value: isActive)
+        .onTapGesture {
+            onSeek()
+        }
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func unsyncedView(containerWidth: CGFloat, font: NSFont) -> some View {
+        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: containerWidth, font: font)
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(0..<lines.count, id: \.self) { i in
+                Text(lines[i])
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(isActive ? .white : .white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60)))
+                    .shadow(color: isActive ? .white.opacity(0.40) : .clear, radius: 4)
+                    .frame(height: 28, alignment: .leading)
+            }
+        }
+        .frame(width: containerWidth, alignment: .leading)
+    }
+    
+    @ViewBuilder
+    private func wordKaraokeView(containerWidth: CGFloat, font: NSFont) -> some View {
+        let wrappedLines = LyricLineLayoutCache.shared.wrappedWords(for: line, width: containerWidth, font: font)
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(0..<wrappedLines.count, id: \.self) { lineIdx in
+                let rowWords = wrappedLines[lineIdx]
+                HStack(spacing: 5) {
+                    ForEach(rowWords) { word in
+                        WordLyricItemView(
+                            word: word,
+                            isActive: isActive,
+                            isPast: isPast,
+                            isHovered: isHovered,
+                            currentTime: currentTime,
+                            fontSize: 20,
+                            fontWeight: .bold
+                        )
+                    }
+                }
+            }
+        }
+        .frame(width: containerWidth, alignment: .leading)
+    }
+    
+    @ViewBuilder
+    private func fallbackWipeView(containerWidth: CGFloat, font: NSFont) -> some View {
+        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: containerWidth, font: font)
+        let totalChars = max(1, lines.reduce(0) { $0 + $1.count })
+        
+        var charAccumulator = 0
+        let lineTiming: [(ls: Double, le: Double)] = lines.map { l in
+            let ls = Double(charAccumulator) / Double(totalChars)
+            charAccumulator += l.count
+            let le = Double(charAccumulator) / Double(totalChars)
+            return (ls, le)
+        }
+        
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(0..<lines.count, id: \.self) { i in
+                let lineText = lines[i]
+                if !isActive {
+                    Text(lineText)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60)))
+                        .frame(height: 28, alignment: .leading)
+                } else {
+                    let lineWidth = lineText.size(withAttributes: [.font: font]).width
+                    let ls = lineTiming[i].ls
+                    let le = lineTiming[i].le
+                    
+                    let rawLp = (fallbackProgress - ls) / max(0.001, (le - ls))
+                    let lp = max(0, min(1, rawLp))
+                    
+                    let fadeWidth: CGFloat = 24
+                    let currentX = (lineWidth + fadeWidth) * lp - fadeWidth
+                    let fadeStart = max(0.0, min(1.0, currentX / max(1.0, lineWidth)))
+                    let fadeEnd = max(0.0, min(1.0, (currentX + fadeWidth) / max(1.0, lineWidth)))
+                    
+                    ZStack(alignment: .leading) {
+                        Text(lineText)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(.white.opacity(0.35))
+                        
+                        Text(lineText)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(.white)
+                            .mask(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: .black, location: 0),
+                                        .init(color: .black, location: fadeStart),
+                                        .init(color: .clear, location: fadeEnd)
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .shadow(color: .white.opacity(0.60), radius: 5)
+                    }
+                    .frame(height: 28, alignment: .leading)
+                }
+            }
+        }
+        .frame(width: containerWidth, alignment: .leading)
+    }
+}
+
+// MARK: - Single Word Lyric Item (Apple Music Soft Feathered Fade)
+struct WordLyricItemView: View {
+    let word: LyricWord
+    let isActive: Bool
+    let isPast: Bool
+    let isHovered: Bool
+    let currentTime: TimeInterval
+    var fontSize: CGFloat = 20
+    var fontWeight: Font.Weight = .bold
+    
+    var body: some View {
+        let font = Font.system(size: fontSize, weight: fontWeight)
+        let isFullySung = isActive && (currentTime >= word.endTime)
+        let isSinging = isActive && (currentTime >= word.startTime && currentTime < word.endTime)
+        
+        let wordDuration = max(0.06, word.endTime - word.startTime)
+        let progress: CGFloat = isFullySung ? 1.0 : (isSinging ? CGFloat(max(0.0, min(1.0, (currentTime - word.startTime) / wordDuration))) : 0.0)
+        
+        ZStack(alignment: .leading) {
+            // Base unlit text (always present to preserve layout and typography)
+            Text(word.text)
+                .font(font)
+                .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
+            
+            // Luminous illuminated layer with soft crossfade when line finishes
+            if isFullySung {
+                Text(word.text)
+                    .font(font)
+                    .foregroundColor(.white)
+                    .shadow(color: .white.opacity(0.40), radius: 3)
+                    .transition(.opacity)
+            } else if isSinging {
+                Text(word.text)
+                    .font(font)
+                    .foregroundColor(.white)
+                    .mask(
+                        GeometryReader { geo in
+                            let w = geo.size.width
+                            let fadeWidth: CGFloat = 16.0
+                            let leadX = (w + fadeWidth) * progress - fadeWidth
+                            let fadeStart = max(0.0, min(1.0, leadX / max(1.0, w)))
+                            let fadeEnd = max(0.0, min(1.0, (leadX + fadeWidth) / max(1.0, w)))
+                            
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: 0.0),
+                                    .init(color: .black, location: fadeStart),
+                                    .init(color: .clear, location: fadeEnd)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        }
+                    )
+                    .shadow(color: .white.opacity(0.70), radius: 5)
+            }
+        }
+        .animation(.easeInOut(duration: 0.35), value: isActive)
+    }
+}
+
+// MARK: - Native NSMenu for Settings
+// Fixes SwiftUI Menu submenu flickering bug in NSPopover
+struct NativeSettingsMenu: NSViewRepresentable {
+    @AppStorage("showLyrics") private var showLyrics = true
+    @AppStorage("showAlbumArt") private var showAlbumArt = true
+    @AppStorage("musicSourceMode") private var musicSourceMode = "Auto"
+    @AppStorage("hapticIntensity") private var hapticIntensity = 0
+    @AppStorage("hapticActuatorType") private var hapticActuatorType = 0  // 0 = Auto
+    @AppStorage("waveformBars") private var waveformBars = 14
+    @AppStorage("lyricsMaxWidth") private var lyricsMaxWidth: Int = 200
+    
+    func makeNSView(context: Context) -> NSButton {
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+        let image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        let button = NSButton(image: image ?? NSImage(), target: context.coordinator, action: #selector(Coordinator.showMenu(_:)))
+        button.isBordered = false
+        button.bezelStyle = .shadowlessSquare
+        return button
+    }
+    
+    func updateNSView(_ nsView: NSButton, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject {
+        var parent: NativeSettingsMenu
+        
+        init(_ parent: NativeSettingsMenu) {
+            self.parent = parent
+        }
+        
+        @objc func showMenu(_ sender: NSButton) {
+            let menu = NSMenu(title: "Settings")
+            
+            // ── Music Source Submenu ──────────────────────────────────────────
+            let sourceItem = NSMenuItem(title: "Music Source", action: nil, keyEquivalent: "")
+            let sourceMenu = NSMenu(title: "Music Source")
+            let sources = [
+                ("Auto", "Auto (Detect Active Player)"),
+                ("Spotify", "Spotify"),
+                ("Apple Music", "Apple Music")
+            ]
+            for (key, title) in sources {
+                let item = NSMenuItem(title: title, action: #selector(setMusicSource(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = key
+                item.state = parent.musicSourceMode == key ? .on : .off
+                sourceMenu.addItem(item)
+            }
+            sourceItem.submenu = sourceMenu
+            menu.addItem(sourceItem)
+            menu.addItem(.separator())
+            
+            let lyricsItem = NSMenuItem(title: "Lyrics in Menu Bar", action: #selector(toggleLyrics), keyEquivalent: "")
+            lyricsItem.target = self
+            lyricsItem.state = parent.showLyrics ? .on : .off
+            menu.addItem(lyricsItem)
+            
+            let albumItem = NSMenuItem(title: "Album Cover", action: #selector(toggleAlbum), keyEquivalent: "")
+            albumItem.target = self
+            albumItem.state = parent.showAlbumArt ? .on : .off
+            menu.addItem(albumItem)
+            
+            let widthItem = NSMenuItem(title: "Lyrics Width", action: nil, keyEquivalent: "")
+            let widthMenu = NSMenu(title: "Lyrics Width")
+            var widths = [0, 50, 150, 200, 250, 300]
+            if !widths.contains(parent.lyricsMaxWidth) {
+                widths.append(parent.lyricsMaxWidth)
+                widths.sort()
+            }
+            for w in widths {
+                let title = w == 0 ? "Off" : "\(w) px"
+                let item = NSMenuItem(title: title, action: #selector(setWidth(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = w
+                item.state = parent.lyricsMaxWidth == w ? .on : .off
+                widthMenu.addItem(item)
+            }
+            widthMenu.addItem(.separator())
+            let wCustomItem = NSMenuItem(title: "Custom...", action: #selector(promptCustomWidth), keyEquivalent: "")
+            wCustomItem.target = self
+            widthMenu.addItem(wCustomItem)
+            widthItem.submenu = widthMenu
+            menu.addItem(widthItem)
+            
+            menu.addItem(.separator())
+            
+            let hapticsItem = NSMenuItem(title: "Haptics", action: nil, keyEquivalent: "")
+            let hapticsMenu = NSMenu(title: "Haptics")
+            let hModes = ["Off", "Light", "Medium", "Firm"]
+            for (i, mode) in hModes.enumerated() {
+                let item = NSMenuItem(title: mode, action: #selector(setHaptic(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = i
+                item.state = parent.hapticIntensity == i ? .on : .off
+                hapticsMenu.addItem(item)
+            }
+
+            // ── Haptic Feel submenu: test MTActuator types ────────────────────
+            hapticsMenu.addItem(.separator())
+            let feelItem = NSMenuItem(title: "Haptic Feel", action: nil, keyEquivalent: "")
+            let feelMenu = NSMenu(title: "Haptic Feel")
+
+            // Type descriptions based on physics / reverse-engineering
+            let types: [(tag: Int, label: String, desc: String)] = [
+                (0, "Auto",   "Auto (kick=6, beat=4)"),
+                (1, "Type 1", "1 — Very light tap"),
+                (2, "Type 2", "2 — Light-medium click"),
+                (3, "Type 3", "3 — Standard click"),
+                (4, "Type 4", "4 — Sharp crisp ★ Pacinian"),
+                (5, "Type 5", "5 — Medium-heavy"),
+                (6, "Type 6", "6 — Deep sub-bass thump")
+            ]
+            for t in types {
+                let item = NSMenuItem(title: t.desc, action: #selector(setHapticType(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = t.tag
+                item.state = parent.hapticActuatorType == t.tag ? .on : .off
+                feelMenu.addItem(item)
+            }
+            feelMenu.addItem(.separator())
+            // Test button: fires each type sequentially so user can feel them
+            let testItem = NSMenuItem(title: "▶ Test All Types (0.4s apart)", action: #selector(testAllHapticTypes), keyEquivalent: "")
+            testItem.target = self
+            feelMenu.addItem(testItem)
+
+            feelItem.submenu = feelMenu
+            hapticsMenu.addItem(feelItem)
+            // ─────────────────────────────────────────────────────────────────
+
+            hapticsItem.submenu = hapticsMenu
+            menu.addItem(hapticsItem)
+            
+            let waveItem = NSMenuItem(title: "Waveform", action: nil, keyEquivalent: "")
+            let waveMenu = NSMenu(title: "Waveform")
+            var wModes = [0, 6, 10, 14, 24, 32, 48, 128]
+            if !wModes.contains(parent.waveformBars) {
+                wModes.append(parent.waveformBars)
+                wModes.sort()
+            }
+            for bars in wModes {
+                let title = bars == 0 ? "Off" : "\(bars) Bars"
+                let item = NSMenuItem(title: title, action: #selector(setWaveform(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = bars
+                item.state = parent.waveformBars == bars ? .on : .off
+                waveMenu.addItem(item)
+            }
+            waveMenu.addItem(.separator())
+            let waveCustomItem = NSMenuItem(title: "Custom...", action: #selector(promptCustomWaveform), keyEquivalent: "")
+            waveCustomItem.target = self
+            waveMenu.addItem(waveCustomItem)
+            waveItem.submenu = waveMenu
+            menu.addItem(waveItem)
+            
+            let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+            loginItem.target = self
+            loginItem.state = LaunchAtLoginManager.isEnabled ? .on : .off
+            menu.addItem(loginItem)
+            
+            menu.addItem(.separator())
+            
+            let aboutItem = NSMenuItem(title: "About & License...", action: #selector(showAbout), keyEquivalent: "")
+            aboutItem.target = self
+            menu.addItem(aboutItem)
+            
+            menu.addItem(.separator())
+            
+            let quitItem = NSMenuItem(title: "Quit LyricsMenuBar", action: #selector(quit), keyEquivalent: "")
+            quitItem.target = self
+            menu.addItem(quitItem)
+            
+            let pt = NSPoint(x: sender.bounds.minX, y: sender.bounds.minY - 5)
+            menu.popUp(positioning: nil, at: pt, in: sender)
+        }
+        
+        @objc func setMusicSource(_ sender: NSMenuItem) {
+            if let key = sender.representedObject as? String {
+                parent.musicSourceMode = key
+                UserDefaults.standard.set(key, forKey: "musicSourceMode")
+                let bundleID = (key == "Apple Music") ? "com.apple.Music" : "com.spotify.client"
+                NotificationCenter.default.post(name: Notification.Name("ActiveMusicSourceChanged"), object: nil, userInfo: ["bundleID": bundleID])
+            }
+        }
+        
+        @objc func showAbout() {
+            let alert = NSAlert()
+            alert.messageText = "Lyrics Menu Bar 1.2.0"
+            alert.informativeText = "Native Liquid Glass UI for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        
+        @objc func toggleLyrics() { parent.showLyrics.toggle() }
+        @objc func toggleAlbum() { parent.showAlbumArt.toggle() }
+        @objc func toggleLaunchAtLogin() { LaunchAtLoginManager.isEnabled.toggle() }
+        @objc func setWidth(_ sender: NSMenuItem) { parent.lyricsMaxWidth = sender.tag }
+        @objc func setHaptic(_ sender: NSMenuItem) { parent.hapticIntensity = sender.tag }
+        @objc func setWaveform(_ sender: NSMenuItem) { parent.waveformBars = sender.tag }
+        @objc func quit() { NSApplication.shared.terminate(nil) }
+
+        @objc func setHapticType(_ sender: NSMenuItem) {
+            parent.hapticActuatorType = sender.tag
+            UserDefaults.standard.set(sender.tag, forKey: "hapticActuatorType")
+            // Fire a sample of the selected type immediately for confirmation
+            let t = sender.tag == 0 ? 4 : Int32(sender.tag)
+            HapticManager.shared.testActuatorType(t)
+        }
+
+        @objc func testAllHapticTypes() {
+            // Fire types 1→6 sequentially, 0.4s apart so user can feel each
+            let types: [Int32] = [1, 2, 3, 4, 5, 6]
+            for (i, t) in types.enumerated() {
+                DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + Double(i) * 0.4) {
+                    HapticManager.shared.testActuatorType(t)
+                }
+            }
+        }
+        
+        @objc func promptCustomWidth() {
+            let alert = NSAlert()
+            alert.messageText = "Custom Lyrics Width"
+            alert.informativeText = "Enter max width in pixels (e.g., 450). Maximum allowed is 1000 px to prevent Menu Bar overflow:"
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            
+            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+            input.stringValue = String(parent.lyricsMaxWidth)
+            alert.accessoryView = input
+            
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn, let val = Int(input.stringValue) {
+                parent.lyricsMaxWidth = min(max(0, val), 1000)
+            }
+        }
+        
+        @objc func promptCustomWaveform() {
+            let alert = NSAlert()
+            alert.messageText = "Custom Waveform Bars"
+            alert.informativeText = "Enter number of bars. Maximum allowed is 128 to prevent Menu Bar overflow:"
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            
+            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+            input.stringValue = String(parent.waveformBars)
+            alert.accessoryView = input
+            
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn, let val = Int(input.stringValue) {
+                parent.waveformBars = min(max(0, val), 128)
+            }
+        }
     }
 }
 

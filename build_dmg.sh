@@ -4,9 +4,7 @@
 #                polished DMG with background art + Gatekeeper bypass
 #
 # Usage:
-#   bash build_dmg.sh          → builds both (Sonoma + Monterey)
-#   bash build_dmg.sh sonoma   → Sonoma / Ventura (macOS 13-15)
-#   bash build_dmg.sh monterey → Monterey / Ventura (macOS 12+)
+#   bash build_dmg.sh          → builds for macOS 13+
 # ============================================================
 set -e
 
@@ -21,7 +19,7 @@ build_dmg() {
     local LABEL="$1"          # e.g. "Sonoma" or "Monterey"
     local MIN_OS="$2"         # e.g. "13.0" or "12.0"
     local SWIFT_FLAGS="$3"    # extra flags
-    local DMG_NAME="${APP_NAME}_${LABEL}.dmg"
+    local DMG_NAME="LyricsMenuBar-1.2.0.dmg"
     local DMG_STAGING="$SCRIPT_DIR/.dmg_staging_${LABEL}"
 
     echo ""
@@ -49,17 +47,16 @@ build_dmg() {
     cp icon.icns "Lyrics Menu Bar.app/Contents/Resources/AppIcon.icns" 2>/dev/null || true
     cp Sources/LyricsMenuBar/Info.plist "Lyrics Menu Bar.app/Contents/Info.plist"
 
-    # ----- 3. SIGN (ad-hoc) + STRIP QUARANTINE ---------------------------
-    echo "=== Signing ==="
-    xattr -cr "Lyrics Menu Bar.app"
-    codesign --force --deep --sign - --entitlements "$SCRIPT_DIR/LyricsMenuBar.entitlements" "Lyrics Menu Bar.app"
-    echo "   Signed ✓"
-
-    # ----- 4. STAGING AREA -----------------------------------------------
+    # ----- 3. CODE SIGNING ------------------------------------------------
+    echo "=== Signing app bundle ==="
+    codesign --force --deep --sign - --entitlements "$SCRIPT_DIR/LyricsMenuBar.entitlements" "Lyrics Menu Bar.app" 2>/dev/null || true
+    echo "   Signing complete ✓"
+    
+    # ----- 4. CREATE STAGING DIRECTORY -----------------------------------------------
     echo "=== Creating DMG staging area ==="
     rm -rf "$DMG_STAGING"
     mkdir -p "$DMG_STAGING"
-    cp -R SpoticatMenuBar.app "$DMG_STAGING/"
+    cp -R "Lyrics Menu Bar.app" "$DMG_STAGING/"
     ln -s /Applications "$DMG_STAGING/Applications"
 
     # Background + volume icon
@@ -112,7 +109,7 @@ tell application "Finder"
         set arrangement of theViewOptions to not arranged
         set icon size of theViewOptions to 100
         set background picture of theViewOptions to file ".background:background.png"
-        set position of item "SpoticatMenuBar.app" of container window to {170, 200}
+        set position of item "Lyrics Menu Bar.app" of container window to {170, 200}
         set position of item "Applications" of container window to {490, 200}
         update without registering applications
         delay 2
@@ -143,18 +140,7 @@ APPLESCRIPT
 }
 
 # ---- dispatch ----
-case "$BUILD_TARGET" in
-    sonoma)
-        build_dmg "Sonoma" "13.0"
-        ;;
-    monterey)
-        build_dmg "Monterey" "12.0"
-        ;;
-    all|*)
-        build_dmg "Sonoma"   "13.0"
-        build_dmg "Monterey" "12.0"
-        ;;
-esac
+build_dmg "Mac" "14.0"
 
 echo ""
 echo "═══════════════════════════════════════"

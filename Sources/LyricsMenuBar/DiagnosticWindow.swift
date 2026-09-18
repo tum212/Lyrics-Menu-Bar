@@ -66,16 +66,17 @@ struct DiagnosticView: View {
     private var descriptionText: String {
         switch issueType {
         case .notDefaultInput:
-            return "BlackHole 2ch is installed, but it's not set as your Default Input device.\n\nPlease open Sound Settings and select BlackHole 2ch as your Input to allow the app to analyze the audio."
+            return "System audio setup may be incorrect."
         case .silentAudio:
-            return "We are not receiving any audio data.\n\nMake sure you have created a Multi-Output Device containing both BlackHole 2ch and your Speakers, and that it is selected as your current Sound Output."
+            return "We are not receiving any audio data.\n\nPlease ensure your System Audio Recording permissions are granted and audio is currently playing."
         }
     }
+
     
     private var resolveButtonText: String {
         switch issueType {
-        case .notDefaultInput: return "Open Sound Settings"
-        case .silentAudio: return "Open Audio MIDI Setup"
+        case .notDefaultInput: return "Open Settings"
+        case .silentAudio: return "Open Settings"
         }
     }
 }
@@ -86,37 +87,8 @@ class DiagnosticWindowManager {
     private var window: NSWindow?
     
     func showDiagnostic(issue: DiagnosticIssueType) {
-        DispatchQueue.main.async {
-            if self.window != nil { return }
-            
-            let view = DiagnosticView(issueType: issue) {
-                self.handleResolve(issue: issue)
-            } onOptOut: {
-                UserDefaults.standard.set(false, forKey: "audioFeaturesEnabled")
-                NotificationCenter.default.post(name: Notification.Name("AudioFeaturesDisabled"), object: nil)
-                self.closeWindow()
-            }
-            
-            let hostingController = NSHostingController(rootView: view)
-            let newWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 400, height: 350),
-                styleMask: [.titled, .closable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
-            )
-            
-            newWindow.titlebarAppearsTransparent = true
-            newWindow.titleVisibility = .hidden
-            newWindow.isMovableByWindowBackground = true
-            newWindow.contentViewController = hostingController
-            newWindow.center()
-            newWindow.level = .floating
-            
-            self.window = newWindow
-            
-            NSApp.activate(ignoringOtherApps: true)
-            newWindow.makeKeyAndOrderFront(nil)
-        }
+        // Disabled completely per user request - no audio setup dialog
+        closeWindow()
     }
     
     private func handleResolve(issue: DiagnosticIssueType) {

@@ -5,7 +5,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>CFBundleIdentifier</key>
-	<string>com.lyricsmenubar.mac</string>
+	<string>com.lyricsmenubar.macos</string>
 	<key>CFBundleName</key>
 	<string>Lyrics Menu Bar</string>
 	<key>CFBundleExecutable</key>
@@ -13,9 +13,9 @@
 	<key>CFBundleDisplayName</key>
 	<string>Lyrics Menu Bar</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
+	<string>43</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.2.0</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleIconFile</key>
@@ -23,10 +23,12 @@
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Lyrics Menu Bar requires audio access to visualize live sound as a waveform</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Lyrics Menu Bar ต้องการสิทธิ์ควบคุม Spotify เพื่อแสดงชื่อเพลง เนื้อร้อง และควบคุม playback บน Menu Bar</string>
+	<string>Lyrics Menu Bar ต้องการสิทธิ์ควบคุม Spotify และ Apple Music เพื่อแสดงชื่อเพลง เนื้อร้อง และควบคุม playback บน Menu Bar</string>
 	<key>NSAppleScriptEnabled</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
+	<string>15.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Puwadon. Released under the MIT License.</string>
 </dict>
 </plist>

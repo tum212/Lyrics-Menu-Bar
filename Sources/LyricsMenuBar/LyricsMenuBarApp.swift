@@ -4,6 +4,8 @@ import Combine
 import CoreAudio
 import AVFoundation
 import AudioToolbox
+import Cocoa
+import CoreVideo
 
 @main
 struct SpoticatApp {
@@ -15,9 +17,22 @@ struct SpoticatApp {
     }
 }
 
+func logDebug(_ msg: String) {
+    let line = "\(Date()): \(msg)\n"
+    if let data = line.data(using: .utf8) {
+        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/lyrics_debug.log")) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: "/tmp/lyrics_debug.log"))
+        }
+    }
+}
+
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var popover: NSPopover!
+    var panel: NSPanel!
     
     // Core Services
     var spotify = SpotifyService()
@@ -25,13 +40,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var audioAnalyzer = AudioAnalyzer()
     
     // Menu Bar State
-    var lyricsStatusItem: NSStatusItem!
-    var artStatusItem: NSStatusItem!
+    var statusItem: NSStatusItem!
     var updateTimer: Timer?
     var displayLink: CVDisplayLink?
-    private var cachedAlbumArtURL: String?
+    private var cachedAlbumArtTrackId: String?
     private var cachedAlbumArtImage: NSImage?
-    private var cachedBlurredAlbumArtImage: NSImage?
     
     private var lastShowWaveform = true
     private var lastShowAlbumArt = true
@@ -42,6 +55,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var animatedWidth: CGFloat = 20.0
     // Optimization: skip redraw when content hasn't changed
     var lastRenderedLyricsText: String = ""
+    var currentCachedGrayText: NSImage?
+    var currentCachedWhiteText: NSImage?
+    var oldCachedGrayText: NSImage?
+    var oldCachedWhiteText: NSImage?
+    var lastRenderedHighlightedImage: NSImage?
+    var lastWordLeadX: CGFloat?
     var lastRenderedProgress: Double = -1
     var forceRedrawLyrics: Bool = false
     var animatedOrbAlpha: CGFloat = 0.0
@@ -53,8 +72,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var transitionProgress: CGFloat = 1.0
     var lastFrameTime: Date = Date()
     
-    // Waveform Motion Blur State
+    // Waveform Animation & Color State
     var lastAmplitudes: [Double] = []
+    var barHeights: [CGFloat] = []
+    var cachedWaveformTheme: WaveformTheme = .fallback
     
     // Sparkle Animation State
     var trackChangedTime: Date = Date.distantPast
@@ -71,20 +92,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "audioFeaturesEnabled": true
         ])
         
+        // Force re-enable audio features in case user accidentally disabled it
+        UserDefaults.standard.set(true, forKey: "audioFeaturesEnabled")
+        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position Item-0")
+        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position Item-1")
+        
         let contentView = ContentView(
             spotify: spotify,
             lyricsService: lyricsService,
             audioAnalyzer: audioAnalyzer
         )
         
-        let popover = NSPopover()
-        popover.contentSize = NSSize(width: 480, height: 240)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: contentView)
-        self.popover = popover
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        // CRITICAL: Must be .clear so WindowServer blur shows through — any non-clear color
+        // will composite as opaque and cover the blur entirely.
+        panel.backgroundColor = NSColor.clear
+        panel.hasShadow = true
+        panel.level = .floating
+
+        // ── Liquid Glass Hosting View ────────────────
+        let hostingView = NSHostingView(rootView: contentView)
+        hostingView.wantsLayer = true
+        hostingView.setValue(false, forKey: "opaque")
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.isOpaque = false
+        hostingView.frame = NSRect(x: 0, y: 0, width: 480, height: 240)
+        hostingView.autoresizingMask = [.width, .height]
+        
+        panel.contentView = hostingView
+        self.panel = panel
         
         NotificationCenter.default.addObserver(forName: Notification.Name("ClosePopover"), object: nil, queue: .main) { [weak self] _ in
-            self?.popover.performClose(nil)
+            self?.panel.orderOut(nil)
+        }
+        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.spoticat.TogglePopover"), object: nil, queue: .main) { [weak self] _ in
+            self?.togglePopover(nil)
         }
         
         NotificationCenter.default.addObserver(forName: Notification.Name("AudioFeaturesDisabled"), object: nil, queue: .main) { [weak self] _ in
@@ -92,21 +140,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         if UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
-            runAudioDiagnostics()
+            // runAudioDiagnostics() removed per user request
         }
         
-        self.artStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = self.artStatusItem.button {
-            button.image = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Spoticat")
-            button.image?.isTemplate = true
-            button.imagePosition = .imageOnly
-            button.action = #selector(togglePopover(_:))
-            button.target = self
-        }
-        
-        self.lyricsStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = self.lyricsStatusItem.button {
-            button.title = ""
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = self.statusItem.button {
+            let img = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Lyrics Menu Bar")
+            img?.isTemplate = true
+            button.image = img
             button.imagePosition = .imageOnly
             button.action = #selector(togglePopover(_:))
             button.target = self
@@ -124,83 +165,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         
-        // Start live updating the Menu Bar at 20fps for smooth visualizer
+        // Start live updating the Menu Bar at 25fps (smooth & lightweight)
         startMenuBarUpdater()
     }
     
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        togglePopover(nil)
+        return true
+    }
+    
     @objc func togglePopover(_ sender: AnyObject?) {
-        if let button = artStatusItem.button {
-            if popover.isShown {
-                popover.performClose(sender)
+        guard let panel = self.panel else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            let screen = statusItem?.button?.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
+            let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            let panelWidth: CGFloat = 480
+            let panelHeight: CGFloat = 240
+            
+            var xPos: CGFloat
+            var yPos: CGFloat
+            
+            if let button = statusItem?.button, let buttonWindow = button.window, buttonWindow.frame.origin.y > 0 {
+                let buttonRect = buttonWindow.convertToScreen(button.frame)
+                xPos = buttonRect.midX - (panelWidth / 2)
+                yPos = buttonRect.minY - panelHeight - 8
             } else {
-                popover.show(relativeTo: button.bounds, of: button, preferredEdge: NSRectEdge.minY)
-                popover.contentViewController?.view.window?.makeKey()
+                xPos = screenFrame.maxX - panelWidth - 20
+                yPos = screenFrame.maxY - panelHeight - 8
             }
+            
+            // Clamp within screen boundaries
+            xPos = max(screenFrame.minX + 10, min(xPos, screenFrame.maxX - panelWidth - 10))
+            yPos = max(screenFrame.minY + 10, min(yPos, screenFrame.maxY - panelHeight - 8))
+            
+            panel.setFrame(NSRect(x: xPos, y: yPos, width: panelWidth, height: panelHeight), display: true)
+            panel.invalidateShadow()
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
     
     func startMenuBarUpdater() {
-        var link: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&link)
-        guard let displayLink = link else {
-            // Fallback
-            updateTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
-                self?.updateMenuBar()
-            }
-            if let timer = updateTimer {
-                RunLoop.current.add(timer, forMode: .common)
-            }
-            return
+        if let link = displayLink {
+            CVDisplayLinkStop(link)
+            self.displayLink = nil
         }
-        self.displayLink = displayLink
-        
-        let displayLinkOutputCallback: CVDisplayLinkOutputCallback = { (displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext) -> CVReturn in
-            let appDelegate = unsafeBitCast(displayLinkContext, to: AppDelegate.self)
-            DispatchQueue.main.async {
-                appDelegate.updateMenuBar()
-            }
-            return kCVReturnSuccess
+        updateTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.updateMenuBar()
         }
-        
-        CVDisplayLinkSetOutputCallback(displayLink, displayLinkOutputCallback, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
-        CVDisplayLinkStart(displayLink)
-    }
-    
-    private func runAudioDiagnostics() {
-        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        var dataSize: UInt32 = 0
-        AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize)
-        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var ids = [AudioDeviceID](repeating: 0, count: count)
-        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize, &ids)
-        
-        var foundBlackHole = false
-        var blackHoleID: AudioDeviceID = 0
-        
-        for id in ids {
-            var nameSize = UInt32(MemoryLayout<CFString>.size)
-            var name: Unmanaged<CFString>?
-            var nameAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceNameCFString, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-            if AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nameSize, &name) == noErr, let cfName = name?.takeRetainedValue(), (cfName as String).lowercased().contains("blackhole") {
-                foundBlackHole = true
-                blackHoleID = id
-                break
-            }
-        }
-        
-        if !foundBlackHole {
-            DiagnosticWindowManager.shared.showDiagnostic(issue: .silentAudio)
-            return
-        }
-        
-        var defaultInputID: AudioDeviceID = 0
-        var inputSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var inputAddr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &inputAddr, 0, nil, &inputSize, &defaultInputID)
-        
-        if defaultInputID != blackHoleID {
-            DiagnosticWindowManager.shared.showDiagnostic(issue: .notDefaultInput)
-        }
+        timer.tolerance = 0.002
+        RunLoop.main.add(timer, forMode: .common)
+        updateTimer = timer
     }
     
     func roundCorners(of image: NSImage, size: NSSize, radius: CGFloat) -> NSImage {
@@ -214,13 +232,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return roundedImage
     }
     
+    
+    
     func updateMenuBar() {
         let now = Date()
+        if Int(now.timeIntervalSince1970 * 10) % 20 == 0 {
+            logDebug("updateMenuBar: track=\(spotify.currentTrack?.name ?? "nil"), statusWinFrame=\(statusItem?.button?.window?.frame as Any), isVis=\(statusItem?.isVisible ?? false)")
+        }
         var deltaTime = now.timeIntervalSince(lastFrameTime)
         lastFrameTime = now
-        if deltaTime > 0.1 { deltaTime = 0.016 } // Cap deltaTime to prevent huge jumps if app lagged
+        if deltaTime > 0.1 || deltaTime <= 0 { deltaTime = 0.016 }
         
-        let waveformBars = UserDefaults.standard.integer(forKey: "waveformBars")
+        var waveformBars = 14
+        if UserDefaults.standard.object(forKey: "waveformBars") != nil {
+            waveformBars = min(128, max(0, UserDefaults.standard.integer(forKey: "waveformBars")))
+        }
         let showAlbumArt = UserDefaults.standard.bool(forKey: "showAlbumArt")
         let showLyrics = UserDefaults.standard.bool(forKey: "showLyrics")
         
@@ -231,18 +257,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Check for state changes to force redraw
         let prefsChanged = (waveformBars != UserDefaults.standard.integer(forKey: "lastWaveformBars") || showAlbumArt != lastShowAlbumArt || showLyrics != lastShowLyrics)
-        UserDefaults.standard.set(waveformBars, forKey: "lastWaveformBars")
-        lastShowAlbumArt = showAlbumArt
-        lastShowLyrics = showLyrics
+        if prefsChanged {
+            UserDefaults.standard.set(waveformBars, forKey: "lastWaveformBars")
+            lastShowAlbumArt = showAlbumArt
+            lastShowLyrics = showLyrics
+        }
         
-        lyricsStatusItem?.isVisible = showLyrics
-        artStatusItem?.isVisible = (waveformBars > 0) || showAlbumArt
+        let isVisible = showLyrics || (waveformBars > 0) || showAlbumArt || (spotify.currentTrack == nil)
+        if statusItem?.isVisible != isVisible {
+            statusItem?.isVisible = isVisible
+        }
         
         if let track = spotify.currentTrack {
-            guard let artButton = self.artStatusItem.button, let lyricsButton = self.lyricsStatusItem.button else { return }
+            guard let button = self.statusItem?.button else { return }
             
             // Fast path: paused + no sparkle + no animation in progress → skip heavy redraw
-            let sparkleTime = Date().timeIntervalSince(trackChangedTime)
+            let sparkleTime = now.timeIntervalSince(trackChangedTime)
             let isSparkling = lyricsService.isLoading || sparkleTime < 5.5
             if !spotify.isPlaying && !isSparkling && forceRedrawLyrics == false && !prefsChanged {
                 // Still need to show static text but skip 60fps NSImage recreation
@@ -252,11 +282,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if allLyrics.isEmpty {
                     staticText = "\(track.name) - \(track.artist) • \(track.album)"
                 } else {
-                    let rawTime = spotify.playbackPosition
-                    let time = max(0, rawTime - 0.4)
-                    var idx = 0
-                    for (i, line) in allLyrics.enumerated() { if line.time <= time { idx = i } else { break } }
-                    staticText = allLyrics[idx].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "♪" : allLyrics[idx].text
+                    let time = spotify.currentTime
+                    if let firstTime = allLyrics.first?.time, firstTime > 0 && time < firstTime {
+                        staticText = "\(track.name) - \(track.artist)"
+                    } else {
+                        var idx = 0
+                        for (i, line) in allLyrics.enumerated() { if line.time <= time { idx = i } else { break } }
+                        staticText = allLyrics[idx].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "♪" : allLyrics[idx].text
+                    }
                 }
                 if staticText == lastRenderedLyricsText { return }  // ← skip if identical
                 forceRedrawLyrics = true  // force one redraw for the new static text
@@ -266,18 +299,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             if lastTrackIdForSparkle != track.id {
                 lastTrackIdForSparkle = track.id
-                trackChangedTime = Date()
+                trackChangedTime = now
             }
             
             // --- 1. LYRICS UPDATING (Left Item) ---
-            let rawTime = spotify.isPlaying ? spotify.playbackPosition + Date().timeIntervalSince(spotify.lastUpdateDate) : spotify.playbackPosition
-            let time = max(0, rawTime - 0.4)
+            let time = spotify.currentTime
             let allLyrics = lyricsService.lyrics
             var currentLineText = ""
             var isUnsynced = false
             var currentIndex = 0
-            
             var peekedAhead = false
+            var isIntro = false
             
             if !allLyrics.isEmpty {
                 isUnsynced = allLyrics.count > 1 && allLyrics.last!.time == 0
@@ -286,29 +318,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let progress = max(0, min(1, time / duration))
                     currentIndex = Int(progress * Double(allLyrics.count))
                     if currentIndex >= allLyrics.count { currentIndex = allLyrics.count - 1 }
+                    currentLineText = allLyrics[currentIndex].text
+                } else if let firstTime = allLyrics.first?.time, firstTime > 0 && time < firstTime {
+                    isIntro = true
+                    let sparkleTime = now.timeIntervalSince(trackChangedTime)
+                    if sparkleTime < 5.5 {
+                        currentLineText = track.name
+                    } else {
+                        currentLineText = "♪ \(track.name) - \(track.artist)"
+                    }
                 } else {
                     for (index, line) in allLyrics.enumerated() {
                         if line.time <= time { currentIndex = index } else { break }
                     }
-                }
-                currentLineText = allLyrics[currentIndex].text
-                if currentLineText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    if currentIndex + 1 < allLyrics.count {
-                        let nextText = allLyrics[currentIndex + 1].text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !nextText.isEmpty { 
-                            currentLineText = nextText 
-                            peekedAhead = true
-                        } else { 
-                            currentLineText = "♪" 
-                        }
-                    } else { currentLineText = "♪" }
+                    let activeLine = allLyrics[currentIndex]
+                    currentLineText = activeLine.text
+                    
+                    if currentLineText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if currentIndex + 1 < allLyrics.count {
+                            let nextText = allLyrics[currentIndex + 1].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !nextText.isEmpty { 
+                                currentLineText = nextText 
+                                peekedAhead = true
+                            } else { 
+                                currentLineText = "♪" 
+                            }
+                        } else { currentLineText = "♪" }
+                    }
                 }
             } else {
                 if lyricsService.isLoading {
                     currentLineText = track.name
                 } else {
                     let totalSparkleDuration = 5.5
-                    let sparkleTime = Date().timeIntervalSince(trackChangedTime)
+                    let sparkleTime = now.timeIntervalSince(trackChangedTime)
                     if sparkleTime < totalSparkleDuration {
                         currentLineText = track.name
                     } else {
@@ -320,7 +363,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if currentLineText.isEmpty { currentLineText = "♪" }
             if currentLineText.count > 75 { currentLineText = String(currentLineText.prefix(72)) + "..." }
             
-            lastLyricsId = allLyrics.isEmpty ? nil : allLyrics[currentIndex].id
+            lastLyricsId = (allLyrics.isEmpty || isIntro) ? nil : allLyrics[currentIndex].id
             
             let font = NSFont.systemFont(ofSize: 14, weight: .regular)
             let paragraphStyle = NSMutableParagraphStyle()
@@ -330,22 +373,83 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let textSize = currentLineText.size(withAttributes: attributes)
             
             var progress = 0.0
-            if !allLyrics.isEmpty && currentIndex < allLyrics.count {
+            var wordLeadX: CGFloat? = nil
+            let fadeWidth: CGFloat = 24.0
+            
+            if isIntro {
+                progress = 0.0
+            } else if !allLyrics.isEmpty && currentIndex < allLyrics.count {
+                let activeLine = allLyrics[currentIndex]
                 if peekedAhead {
                     progress = 0.0
                 } else if isUnsynced {
-                    let duration = track.duration > 0 ? track.duration : 100.0
-                    progress = max(0, min(1, time / duration))
+                    // Unsynced lyrics: always display line 100% lit up with no frozen spotlight
+                    progress = 1.0
+                    wordLeadX = textSize.width + fadeWidth
                 } else {
-                    if currentIndex < allLyrics.count - 1 {
+                    let activeWords = activeLine.words
+                    
+                    if !activeWords.isEmpty && activeLine.endTime > activeLine.time {
+                        let vocalStart = activeWords.first?.startTime ?? activeLine.time
+                        let vocalEnd = activeWords.last?.endTime ?? activeLine.endTime
+                        let vocalDuration = max(0.01, vocalEnd - vocalStart)
+                        if time < vocalStart {
+                            progress = 0.0
+                            wordLeadX = -fadeWidth
+                        } else if time >= vocalEnd {
+                            progress = 1.0
+                            wordLeadX = textSize.width + fadeWidth
+                        } else {
+                            progress = max(0.0, min(1.0, (time - vocalStart) / vocalDuration))
+                            var foundWord = false
+                            var searchStart = currentLineText.startIndex
+                            
+                            for word in activeWords {
+                                let targetRange: Range<String.Index>?
+                                if let r = currentLineText.range(of: word.text, range: searchStart..<currentLineText.endIndex) {
+                                    targetRange = r
+                                    searchStart = r.upperBound
+                                } else if let r = currentLineText.range(of: word.text) {
+                                    targetRange = r
+                                } else {
+                                    targetRange = nil
+                                }
+                                
+                                if time >= word.startTime && time < word.endTime {
+                                    if let r = targetRange {
+                                        let prefix = String(currentLineText[..<r.lowerBound])
+                                        let prefixW = prefix.size(withAttributes: attributes).width
+                                        let wordW = word.text.size(withAttributes: attributes).width
+                                        let wordDur = max(0.01, word.endTime - word.startTime)
+                                        let wp = CGFloat((time - word.startTime) / wordDur)
+                                        wordLeadX = prefixW + wordW * wp
+                                        foundWord = true
+                                    }
+                                    break
+                                } else if time < word.startTime {
+                                    if let r = targetRange {
+                                        let prefix = String(currentLineText[..<r.lowerBound])
+                                        wordLeadX = prefix.size(withAttributes: attributes).width
+                                        foundWord = true
+                                    }
+                                    break
+                                }
+                            }
+                            if !foundWord {
+                                wordLeadX = textSize.width * CGFloat(progress)
+                            }
+                            
+                            // Monotonic forward clamp within the same line to prevent subpixel jitter
+                            if let lastX = self.lastWordLeadX, let newX = wordLeadX, currentLineText == lastRenderedLyricsText {
+                                wordLeadX = max(lastX, newX)
+                            }
+                            self.lastWordLeadX = wordLeadX
+                        }
+                    } else if currentIndex < allLyrics.count - 1 {
                         let currentStart = allLyrics[currentIndex].time
                         let nextStart = allLyrics[currentIndex + 1].time
                         let rawDuration = max(0.1, nextStart - currentStart)
-                        
-                        // Estimate actual singing time (approx 12.5 chars per second)
-                        let estimatedSingingTime = max(1.0, Double(currentLineText.count) * 0.08)
-                        let activeDuration = min(rawDuration, estimatedSingingTime)
-                        
+                        let activeDuration = min(rawDuration, 8.0)
                         progress = max(0, min(1, (time - currentStart) / activeDuration))
                     } else {
                         progress = 1.0
@@ -353,183 +457,222 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             
-            let glowPad: CGFloat = 6  // padding on each side so glow is not clipped
-            let maxAllowedWidth: CGFloat = 200.0 // Reduced width per user request
-            let scrollPadding: CGFloat = 20.0
+            let glowPad: CGFloat = 6
             
-            let fullTextWidth = textSize.width + glowPad * 2
-            let effectiveWidth = maxAllowedWidth - scrollPadding * 2
-            let isMarquee = fullTextWidth > effectiveWidth && currentLineText != "♪"
-            
-            let requiredWidth = fullTextWidth + scrollPadding * 2
-            let targetWidth = min(requiredWidth, maxAllowedWidth)
-            
-            var activeTargetWidth = targetWidth
-            if transitionProgress < 1.0 && !oldLineText.isEmpty {
-                let oldTextSize = oldLineText.size(withAttributes: attributes)
-                let oldRequired = oldTextSize.width + glowPad * 2 + scrollPadding * 2
-                activeTargetWidth = max(targetWidth, min(oldRequired, maxAllowedWidth))
+            var lyricsMaxWidth = 200
+            if UserDefaults.standard.object(forKey: "lyricsMaxWidth") != nil {
+                lyricsMaxWidth = UserDefaults.standard.integer(forKey: "lyricsMaxWidth")
             }
-            let widthSmoothing = CGFloat(1.0 - exp(-10.0 * deltaTime))
-            animatedWidth += (activeTargetWidth - animatedWidth) * widthSmoothing
+            let maxW = CGFloat(lyricsMaxWidth)
+            let neededW = ceil(textSize.width) + 32.0
+            let canvasWidth: CGFloat = min(maxW, max(60.0, neededW))
+            
+            let scrollPadding: CGFloat = 16.0
+            let fullTextWidth = textSize.width + glowPad * 2
+            let effectiveWidth = canvasWidth - scrollPadding * 2
+            let isMarquee = canvasWidth > 0 && fullTextWidth > effectiveWidth && currentLineText != "♪"
             
             var targetOffset: CGFloat = scrollPadding
             if isMarquee {
                 let maxScroll = fullTextWidth - effectiveWidth
-                // Sine easing for ultra-smooth start/stop
-                let smoothedProgress = -(cos(Double.pi * progress) - 1.0) / 2.0
-                targetOffset = scrollPadding - (maxScroll * CGFloat(smoothedProgress))
+                if isUnsynced {
+                    // Unsynced lyrics: continuous smooth reading scroll at 38 px/s with gentle pause at start/end
+                    let scrollSpeed: CGFloat = 38.0
+                    let travelTime = Double(maxScroll / scrollSpeed)
+                    let pauseTime = 1.6
+                    let fullCycle = travelTime + pauseTime * 2
+                    let cycleT = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: fullCycle)
+                    if cycleT < pauseTime {
+                        targetOffset = scrollPadding
+                    } else if cycleT < pauseTime + travelTime {
+                        let tFrac = CGFloat((cycleT - pauseTime) / travelTime)
+                        targetOffset = scrollPadding - (maxScroll * tFrac)
+                    } else {
+                        targetOffset = scrollPadding - maxScroll
+                    }
+                } else {
+                    // Continuous C^1 smooth Hermite motion across the line:
+                    // Using smoothstep Hermite curve: S(x) = 3x^2 - 2x^3
+                    // Starts smoothly at 0 velocity, glides without jerky word-gap snaps, rests at end
+                    let smoothT = CGFloat(progress * progress * (3.0 - 2.0 * progress))
+                    targetOffset = scrollPadding - (maxScroll * smoothT)
+                }
             }
             
             if currentLineText != lastRenderedLyricsText {
                 oldLineText = lastRenderedLyricsText
+                oldCachedGrayText = currentCachedGrayText
+                oldCachedWhiteText = lastRenderedHighlightedImage ?? currentCachedWhiteText
+                lastRenderedHighlightedImage = nil
+                lastWordLeadX = nil
                 oldMarqueeOffset = marqueeOffset
                 lastRenderedLyricsText = currentLineText
                 transitionProgress = 0.0
                 
-                // SNAP marqueeOffset instantly to targetOffset for the new line
-                // This prevents horizontal sweeping/jumping!
-                marqueeOffset = targetOffset
-            }
-            
-            if transitionProgress < 1.0 {
-                transitionProgress += CGFloat(deltaTime / 0.2)
-                if transitionProgress > 1.0 { transitionProgress = 1.0 }
-            }
-            
-            // Lerp marqueeOffset to smooth out AppleScript polling jitter
-            let previousMarqueeOffset = marqueeOffset
-            let offsetSmoothing = CGFloat(1.0 - exp(-15.0 * deltaTime))
-            marqueeOffset += (targetOffset - marqueeOffset) * offsetSmoothing
-            let distanceMoved = marqueeOffset - previousMarqueeOffset
-            
-            if animatedWidth > 2 {
-                let lyricsImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
-                lyricsImage.isTemplate = false
-                lyricsImage.lockFocus()
-                
-                // --- ENABLE SUBPIXEL SMOOTHING FOR ZERO STUTTER ---
-                if let ctx = NSGraphicsContext.current?.cgContext {
-                    ctx.setAllowsFontSubpixelPositioning(true)
-                    ctx.setShouldSubpixelPositionFonts(true)
-                    ctx.setAllowsFontSubpixelQuantization(true)
-                    ctx.setShouldSubpixelQuantizeFonts(false) // Disable pixel-grid snapping for butter-smooth scrolling!
-                }
-                
-                let yOffsetOld = transitionProgress * 15.0
-                let alphaOld = max(0.0, 1.0 - transitionProgress)
-                
-                let yOffsetNew = -15.0 + transitionProgress * 15.0
-                let alphaNew = transitionProgress
-                
-                var grayNew = attributes
-                grayNew[.foregroundColor] = NSColor.white.withAlphaComponent(0.4 * alphaNew)
-                
-                // 1. Draw old line sliding UP
-                if transitionProgress < 1.0 && !oldLineText.isEmpty {
-                    // Re-calculate old text size for proper alignment
-                    let oldTextSize = oldLineText.size(withAttributes: attributes)
-                    let oldRect = NSRect(x: glowPad + oldMarqueeOffset, y: ((20 - oldTextSize.height) / 2) + yOffsetOld, width: oldTextSize.width, height: oldTextSize.height)
+                let safeSize = NSSize(width: ceil(textSize.width) + 4, height: 20)
+                if safeSize.width > 4 {
+                    let textRect = NSRect(x: 0, y: (20 - textSize.height) / 2.0, width: textSize.width, height: textSize.height)
                     
-                    // Fade out with white color to prevent color jump
-                    var oldAttr = attributes
-                    oldAttr[.foregroundColor] = NSColor.white.withAlphaComponent(alphaOld)
-                    oldLineText.draw(in: oldRect, withAttributes: oldAttr)
-                }
-                
-                // 2. Draw new line sliding UP and fading in
-                let textRect1 = NSRect(x: glowPad + marqueeOffset, y: ((20 - textSize.height) / 2) + yOffsetNew, width: textSize.width, height: textSize.height)
-                currentLineText.draw(in: textRect1, withAttributes: grayNew)
-                
-                // Target alpha based on progress
-                let targetOrbAlpha: CGFloat = (progress > 0.0 && progress < 1.0) ? 1.0 : 0.0
-                let alphaSmoothing = CGFloat(1.0 - exp(-15.0 * deltaTime))
-                animatedOrbAlpha += (targetOrbAlpha - animatedOrbAlpha) * alphaSmoothing
-                
-                if progress > 0 || animatedOrbAlpha > 0.01 {
-                    let clampedProgress = min(1.0, progress)
-                    let fadeWidth: CGFloat = 20
-                    // Push the highlight forward based on progress so it clears the text entirely at 1.0
-                    let currentX1 = glowPad + marqueeOffset + textSize.width * CGFloat(clampedProgress) + fadeWidth * CGFloat(clampedProgress)
-                    
-                    let whiteImage = NSImage(size: NSSize(width: animatedWidth, height: 20))
-                    whiteImage.lockFocus()
-                    
-                    // --- ENABLE SUBPIXEL SMOOTHING FOR ZERO STUTTER ---
+                    let newGrayImg = NSImage(size: safeSize)
+                    newGrayImg.lockFocus()
                     if let ctx = NSGraphicsContext.current?.cgContext {
                         ctx.setAllowsFontSubpixelPositioning(true)
                         ctx.setShouldSubpixelPositionFonts(true)
                         ctx.setAllowsFontSubpixelQuantization(true)
                         ctx.setShouldSubpixelQuantizeFonts(false)
                     }
+                    var attr = attributes
+                    attr[.foregroundColor] = NSColor.white.withAlphaComponent(1.0)
+                    currentLineText.draw(at: textRect.origin, withAttributes: attr)
+                    newGrayImg.unlockFocus()
+                    currentCachedGrayText = newGrayImg
                     
-                    var whiteAttributes = attributes
-                    whiteAttributes[.foregroundColor] = NSColor.white.withAlphaComponent(alphaNew)
+                    let newWhiteImg = NSImage(size: safeSize)
+                    newWhiteImg.lockFocus()
+                    if let ctx = NSGraphicsContext.current?.cgContext {
+                        ctx.setAllowsFontSubpixelPositioning(true)
+                        ctx.setShouldSubpixelPositionFonts(true)
+                        ctx.setAllowsFontSubpixelQuantization(true)
+                        ctx.setShouldSubpixelQuantizeFonts(false)
+                    }
+                    var attrW = attributes
+                    attrW[.foregroundColor] = NSColor.white
+                    currentLineText.draw(at: textRect.origin, withAttributes: attrW)
+                    newWhiteImg.unlockFocus()
+                    currentCachedWhiteText = newWhiteImg
+                } else {
+                    currentCachedGrayText = nil
+                    currentCachedWhiteText = nil
+                }
+                
+                // Keep the newly arrived line resting comfortably at the starting scrollPadding
+                marqueeOffset = scrollPadding
+            } else {
+                // When line is still settling in during vertical transition, don't jerk horizontally
+                let effectiveTarget = transitionProgress < 0.45 ? scrollPadding : targetOffset
+                let smoothSpeed = CGFloat(1.0 - exp(-16.0 * deltaTime))
+                marqueeOffset += (effectiveTarget - marqueeOffset) * smoothSpeed
+            }
+            
+            if transitionProgress < 1.0 {
+                transitionProgress += CGFloat(deltaTime / 0.42)
+                if transitionProgress > 1.0 { transitionProgress = 1.0 }
+            }
+            
+            var lyricsImgToDraw: NSImage? = nil
+            if showLyrics && canvasWidth > 2 {
+                let trackName = track.name
+                let lyricsImage = NSImage(size: NSSize(width: canvasWidth, height: 20))
+                lyricsImage.lockFocus()
+                if let ctx = NSGraphicsContext.current?.cgContext {
+                    ctx.setAllowsFontSubpixelPositioning(true)
+                    ctx.setShouldSubpixelPositionFonts(true)
+                    ctx.setAllowsFontSubpixelQuantization(true)
+                    ctx.setShouldSubpixelQuantizeFonts(false)
+                }
+                NSGraphicsContext.current?.imageInterpolation = .high
+                
+                let t = transitionProgress
+                let easedT = 1.0 - pow(1.0 - t, 3.0)
+                
+                let yOffsetOld = easedT * 14.0
+                let alphaOld = max(0.0, 1.0 - easedT)
+                
+                let yOffsetNew = -14.0 + easedT * 14.0
+                let alphaNew = easedT
+                
+                // 1. Draw old line sliding UP & crossfading out
+                if transitionProgress < 1.0, let oldGray = oldCachedGrayText {
+                    let oldPoint = NSPoint(x: glowPad + oldMarqueeOffset, y: yOffsetOld)
+                    oldGray.draw(at: oldPoint, from: .zero, operation: .sourceOver, fraction: alphaOld * 0.4)
+                }
+                if transitionProgress < 1.0, let oldWhite = oldCachedWhiteText {
+                    let oldPoint = NSPoint(x: glowPad + oldMarqueeOffset, y: yOffsetOld)
+                    oldWhite.draw(at: oldPoint, from: .zero, operation: .sourceOver, fraction: alphaOld)
+                }
+                
+                // 2. Draw new line sliding UP and fading in (or Melody Interlude Stars)
+                let isInterlude = currentLineText.contains("✦")
+                if isInterlude {
+                    let starCount = 3
+                    let spacing: CGFloat = 16.0
+                    let startX = (canvasWidth - CGFloat(starCount - 1) * spacing) / 2.0
+                    let centerY: CGFloat = 10.0 + yOffsetNew
+                    let t = now.timeIntervalSinceReferenceDate * 3.8
                     
-                    // Draw Motion Blur Ghost Trail for ultra-fast silky smooth perception (120Hz feel on 60Hz)
-                    let blurSteps = min(8, Int(abs(distanceMoved) * 1.5))
-                    if blurSteps > 0 {
-                        let stepDist = distanceMoved / CGFloat(blurSteps + 1)
-                        for i in 1...blurSteps {
-                            let ghostOffset = marqueeOffset - stepDist * CGFloat(i)
-                            let ghostRect = NSRect(x: glowPad + ghostOffset, y: ((20 - textSize.height) / 2) + yOffsetNew, width: textSize.width, height: textSize.height)
-                            
-                            var ghostAttr = attributes
-                            let ghostAlpha = alphaNew * (0.4 / CGFloat(blurSteps)) // Faint trail
-                            ghostAttr[.foregroundColor] = NSColor.white.withAlphaComponent(ghostAlpha)
-                            currentLineText.draw(in: ghostRect, withAttributes: ghostAttr)
+                    for sIdx in 0..<starCount {
+                        let phase = Double(sIdx) * 0.8
+                        let pulse = (sin(t + phase) + 1.0) * 0.5
+                        let s = (3.0 + CGFloat(pulse) * 2.2) * alphaNew
+                        let alpha = (0.50 + CGFloat(pulse) * 0.50) * alphaNew
+                        let center = NSPoint(x: startX + CGFloat(sIdx) * spacing, y: centerY)
+                        
+                        NSGraphicsContext.current?.saveGraphicsState()
+                        let shadow = NSShadow()
+                        shadow.shadowColor = NSColor.white.withAlphaComponent(alpha * 0.85)
+                        shadow.shadowBlurRadius = 5.0
+                        shadow.shadowOffset = .zero
+                        shadow.set()
+                        
+                        let path = NSBezierPath()
+                        path.move(to: NSPoint(x: center.x, y: center.y + s))
+                        path.curve(to: NSPoint(x: center.x + s, y: center.y), controlPoint1: NSPoint(x: center.x, y: center.y + s * 0.3), controlPoint2: NSPoint(x: center.x + s * 0.3, y: center.y))
+                        path.curve(to: NSPoint(x: center.x, y: center.y - s), controlPoint1: NSPoint(x: center.x + s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x + s * 0.3, y: center.y))
+                        path.curve(to: NSPoint(x: center.x - s, y: center.y), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x - s * 0.3, y: center.y))
+                        path.curve(to: NSPoint(x: center.x, y: center.y + s), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x, y: center.y + s * 0.3))
+                        
+                        NSColor.white.withAlphaComponent(alpha).setFill()
+                        path.fill()
+                        NSGraphicsContext.current?.restoreGraphicsState()
+                    }
+                } else {
+                    if let currentGray = currentCachedGrayText {
+                        let newPoint = NSPoint(x: glowPad + marqueeOffset, y: yOffsetNew)
+                        currentGray.draw(at: newPoint, from: .zero, operation: .sourceOver, fraction: alphaNew * 0.4)
+                    }
+                    
+                    // Target alpha based on progress
+                    let targetOrbAlpha: CGFloat = (progress > 0.0 && progress < 1.0) ? 1.0 : 0.0
+                    let alphaSmoothing = CGFloat(1.0 - exp(-15.0 * deltaTime))
+                    animatedOrbAlpha += (targetOrbAlpha - animatedOrbAlpha) * alphaSmoothing
+                    
+                    if (progress > 0 || animatedOrbAlpha > 0.01), let currentWhite = currentCachedWhiteText {
+                        let safeSize = currentWhite.size
+                        let fadeWidth: CGFloat = 24.0
+                        let leadX: CGFloat
+                        if let exactX = wordLeadX {
+                            leadX = exactX
+                        } else {
+                            leadX = (safeSize.width + fadeWidth) * CGFloat(progress) - fadeWidth
                         }
+                        let leadStart = max(0, leadX)
+                        let leadEnd = min(safeSize.width, leadX + fadeWidth)
+                        
+                        let highlightedImg = NSImage(size: safeSize)
+                        highlightedImg.lockFocus()
+                        currentWhite.draw(at: .zero, from: NSRect(origin: .zero, size: safeSize), operation: .copy, fraction: 1.0)
+                        
+                        NSGraphicsContext.current?.compositingOperation = .destinationIn
+                        if leadStart > 0 {
+                            NSColor.white.setFill()
+                            NSRect(x: 0, y: 0, width: leadStart, height: safeSize.height).fill()
+                        }
+                        if leadEnd > leadStart, let grad = NSGradient(colors: [NSColor.white, NSColor.clear]) {
+                            grad.draw(from: NSPoint(x: leadStart, y: 0), to: NSPoint(x: leadEnd, y: 0), options: [])
+                        }
+                        if leadEnd < safeSize.width {
+                            NSColor.clear.setFill()
+                            NSRect(x: leadEnd, y: 0, width: safeSize.width - leadEnd, height: safeSize.height).fill()
+                        }
+                        highlightedImg.unlockFocus()
+                        
+                        let textPoint1 = NSPoint(x: glowPad + marqueeOffset, y: yOffsetNew)
+                        highlightedImg.draw(at: textPoint1, from: .zero, operation: .sourceOver, fraction: alphaNew)
+                        self.lastRenderedHighlightedImage = highlightedImg
                     }
-                    
-                    let shadow = NSShadow()
-                    shadow.shadowColor = NSColor.white.withAlphaComponent(0.6 * alphaNew)
-                    shadow.shadowOffset = .zero
-                    shadow.shadowBlurRadius = 3
-                    shadow.set()
-                    
-                    currentLineText.draw(in: textRect1, withAttributes: whiteAttributes)
-                    
-                    NSGraphicsContext.current?.compositingOperation = .copy
-                    NSColor.clear.setFill()
-                    
-                    // Clear un-sung parts
-                    let copy1End = glowPad + marqueeOffset + textSize.width
-                    if currentX1 < copy1End {
-                        NSRect(x: currentX1, y: 0, width: copy1End - currentX1, height: 20).fill()
-                    }
-                    
-                    NSGraphicsContext.current?.compositingOperation = .destinationIn
-                    if let gradient = NSGradient(colors: [.white, .clear]) {
-                        gradient.draw(from: NSPoint(x: currentX1 - fadeWidth, y: 0), to: NSPoint(x: currentX1, y: 0), options: [])
-                    }
-                    
-                    whiteImage.unlockFocus()
-                    
-                    NSGraphicsContext.current?.saveGraphicsState()
-                    NSGraphicsContext.current?.compositingOperation = .sourceOver
-                    whiteImage.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1.0)
-                    NSGraphicsContext.current?.restoreGraphicsState()
                 }
-                
-                // Always apply Edge Masking for a premium fade at the boundaries
-                let needsMask = isMarquee || transitionProgress < 1.0 || (animatedWidth < requiredWidth)
-                if animatedWidth > 16 && needsMask {
-                    NSGraphicsContext.current?.saveGraphicsState()
-                    NSGraphicsContext.current?.compositingOperation = .destinationIn
-                    if let gradientLeft = NSGradient(colors: [.clear, .white]),
-                       let gradientRight = NSGradient(colors: [.white, .clear]) {
-                        gradientLeft.draw(from: NSPoint(x: 0, y: 0), to: NSPoint(x: 16, y: 0), options: [])
-                        gradientRight.draw(from: NSPoint(x: animatedWidth - 16, y: 0), to: NSPoint(x: animatedWidth, y: 0), options: [])
-                        NSColor.white.setFill()
-                        NSRect(x: 16, y: 0, width: animatedWidth - 32, height: 20).fill()
-                    }
-                    NSGraphicsContext.current?.restoreGraphicsState()
-                }
-                
                 let totalSparkleDuration = 5.5
-                let sparkleTime = Date().timeIntervalSince(trackChangedTime)
-                
-                let isSparkling = lyricsService.isLoading || (sparkleTime < totalSparkleDuration && currentLineText == track.name)
+                let isSparkling = lyricsService.isLoading || (sparkleTime < totalSparkleDuration && currentLineText == trackName)
                 
                 if isSparkling {
                     let cycleTime = lyricsService.isLoading ? sparkleTime.truncatingRemainder(dividingBy: totalSparkleDuration) : sparkleTime
@@ -548,14 +691,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         let rs = randomFloat()
                         let rd = randomFloat()
                         
-                        let delay = Double(rt) * 4.5 // 0 to 4.5s
-                        let duration = 0.5 + Double(rd) * 0.7 // 0.5 to 1.2s
-                        let center = NSPoint(x: glowPad + marqueeOffset + textW * rx, y: 6.0 + 8.0 * ry) // Constrained to avoid clipping
-                        let sizeMult = 0.7 + rs * 0.5 // 0.7 to 1.2
+                        let delay = Double(rt) * 4.5
+                        let duration = 0.5 + Double(rd) * 0.7
+                        let center = NSPoint(x: glowPad + marqueeOffset + textW * rx, y: 6.0 + 8.0 * ry)
+                        let sizeMult = 0.7 + rs * 0.5
                         
                         let sp = max(0, min(1, (cycleTime - delay) / duration))
                         if sp > 0 && sp < 1 {
-                            let s = sin(sp * .pi) * 5.0 * sizeMult // Max size ~6.0
+                            let s = sin(sp * .pi) * 5.0 * sizeMult
                             let alpha = sin(sp * .pi)
                             
                             NSGraphicsContext.current?.saveGraphicsState()
@@ -568,8 +711,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             let path = NSBezierPath()
                             path.move(to: NSPoint(x: center.x, y: center.y + s))
                             path.curve(to: NSPoint(x: center.x + s, y: center.y), controlPoint1: NSPoint(x: center.x, y: center.y + s * 0.3), controlPoint2: NSPoint(x: center.x + s * 0.3, y: center.y))
-                            path.curve(to: NSPoint(x: center.x, y: center.y - s), controlPoint1: NSPoint(x: center.x + s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x, y: center.y - s * 0.3))
-                            path.curve(to: NSPoint(x: center.x - s, y: center.y), controlPoint1: NSPoint(x: center.x, y: center.y - s * 0.3), controlPoint2: NSPoint(x: center.x - s * 0.3, y: center.y))
+                            path.curve(to: NSPoint(x: center.x, y: center.y - s), controlPoint1: NSPoint(x: center.x + s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x + s * 0.3, y: center.y))
+                            path.curve(to: NSPoint(x: center.x - s, y: center.y), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x - s * 0.3, y: center.y))
                             path.curve(to: NSPoint(x: center.x, y: center.y + s), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x, y: center.y + s * 0.3))
                             
                             NSColor.white.withAlphaComponent(alpha).setFill()
@@ -578,55 +721,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                 }
+
+                // Always apply Edge Masking for a premium fade at the boundaries
+                if canvasWidth > 16 {
+                    NSGraphicsContext.current?.saveGraphicsState()
+                    NSGraphicsContext.current?.compositingOperation = .destinationIn
+                    if let gradientLeft = NSGradient(colors: [.clear, .white]),
+                       let gradientRight = NSGradient(colors: [.white, .clear]) {
+                        gradientLeft.draw(from: NSPoint(x: 0, y: 0), to: NSPoint(x: 16, y: 0), options: [])
+                        gradientRight.draw(from: NSPoint(x: canvasWidth - 16, y: 0), to: NSPoint(x: canvasWidth, y: 0), options: [])
+                        NSColor.white.setFill()
+                        NSRect(x: 16, y: 0, width: canvasWidth - 32, height: 20).fill()
+                    }
+                    NSGraphicsContext.current?.restoreGraphicsState()
+                }
                 
                 lyricsImage.unlockFocus()
-                lyricsButton.image = lyricsImage
-                lastRenderedLyricsText = currentLineText  // cache for skip-redraw
-            } else {
-                lyricsButton.image = nil
+                lyricsImgToDraw = lyricsImage
+                lastRenderedLyricsText = currentLineText
             }
             
-            // --- 2. ART & WAVEFORM UPDATING (Right Item, Fixed Width) ---
-            if cachedAlbumArtURL != track.artworkURL {
-                cachedAlbumArtURL = track.artworkURL
+            // --- 2. ART & WAVEFORM UPDATING ---
+            let artKey = track.artworkURL ?? track.id
+            if cachedAlbumArtTrackId != artKey {
+                cachedAlbumArtTrackId = artKey
                 cachedAlbumArtImage = nil // Reset cache
                 
-                if let urlString = track.artworkURL, let url = URL(string: urlString) {
+                if let directImage = track.artworkImage {
+                    let roundedImage = self.roundCorners(of: directImage, size: NSSize(width: 20, height: 20), radius: 4)
+                    let theme = ColorExtractor.extractWaveformTheme(from: directImage)
+                    self.cachedAlbumArtImage = roundedImage
+                    self.cachedWaveformTheme = theme
+                } else if let urlString = track.artworkURL, let url = URL(string: urlString) {
                     URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+                        guard let self = self else { return }
                         if let data = data, let image = NSImage(data: data) {
-                            Task {
-                                let roundedImage = await MainActor.run { self?.roundCorners(of: image, size: NSSize(width: 20, height: 20), radius: 4) }
-                                let blurred = await Task.detached { () -> NSImage? in
-                                    guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-                                    let ciImage = CIImage(cgImage: cgImage)
-                                    let blurFilter = CIFilter(name: "CIGaussianBlur")
-                                    blurFilter?.setValue(ciImage, forKey: kCIInputImageKey)
-                                    blurFilter?.setValue(60.0, forKey: kCIInputRadiusKey)
-                                    guard var blurred = blurFilter?.outputImage else { return nil }
-                                    let exposureFilter = CIFilter(name: "CIExposureAdjust")
-                                    exposureFilter?.setValue(blurred, forKey: kCIInputImageKey)
-                                    exposureFilter?.setValue(1.5, forKey: kCIInputEVKey)
-                                    if let exposed = exposureFilter?.outputImage { blurred = exposed }
-                                    let colorFilter = CIFilter(name: "CIColorControls")
-                                    colorFilter?.setValue(blurred, forKey: kCIInputImageKey)
-                                    colorFilter?.setValue(1.6, forKey: kCIInputSaturationKey)
-                                    colorFilter?.setValue(0.05, forKey: kCIInputBrightnessKey)
-                                    if let vivid = colorFilter?.outputImage { blurred = vivid }
-                                    let context = CIContext()
-                                    guard let resultCG = context.createCGImage(blurred, from: ciImage.extent) else { return nil }
-                                    return NSImage(cgImage: resultCG, size: NSSize(width: 74, height: 20))
-                                }.value
-                                await MainActor.run {
-                                    self?.cachedBlurredAlbumArtImage = blurred ?? roundedImage
-                                    self?.cachedAlbumArtImage = roundedImage
-                                }
+                            DispatchQueue.main.async {
+                                let roundedImage = self.roundCorners(of: image, size: NSSize(width: 20, height: 20), radius: 4)
+                                let theme = ColorExtractor.extractWaveformTheme(from: image)
+                                self.cachedAlbumArtImage = roundedImage
+                                self.cachedWaveformTheme = theme
                             }
                         } else {
-                            Task { @MainActor in
+                            DispatchQueue.main.async {
                                 let fallback = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
                                 fallback?.isTemplate = true
-                                self?.cachedAlbumArtImage = fallback
-                                self?.cachedBlurredAlbumArtImage = fallback
+                                self.cachedAlbumArtImage = fallback
+                                self.cachedWaveformTheme = .fallback
                             }
                         }
                     }.resume()
@@ -634,150 +775,177 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let fallback = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
                     fallback?.isTemplate = true
                     cachedAlbumArtImage = fallback
-                    cachedBlurredAlbumArtImage = fallback
+                    cachedWaveformTheme = .fallback
                 }
             }
             
-            let waveformBars = UserDefaults.standard.integer(forKey: "waveformBars")
+            var waveformBars = 14
+            if UserDefaults.standard.object(forKey: "waveformBars") != nil {
+                waveformBars = min(128, max(0, UserDefaults.standard.integer(forKey: "waveformBars")))
+            }
             let barCount = waveformBars
             let barW: CGFloat = 2.0
             let barSp: CGFloat = 1.5
-            let vizWidth: CGFloat = barCount > 0 ? CGFloat(barCount) * (barW + barSp) : 0
-            let artGap: CGFloat = 16.0 // Matched to system gap
-            let artWidth: CGFloat = showAlbumArt ? 20.0 : 0
+            let vizWidth: CGFloat = (barCount > 0 && spotify.isPlaying) ? CGFloat(barCount) * (barW + barSp) : 0
+            let artWidth: CGFloat = (showAlbumArt && cachedAlbumArtImage != nil) ? 20.0 : 0
+            let lyricsWidth: CGFloat = (showLyrics && lyricsImgToDraw != nil) ? canvasWidth : 0
             
-            var combinedWidth: CGFloat = 20.0
-            if cachedAlbumArtImage != nil {
-                if barCount > 0 && showAlbumArt {
-                    combinedWidth = vizWidth + artGap + artWidth
-                } else if barCount > 0 {
-                    combinedWidth = vizWidth
-                } else if showAlbumArt {
-                    combinedWidth = artWidth
-                } else {
-                    combinedWidth = 1.0
-                }
+            let gap: CGFloat = 8.0
+            
+            var totalWidth: CGFloat = 0
+            var lyricsX: CGFloat = 0
+            var vizX: CGFloat = 0
+            var artX: CGFloat = 0
+            
+            if lyricsWidth > 0 {
+                lyricsX = totalWidth
+                totalWidth += lyricsWidth
             }
+            if vizWidth > 0 {
+                if totalWidth > 0 { totalWidth += gap }
+                vizX = totalWidth
+                totalWidth += vizWidth
+            }
+            if artWidth > 0 {
+                if totalWidth > 0 { totalWidth += gap }
+                artX = totalWidth
+                totalWidth += artWidth
+            }
+            totalWidth = max(24.0, totalWidth)
             
-            let combinedImage = NSImage(size: NSSize(width: combinedWidth, height: 20))
-            combinedImage.isTemplate = false
+            let combinedImage = NSImage(size: NSSize(width: totalWidth, height: 20))
             combinedImage.lockFocus()
             
-            if spotify.isPlaying && cachedAlbumArtImage != nil && barCount > 0 {
-                let startX: CGFloat = 0
+            // 1. Draw lyrics
+            if let lyricsImg = lyricsImgToDraw {
+                lyricsImg.draw(at: NSPoint(x: lyricsX, y: 0), from: NSRect(origin: .zero, size: lyricsImg.size), operation: .sourceOver, fraction: 1.0)
+            }
+            
+            // 2. Draw Waveform (Apple-Style Authentic FFT Equalizer with Bass-Ceiling Surge)
+            if vizWidth > 0 {
+                let startX = vizX
+                let clipPath = NSBezierPath()
                 
-                if UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
-                    let totalAmps = audioAnalyzer.amplitudes.count
-                    let clipPath = NSBezierPath()
-                    let motionClipPath = NSBezierPath()
+                let rawAmps = audioAnalyzer.amplitudes
+                let count = barCount
+                let hasLiveAudio = audioAnalyzer.isRunning && rawAmps.contains { $0 > 0.02 }
                 
-                for i in 0..<barCount {
-                    let ampIndex = totalAmps > 0 ? (i * totalAmps / barCount) : 0
-                    let rawAmp = (totalAmps > ampIndex) ? audioAnalyzer.amplitudes[ampIndex] : 0.05
-                    let height = max(3.0, rawAmp * 20.0)
-                    let y = (20.0 - height) / 2.0
-                    let rect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: y, width: barW, height: height)
-                    clipPath.append(NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1))
-                    
-                    let lastAmp = lastAmplitudes.count > i ? lastAmplitudes[i] : 0.05
-                    let lastHeight = max(3.0, lastAmp * 20.0)
-                    let lastY = (20.0 - lastHeight) / 2.0
-                    let lastRect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: lastY, width: barW, height: lastHeight)
-                    motionClipPath.append(NSBezierPath(roundedRect: lastRect, xRadius: 1, yRadius: 1))
+                // Initialize barHeights array if needed
+                if barHeights.count != count {
+                    barHeights = Array(repeating: 2.5, count: count)
                 }
                 
-                if totalAmps > 0 {
-                    lastAmplitudes = (0..<barCount).map { i in
-                        return audioAnalyzer.amplitudes[(i * totalAmps / barCount)]
-                    }
+                let minHeight: CGFloat = 2.5
+                let maxHeight: CGFloat = 17.5 // True ceiling: punches up inside 20pt container with 1.25pt padding
+                
+                // Authentic physical bass energy from lower FFT bands (Bands 0-2: Sub-bass 60Hz-250Hz)
+                var bassEnergy: CGFloat = 0.0
+                if hasLiveAudio && rawAmps.count >= 3 {
+                    bassEnergy = (rawAmps[0] * 0.45 + rawAmps[1] * 0.35 + rawAmps[2] * 0.20)
                 }
                 
-                NSGraphicsContext.current?.saveGraphicsState()
-                motionClipPath.addClip()
-                if let blurImage = cachedBlurredAlbumArtImage, !blurImage.isTemplate {
-                    let fillRect = NSRect(x: startX, y: 0, width: vizWidth, height: 20)
-                    blurImage.draw(in: fillRect, from: NSRect(origin: .zero, size: blurImage.size), operation: .copy, fraction: 0.5)
-                    NSColor.white.withAlphaComponent(0.25).setFill()
-                    motionClipPath.fill()
+                // On loud bass transients (beat drops, 808 kicks), surge ALL bars to the ceiling simultaneously
+                let bassSurge: CGFloat
+                if bassEnergy > 0.58 {
+                    let surgeNorm = min(1.0, (bassEnergy - 0.58) / 0.28)
+                    bassSurge = pow(surgeNorm, 1.20)
                 } else {
-                    NSColor.white.withAlphaComponent(0.4).set()
-                    motionClipPath.fill()
+                    bassSurge = 0.0
                 }
-                NSGraphicsContext.current?.restoreGraphicsState()
                 
-                // Cast the glowing shadow behind the main bars
+                let timePhase = now.timeIntervalSince1970 * 4.0
+                
+                for i in 0..<count {
+                    let rawAmp: CGFloat
+                    if hasLiveAudio && !rawAmps.isEmpty {
+                        let step = Double(rawAmps.count) / Double(count)
+                        let srcIdx = min(rawAmps.count - 1, max(0, Int(Double(i) * step)))
+                        rawAmp = CGFloat(rawAmps[srcIdx])
+                    } else {
+                        rawAmp = 0.0
+                    }
+                    
+                    let energy: CGFloat
+                    if !spotify.isPlaying {
+                        energy = 0.02
+                    } else if hasLiveAudio {
+                        // Dynamic acoustic band response:
+                        // Non-linear power expansion so transients punch out clearly
+                        let bandAmp = pow(rawAmp, 0.85)
+                        // Heavy bass transient surge lifts ALL bars to the ceiling
+                        let combined = max(bandAmp, bassSurge * 0.98 + bandAmp * 0.20)
+                        energy = min(1.0, max(0.04, combined))
+                    } else {
+                        // Gentle breathing wave ONLY when idle / no live audio
+                        let barPhase = Double(i) * 0.55
+                        let wave = (sin(timePhase * 1.2 + barPhase) * cos(timePhase * 0.5 + Double(i) * 0.25) + 1.0) * 0.5
+                        energy = min(0.65, max(0.10, CGFloat(wave) * 0.40))
+                    }
+                    
+                    let targetH = minHeight + energy * (maxHeight - minHeight)
+                    let currentH = barHeights[i]
+                    
+                    // Apple Asymmetric Ballistics:
+                    // Attack (Rising): Snappy punch (~25ms rise)
+                    // Decay (Falling): Smooth gravity dissipation (~180ms fall)
+                    let speed: CGFloat
+                    if targetH > currentH {
+                        speed = CGFloat(1.0 - exp(-38.0 * deltaTime))
+                    } else {
+                        speed = CGFloat(1.0 - exp(-14.0 * deltaTime))
+                    }
+                    
+                    let newH = currentH + (targetH - currentH) * speed
+                    barHeights[i] = newH
+                    
+                    let y = (20.0 - newH) / 2.0
+                    let barRect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: y, width: barW, height: newH)
+                    clipPath.append(NSBezierPath(roundedRect: barRect, xRadius: barW / 2.0, yRadius: barW / 2.0))
+                }
+                
+                // 1. Apple Music subtle bloom behind bars
+                let theme = cachedWaveformTheme
                 NSGraphicsContext.current?.saveGraphicsState()
-                
-                // 1. Outer Bloom
-                let outerShadow = NSShadow()
-                outerShadow.shadowColor = NSColor.white.withAlphaComponent(0.5)
-                outerShadow.shadowOffset = .zero
-                outerShadow.shadowBlurRadius = 6.0
-                outerShadow.set()
-                NSColor.clear.setFill() // Only cast shadow, don't fill yet
+                let outerGlow = NSShadow()
+                outerGlow.shadowColor = theme.glowColor.withAlphaComponent(0.35)
+                outerGlow.shadowOffset = .zero
+                outerGlow.shadowBlurRadius = 3.0
+                outerGlow.set()
+                theme.glowColor.withAlphaComponent(0.15).setFill()
                 clipPath.fill()
-                
-                // 2. Inner Intense Glow
-                let innerShadow = NSShadow()
-                innerShadow.shadowColor = NSColor.white.withAlphaComponent(0.9)
-                innerShadow.shadowOffset = .zero
-                innerShadow.shadowBlurRadius = 2.0
-                innerShadow.set()
-                NSColor.clear.setFill() // Don't pre-fill with white so colors can shine
-                clipPath.fill()
-                
                 NSGraphicsContext.current?.restoreGraphicsState()
                 
-                // Draw the textured/bright bars inside the clip
+                // 2. Vector gradient fill with TRUE-TONE album colors (no washed-out white wash)
                 NSGraphicsContext.current?.saveGraphicsState()
                 clipPath.addClip()
-                if let blurImage = cachedBlurredAlbumArtImage, !blurImage.isTemplate {
-                    let fillRect = NSRect(x: startX, y: 0, width: vizWidth, height: 20)
-                    blurImage.draw(in: fillRect, from: NSRect(origin: .zero, size: blurImage.size), operation: .copy, fraction: 1.0)
-                    NSColor.white.withAlphaComponent(0.15).setFill() // Tiny bit of white just to ensure contrast, but let the colors pop!
-                    clipPath.fill()
+                let waveRect = NSRect(x: startX, y: (20.0 - maxHeight) / 2.0, width: vizWidth, height: maxHeight)
+                if let gradient = NSGradient(colors: [theme.topColor, theme.bottomColor]) {
+                    gradient.draw(in: waveRect, angle: 90)
                 } else {
-                    NSColor.white.set()
+                    theme.topColor.setFill()
                     clipPath.fill()
                 }
                 NSGraphicsContext.current?.restoreGraphicsState()
-                
-                } else {
-                    // Flat baseline if audio disabled
-                    NSGraphicsContext.current?.saveGraphicsState()
-                    let flatClipPath = NSBezierPath()
-                    for i in 0..<barCount {
-                        let rect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: (20.0 - 2.0) / 2.0, width: barW, height: 2.0)
-                        flatClipPath.append(NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1))
-                    }
-                    flatClipPath.addClip()
-                    NSColor.white.withAlphaComponent(0.3).setFill()
-                    let fillRect = NSRect(x: startX, y: 0, width: vizWidth, height: 20)
-                    fillRect.fill()
-                    NSGraphicsContext.current?.restoreGraphicsState()
-                }
             }
             
+            // 3. Draw album art
             if let art = cachedAlbumArtImage, showAlbumArt {
-                let artX = combinedWidth - artWidth
                 art.draw(at: NSPoint(x: artX, y: 0), from: NSRect(origin: .zero, size: art.size), operation: .copy, fraction: 1.0)
             }
-            
             combinedImage.unlockFocus()
-            artButton.image = combinedImage
-            artButton.needsDisplay = true
+            
+            combinedImage.isTemplate = false
+            button.image = combinedImage
+            button.imagePosition = .imageOnly
+            button.needsDisplay = true
             
         } else {
             // No track playing
-            if let artButton = self.artStatusItem?.button {
-                if artButton.image?.name() != NSImage.Name("music.note") {
-                    let img = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
-                    img?.isTemplate = true
-                    artButton.image = img
-                }
-            }
-            if let lyricsButton = self.lyricsStatusItem?.button {
-                lyricsButton.image = nil
+            if let button = self.statusItem?.button {
+                let img = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Lyrics Menu Bar")
+                img?.isTemplate = true
+                button.image = img
+                button.imagePosition = .imageOnly
             }
         }
     }

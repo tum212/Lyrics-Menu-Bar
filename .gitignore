@@ -6,3 +6,11 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+.agents/
+Liqoria.dmg
+.dmg_staging*
+.temp_rw*
+test_*
+test_*.*
+SpoticatMenuBar*.dmg
+LyricsMenuBar-1.1.37.dmg

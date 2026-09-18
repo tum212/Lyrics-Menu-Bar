@@ -1,25 +1,67 @@
 import Foundation
 import AVFoundation
-import AVFAudio
 import Accelerate
-import CoreAudio
 import CoreMedia
+import CoreAudio
 #if os(macOS)
 import AppKit
 #endif
 import Combine
 
+// MARK: - Mach time → seconds helper (used in IOProc → Haptic pipeline)
+private nonisolated(unsafe) let _machTimebaseInfo: mach_timebase_info_data_t = {
+    var info = mach_timebase_info_data_t()
+    mach_timebase_info(&info)
+    return info
+}()
+
+@inline(__always)
+func machTimeToSeconds(_ t: UInt64) -> Double {
+    return Double(t) * Double(_machTimebaseInfo.numer) / Double(_machTimebaseInfo.denom) * 1e-9
+}
+
+// MARK: - Global IOProc Callback
+func tapIOProc(
+    inDevice: AudioObjectID,
+    inNow: UnsafePointer<AudioTimeStamp>,
+    inInputData: UnsafePointer<AudioBufferList>,
+    inInputTime: UnsafePointer<AudioTimeStamp>,
+    outOutputData: UnsafeMutablePointer<AudioBufferList>,
+    inOutputTime: UnsafePointer<AudioTimeStamp>,
+    inClientData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let clientData = inClientData else { return noErr }
+    let analyzer = Unmanaged<AudioAnalyzer>.fromOpaque(clientData).takeUnretainedValue()
+
+    // inOutputTime.mHostTime = exact Mach timestamp when the FIRST sample
+    // of this buffer will exit the DAC. This is our anchor for zero-latency haptics.
+    let outputHostTime = inOutputTime.pointee.mHostTime
+
+    let bufferListPtr = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+    if bufferListPtr.count > 0 {
+        let buffer = bufferListPtr[0]
+        let byteSize = Int(buffer.mDataByteSize)
+        let frameCount = byteSize / MemoryLayout<Float32>.size
+        if let data = buffer.mData, frameCount > 0 {
+            let floatData = data.assumingMemoryBound(to: Float32.self)
+            let bufferPtr = UnsafeBufferPointer(start: floatData, count: frameCount)
+            analyzer.processFloatData(bufferPtr, count: frameCount, sampleRate: 44100.0,
+                                      outputHostTime: outputHostTime)
+        }
+    }
+
+    return noErr
+}
+
 // MARK: - AudioAnalyzer
-// Uses AVAudioEngine tapping the system output device via CoreAudio.
-// This is the same approach used by Liqoria — it shows "System Audio Recording Only"
-// indicator (waveform icon, separate category) rather than the "Screen Recording" indicator.
-// No ScreenCaptureKit is used here.
 
 public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendable {
     @Published public var amplitudes: [CGFloat] = Array(repeating: 0.05, count: 14)
 
-    private var engine: AVAudioEngine?
-    private var isRunning = false
+    private var tapID: AudioObjectID = 0
+    private var aggregateDeviceID: AudioObjectID = 0
+    private var ioProcID: AudioDeviceIOProcID? = nil
+    public private(set) var isRunning = false
     public private(set) var bandCount = 14
     private var spectrumBuffer = [Float](repeating: 0, count: 14)
     private var bandGains = [Float](repeating: 0.05, count: 14)
@@ -43,8 +85,27 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
     private var cachedLog2n: vDSP_Length = 0
     private var observers: [Any] = []
 
+    private var currentTargetBundleID: String = "com.spotify.client"
+
     public override init() {
         super.init()
+        let obs = NotificationCenter.default.addObserver(forName: Notification.Name("ActiveMusicSourceChanged"), object: nil, queue: .main) { [weak self] notif in
+            if let bundleID = notif.userInfo?["bundleID"] as? String {
+                self?.retarget(bundleID: bundleID)
+            }
+        }
+        observers.append(obs)
+    }
+
+    public func retarget(bundleID: String) {
+        guard bundleID != currentTargetBundleID else { return }
+        currentTargetBundleID = bundleID
+        if isRunning {
+            stop()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.start()
+            }
+        }
     }
 
     deinit {
@@ -68,9 +129,14 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
 
     public func stop() {
         guard isRunning else { return }
-        engine?.stop()
-        engine?.inputNode.removeTap(onBus: 0)
-        engine = nil
+        if let ioProcID = ioProcID, aggregateDeviceID != 0 {
+            AudioDeviceStop(aggregateDeviceID, ioProcID)
+            AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            self.ioProcID = nil
+            self.aggregateDeviceID = 0
+            self.tapID = 0
+        }
         isRunning = false
         DispatchQueue.main.async {
             self.amplitudes = Array(repeating: 0.0, count: self.bandCount)
@@ -83,25 +149,9 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
 
     private func requestAccessAndSetup() {
         guard !isRequestingAccess else { return }
-
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            setupEngine()
-        case .notDetermined:
-            isRequestingAccess = true
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async {
-                    self?.isRequestingAccess = false
-                    if granted {
-                        self?.setupEngine()
-                    } else {
-                        self?.showPermissionAlert()
-                    }
-                }
-            }
-        default:
-            DispatchQueue.main.async { self.showPermissionAlert() }
-        }
+        isRequestingAccess = true
+        setupCoreAudioTap()
+        isRequestingAccess = false
     }
 
     #if os(macOS)
@@ -118,108 +168,126 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
         alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            // System Audio Recording Only section
             let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SystemAudioRecording")!
             NSWorkspace.shared.open(url)
         }
     }
     #endif
 
-    // MARK: - AVAudioEngine Setup (CoreAudio system output tap)
+    // MARK: - CoreAudio Tap Setup
 
-    private func setupEngine() {
-        let newEngine = AVAudioEngine()
-
-        // ── Wire the engine's input to the system's default output device ─────
-        // This is the CoreAudio trick: route the engine's input to the system
-        // output device (what's currently playing) rather than the microphone.
-        // This is what places the app under "System Audio Recording Only" in Privacy.
-        #if os(macOS)
-        let inputNode = newEngine.inputNode
-        let outputDeviceID = getDefaultOutputDeviceID()
-        if let deviceID = outputDeviceID, deviceID != kAudioDeviceUnknown {
-            setEngineInputDevice(engine: newEngine, deviceID: deviceID)
-        }
-        #endif
-
-        let format = newEngine.inputNode.outputFormat(forBus: 0)
-
-        guard format.channelCount > 0, format.sampleRate > 0 else {
-            print("⚠️ Invalid audio format from input node")
+    private func setupCoreAudioTap() {
+        guard #available(macOS 14.2, *) else {
+            print("macOS 14.2+ required for CATapDescription")
             DispatchQueue.main.async { self.showPermissionAlert() }
             return
         }
 
-        print("📻 AVAudioEngine format: \(format.sampleRate)Hz, \(format.channelCount)ch")
-
-        newEngine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] (buf: AVAudioPCMBuffer, _: AVAudioTime) in
-            guard let self, let channelData = buf.floatChannelData?[0] else { return }
-            let count = Int(buf.frameLength)
-            let ptr = UnsafeBufferPointer(start: channelData, count: count)
-            self.processFFT(floatData: ptr, count: count, sampleRate: Float(format.sampleRate))
-        }
-
-        do {
-            try newEngine.start()
-            self.engine    = newEngine
-            self.isRunning = true
-            print("✅ AVAudioEngine system audio tap started")
-
-            // Restart on config change (device switch, sleep/wake)
-            observers.append(
-                NotificationCenter.default.addObserver(
-                    forName: .AVAudioEngineConfigurationChange,
-                    object: newEngine,
-                    queue: .main
-                ) { [weak self] _ in
-                    print("🔄 Audio config changed — restarting")
-                    self?.stop()
-                    self?.start()
-                }
-            )
-        } catch {
-            print("⚠️ AVAudioEngine start failed: \(error)")
-            DispatchQueue.main.async { self.showPermissionAlert() }
-        }
-    }
-
-    // MARK: - CoreAudio: route engine input → system output device
-
-    #if os(macOS)
-    private func getDefaultOutputDeviceID() -> AudioDeviceID? {
-        var deviceID = kAudioObjectUnknown
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-        let status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID)
-        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
-        return deviceID
-    }
-
-    private func setEngineInputDevice(engine: AVAudioEngine, deviceID: AudioDeviceID) {
-        var deviceID = deviceID
-        let size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        if let au = engine.inputNode.audioUnit {
-            let result = AudioUnitSetProperty(
-                au,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &deviceID,
-                size
-            )
-            if result == noErr {
-                print("✅ Engine input set to system output device (id=\(deviceID))")
-            } else {
-                print("⚠️ Could not set input device: OSStatus=\(result)")
+        var targetBundleID = currentTargetBundleID
+        let mode = UserDefaults.standard.string(forKey: "musicSourceMode") ?? "Auto"
+        if mode == "Apple Music" {
+            targetBundleID = "com.apple.Music"
+        } else if mode == "Spotify" {
+            targetBundleID = "com.spotify.client"
+        } else {
+            let spotifyRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").contains { !$0.isTerminated }
+            let musicRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").contains { !$0.isTerminated }
+            if musicRunning && !spotifyRunning {
+                targetBundleID = "com.apple.Music"
+            } else if spotifyRunning {
+                targetBundleID = "com.spotify.client"
             }
         }
+
+        let targetApps = NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleID).filter { !$0.isTerminated }
+        guard let targetApp = targetApps.first else {
+            print("Target music app (\(targetBundleID)) is not running")
+            return
+        }
+        currentTargetBundleID = targetBundleID
+        
+        var pid: pid_t = pid_t(targetApp.processIdentifier)
+        var pidSize = UInt32(MemoryLayout<pid_t>.size)
+        
+        var processID: AudioObjectID = 0
+        var processIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            pidSize,
+            &pid,
+            &processIDSize,
+            &processID
+        )
+        
+        guard status == noErr, processID != 0 else {
+            print("Failed to translate PID to ProcessObject: \(status)")
+            return
+        }
+
+        let desc = CATapDescription(stereoMixdownOfProcesses: [processID])
+        var newTapID: AudioObjectID = 0
+        let tapStatus = AudioHardwareCreateProcessTap(desc, &newTapID)
+        
+        guard tapStatus == noErr, newTapID != 0 else {
+            print("Failed to create process tap: \(tapStatus)")
+            DispatchQueue.main.async { self.showPermissionAlert() }
+            return
+        }
+        
+        self.tapID = newTapID
+        
+        var uid: CFString = "" as CFString
+        var uidSize = UInt32(MemoryLayout<CFString>.size)
+        var uidAddress = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyUID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        withUnsafeMutablePointer(to: &uid) { uidPtr in
+            AudioObjectGetPropertyData(newTapID, &uidAddress, 0, nil, &uidSize, uidPtr)
+        }
+        
+        let tapDict: [String: Any] = [
+            "uid": uid
+        ]
+        
+        let aggregateDict: [String: Any] = [
+            "name": "Spoticat Tap Aggregate",
+            "uid": UUID().uuidString,
+            "private": 1,
+            "taps": [tapDict]
+        ]
+        
+        var aggregateID: AudioObjectID = 0
+        let aggStatus = AudioHardwareCreateAggregateDevice(aggregateDict as CFDictionary, &aggregateID)
+        guard aggStatus == noErr, aggregateID != 0 else {
+            print("Failed to create aggregate device: \(aggStatus)")
+            return
+        }
+        
+        self.aggregateDeviceID = aggregateID
+        let clientData = Unmanaged.passUnretained(self).toOpaque()
+        
+        var newIOProcID: AudioDeviceIOProcID? = nil
+        let ioStatus = AudioDeviceCreateIOProcID(aggregateID, tapIOProc, clientData, &newIOProcID)
+        guard ioStatus == noErr, let validIOProcID = newIOProcID else {
+            print("Failed to create IOProc: \(ioStatus)")
+            return
+        }
+        self.ioProcID = validIOProcID
+        
+        let startStatus = AudioDeviceStart(aggregateID, validIOProcID)
+        if startStatus == noErr {
+            self.isRunning = true
+            print("✅ CoreAudio Process Tap started on \(targetBundleID)!")
+        } else {
+            print("Failed to start IOProc: \(startStatus)")
+        }
     }
-    #endif
 
     // MARK: - Sliding-window FFT
 
@@ -227,14 +295,22 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
     private var circularBuffer: [Float] = Array(repeating: 0, count: 4096)
     private var circularIndex: Int = 0
     private var lastPrintTime = Date()
+    
+    // Bridging call for IOProc — carries the hardware output timestamp for zero-latency haptics
+    fileprivate func processFloatData(_ floatData: UnsafeBufferPointer<Float>, count: Int, sampleRate: Float,
+                                      outputHostTime: UInt64) {
+        processFFT(floatData: floatData, count: count, sampleRate: sampleRate,
+                   outputHostTime: outputHostTime)
+    }
 
-    private func processFFT(floatData: UnsafeBufferPointer<Float>, count: Int, sampleRate: Float) {
+    private func processFFT(floatData: UnsafeBufferPointer<Float>, count: Int, sampleRate: Float,
+                             outputHostTime: UInt64) {
         let halfLen = fftSize / 2
 
         if Date().timeIntervalSince(lastPrintTime) > 1.0 {
             var maxVal: Float = 0
             if count > 0 { vDSP_maxv(floatData.baseAddress!, 1, &maxVal, vDSP_Length(count)) }
-            print("🔊 Tap. frames=\(count) maxAmp=\(maxVal)")
+            print("🔊 CoreAudio Tap Frames=\(count) maxAmp=\(maxVal)")
             lastPrintTime = Date()
         }
 
@@ -268,6 +344,7 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
 
         // Window + FFT
         vDSP_vmul(latest, 1, &fftWindow, 1, &fftWindowed, 1, vDSP_Length(fftSize))
+
         fftWindowed.withUnsafeBufferPointer { wPtr in
             wPtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfLen) { cPtr in
                 fftRealP.withUnsafeMutableBufferPointer { rPtr in
@@ -317,24 +394,31 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
             if boosted > frameMax { frameMax = boosted }
         }
 
-        // Haptics
-        if UserDefaults.standard.bool(forKey: "hapticEnabled") {
+        // Haptics — hardware-timestamp-aware for true zero latency
+        let hapticIntensity = UserDefaults.standard.integer(forKey: "hapticIntensity")
+        if hapticIntensity > 0 {
+            // Sub-bass (kick drum body): 20–80 Hz
             let deepMinBin = max(1, Int(20.0 / hzPerBin))
-            let deepMaxBin = min(halfLen - 1, Int(50.0 / hzPerBin))
-            let stdMinBin = deepMaxBin
-            let stdMaxBin = min(halfLen - 1, Int(120.0 / hzPerBin))
+            let deepMaxBin = min(halfLen - 1, Int(80.0 / hzPerBin))
+            // Punch bass: 80–150 Hz
+            let stdMinBin  = deepMaxBin
+            let stdMaxBin  = min(halfLen - 1, Int(150.0 / hzPerBin))
             var deepSum: Float = 0
             if deepMaxBin > deepMinBin { for j in deepMinBin..<deepMaxBin { deepSum += fftActual[j] } }
             let deepAvg = deepSum / max(1, Float(deepMaxBin - deepMinBin))
             var stdSum: Float = 0
             if stdMaxBin > stdMinBin { for j in stdMinBin..<stdMaxBin { stdSum += fftActual[j] } }
             let stdAvg = stdSum / max(1, Float(stdMaxBin - stdMinBin))
-            bassPeak = max(bassPeak * 0.92, max(deepAvg, stdAvg))
-            let deepNorm = min(1.0, deepAvg / max(bassPeak, 0.0001))
-            let stdNorm  = min(1.0, stdAvg  / max(bassPeak, 0.0001))
-            DispatchQueue.main.async {
-                HapticManager.shared.updateHapticFeedback(deepBass: deepNorm, standardBass: stdNorm)
-            }
+
+            // Pass hardware timestamp so haptic fires exactly when DAC outputs the beat
+            HapticManager.shared.updateHapticFeedback(
+                deepBass: deepAvg,
+                standardBass: stdAvg,
+                intensity: hapticIntensity,
+                bufferHostTime: outputHostTime,
+                bufferFrameCount: count,
+                sampleRate: sampleRate
+            )
         }
 
         // Per-band auto-gain + smoothing
@@ -354,18 +438,6 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
             newAmplitudes[i] = CGFloat(spectrumBuffer[i])
         }
         lock.unlock()
-
-        if frameMax < 0.00005 {
-            silenceFrames += 1
-            if silenceFrames >= silenceThresholdFrames && !diagnosticShown {
-                diagnosticShown = true
-                DispatchQueue.main.async {
-                    DiagnosticWindowManager.shared.showDiagnostic(issue: .silentAudio)
-                }
-            }
-        } else {
-            silenceFrames = 0
-        }
 
         DispatchQueue.main.async { self.amplitudes = newAmplitudes }
     }
