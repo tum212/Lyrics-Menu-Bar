@@ -415,7 +415,7 @@ struct LyricLineRowView: View {
                 .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
         )
         .contentShape(Rectangle())
-        .animation(.easeInOut(duration: 0.35), value: isActive)
+        .animation(.easeInOut(duration: 0.38), value: isActive)
         .onTapGesture {
             onSeek()
         }
@@ -438,6 +438,7 @@ struct LyricLineRowView: View {
                     .font(.system(size: 20, weight: .bold))
                     .foregroundColor(isActive ? .white : .white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60)))
                     .shadow(color: isActive ? .white.opacity(0.40) : .clear, radius: 4)
+                    .animation(.easeInOut(duration: 0.38), value: isActive)
                     .frame(height: 28, alignment: .leading)
             }
         }
@@ -484,54 +485,56 @@ struct LyricLineRowView: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(0..<lines.count, id: \.self) { i in
                 let lineText = lines[i]
-                if !isActive {
+                let lineWidth = lineText.size(withAttributes: [.font: font]).width
+                let ls = lineTiming[i].ls
+                let le = lineTiming[i].le
+                
+                let rawLp = (fallbackProgress - ls) / max(0.001, (le - ls))
+                let lp = max(0, min(1, rawLp))
+                
+                let fadeWidth: CGFloat = 24
+                let currentX = (lineWidth + fadeWidth) * lp - fadeWidth
+                let fadeStart = max(0.0, min(1.0, currentX / max(1.0, lineWidth)))
+                let fadeEnd = max(0.0, min(1.0, (currentX + fadeWidth) / max(1.0, lineWidth)))
+                
+                let isLineSinging = lp > 0.0 && lp < 1.0
+                let isLineFullySung = lp >= 1.0
+                
+                let glowOpacity: Double = isLineSinging ? 0.65 : (isLineFullySung ? 0.35 : 0.0)
+                let glowRadius: CGFloat = isLineSinging ? 5.0 : (isLineFullySung ? 3.0 : 0.0)
+                
+                ZStack(alignment: .leading) {
                     Text(lineText)
                         .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60)))
-                        .frame(height: 28, alignment: .leading)
-                } else {
-                    let lineWidth = lineText.size(withAttributes: [.font: font]).width
-                    let ls = lineTiming[i].ls
-                    let le = lineTiming[i].le
+                        .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
+                        .animation(.easeInOut(duration: 0.38), value: isActive)
                     
-                    let rawLp = (fallbackProgress - ls) / max(0.001, (le - ls))
-                    let lp = max(0, min(1, rawLp))
-                    
-                    let fadeWidth: CGFloat = 24
-                    let currentX = (lineWidth + fadeWidth) * lp - fadeWidth
-                    let fadeStart = max(0.0, min(1.0, currentX / max(1.0, lineWidth)))
-                    let fadeEnd = max(0.0, min(1.0, (currentX + fadeWidth) / max(1.0, lineWidth)))
-                    
-                    ZStack(alignment: .leading) {
-                        Text(lineText)
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundColor(.white.opacity(0.35))
-                        
-                        Text(lineText)
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundColor(.white)
-                            .mask(
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: .black, location: 0),
-                                        .init(color: .black, location: fadeStart),
-                                        .init(color: .clear, location: fadeEnd)
-                                    ],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
+                    Text(lineText)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.white)
+                        .mask(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: 0),
+                                    .init(color: .black, location: fadeStart),
+                                    .init(color: .clear, location: fadeEnd)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
                             )
-                            .shadow(color: .white.opacity(0.60), radius: 5)
-                    }
-                    .frame(height: 28, alignment: .leading)
+                        )
+                        .shadow(color: .white.opacity(glowOpacity), radius: glowRadius)
+                        .opacity(lp > 0.0 ? (isActive ? 1.0 : 0.0) : 0.0)
+                        .animation(.easeInOut(duration: 0.38), value: isActive)
                 }
+                .frame(height: 28, alignment: .leading)
             }
         }
         .frame(width: containerWidth, alignment: .leading)
     }
 }
 
-// MARK: - Single Word Lyric Item (Apple Music Soft Feathered Fade)
+// MARK: - Single Word Lyric Item (Apple Music Continuous Glow Decay & Seamless Flow)
 struct WordLyricItemView: View {
     let word: LyricWord
     let isActive: Bool
@@ -543,52 +546,70 @@ struct WordLyricItemView: View {
     
     var body: some View {
         let font = Font.system(size: fontSize, weight: fontWeight)
-        let isFullySung = isActive && (currentTime >= word.endTime)
-        let isSinging = isActive && (currentTime >= word.startTime && currentTime < word.endTime)
+        let wordStart = word.startTime
+        let wordEnd = word.endTime
+        let wordDuration = max(0.06, wordEnd - wordStart)
         
-        let wordDuration = max(0.06, word.endTime - word.startTime)
-        let progress: CGFloat = isFullySung ? 1.0 : (isSinging ? CGFloat(max(0.0, min(1.0, (currentTime - word.startTime) / wordDuration))) : 0.0)
+        // Continuous wipe progress: 0.0 before start, 0.0->1.0 while singing, 1.0 when sung
+        let rawProgress = (currentTime - wordStart) / wordDuration
+        let progress: CGFloat = CGFloat(max(0.0, min(1.0, rawProgress)))
+        
+        let hasStarted = currentTime >= wordStart
+        let isActivelySinging = currentTime >= wordStart && currentTime < wordEnd
+        
+        let glow = computeGlow(hasStarted: hasStarted, isActivelySinging: isActivelySinging, wordEnd: wordEnd)
         
         ZStack(alignment: .leading) {
-            // Base unlit text (always present to preserve layout and typography)
+            // Base layer: unlit typography with smooth opacity transition
             Text(word.text)
                 .font(font)
                 .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
+                .animation(.easeInOut(duration: 0.38), value: isActive)
             
-            // Luminous illuminated layer with soft crossfade when line finishes
-            if isFullySung {
-                Text(word.text)
-                    .font(font)
-                    .foregroundColor(.white)
-                    .shadow(color: .white.opacity(0.40), radius: 3)
-                    .transition(.opacity)
-            } else if isSinging {
-                Text(word.text)
-                    .font(font)
-                    .foregroundColor(.white)
-                    .mask(
-                        GeometryReader { geo in
-                            let w = geo.size.width
-                            let fadeWidth: CGFloat = 16.0
-                            let leadX = (w + fadeWidth) * progress - fadeWidth
-                            let fadeStart = max(0.0, min(1.0, leadX / max(1.0, w)))
-                            let fadeEnd = max(0.0, min(1.0, (leadX + fadeWidth) / max(1.0, w)))
-                            
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .black, location: 0.0),
-                                    .init(color: .black, location: fadeStart),
-                                    .init(color: .clear, location: fadeEnd)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        }
-                    )
-                    .shadow(color: .white.opacity(0.70), radius: 5)
-            }
+            // Illuminated layer: SINGLE stable view that never unmounts while active
+            Text(word.text)
+                .font(font)
+                .foregroundColor(.white)
+                .mask(
+                    GeometryReader { geo in
+                        let w = geo.size.width
+                        let fadeWidth: CGFloat = 16.0
+                        let leadX = (w + fadeWidth) * progress - fadeWidth
+                        let fadeStart = max(0.0, min(1.0, leadX / max(1.0, w)))
+                        let fadeEnd = max(0.0, min(1.0, (leadX + fadeWidth) / max(1.0, w)))
+                        
+                        LinearGradient(
+                            stops: [
+                                .init(color: .black, location: 0.0),
+                                .init(color: .black, location: fadeStart),
+                                .init(color: .clear, location: fadeEnd)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    }
+                )
+                .shadow(color: .white.opacity(glow.opacity), radius: glow.radius)
+                .opacity(isActive ? (hasStarted ? 1.0 : 0.0) : 0.0)
+                .animation(.easeInOut(duration: 0.38), value: isActive)
         }
-        .animation(.easeInOut(duration: 0.35), value: isActive)
+    }
+    
+    private func computeGlow(hasStarted: Bool, isActivelySinging: Bool, wordEnd: TimeInterval) -> (opacity: Double, radius: CGFloat) {
+        if isActivelySinging {
+            return (0.75, 5.5)
+        } else if hasStarted {
+            let timeSinceEnd = max(0.0, currentTime - wordEnd)
+            let decayDuration: Double = 0.32
+            let decayT = min(1.0, timeSinceEnd / decayDuration)
+            // Cosine easing: starts with 0 derivative at peak, decays smoothly down to 0
+            let decayFactor = 0.5 * (1.0 + cos(decayT * .pi)) // 1.0 -> 0.0
+            let opacity = 0.35 + 0.40 * decayFactor
+            let radius = 2.8 + 2.7 * CGFloat(decayFactor)
+            return (opacity, radius)
+        } else {
+            return (0.0, 0.0)
+        }
     }
 }
 
