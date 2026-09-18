@@ -20,10 +20,12 @@
 
 <p align="center">
   <a href="https://reddit.com/r/macapps"><img src="https://img.shields.io/badge/Community-r%2Fmacapps-FF4500?style=flat-square&logo=reddit" alt="r/macapps"></a>
+  <a href="https://reddit.com/r/macsetups"><img src="https://img.shields.io/badge/Aesthetic-r%2Fmacsetups-9B51E0?style=flat-square&logo=reddit" alt="r/macsetups"></a>
   <a href="https://reddit.com/r/audiophile"><img src="https://img.shields.io/badge/Community-r%2Faudiophile-FF4500?style=flat-square&logo=reddit" alt="r/audiophile"></a>
   <a href="https://reddit.com/r/SwiftUI"><img src="https://img.shields.io/badge/Community-r%2FSwiftUI-FA7343?style=flat-square&logo=swift" alt="r/SwiftUI"></a>
-  <img src="https://img.shields.io/badge/Music-Apple%20Music%20%26%20Spotify-1DB954?style=flat-square&logo=spotify" alt="Music Services">
-  <img src="https://img.shields.io/badge/Hardware-Force%20Touch%20Taptic-black?style=flat-square&logo=apple" alt="Taptic Engine">
+  <img src="https://img.shields.io/badge/Hardware-Trackpad%20Subwoofer-black?style=flat-square&logo=apple" alt="Trackpad Subwoofer">
+  <img src="https://img.shields.io/badge/Feature-Dynamic%20Island%20for%20Mac-007AFF?style=flat-square&logo=apple" alt="Dynamic Island for Mac">
+  <img src="https://img.shields.io/badge/UI-Liquid%20Glass%20Shader-34C759?style=flat-square" alt="Liquid Glass">
 </p>
 
 ---
@@ -98,6 +100,10 @@
 
 ## 2. Waveform & ปรัชญา Dynamic Island
 
+<p align="center">
+  <img src="docs/images/menubar_lyrics_and_waveform.gif" width="100%" alt="Menu Bar Real-Time Dynamic Island Waveform & Lyrics">
+</p>
+
 เราประทับใจความมีชีวิตชีวาของ **Dynamic Island** ตั้งแต่เปิดตัวบน iPhone 14 Pro (2022) ที่เสียงเพลงถูกแปลงเป็นภาพเคลื่อนไหวอยู่บนหน้าจอตลอดวัน
 
 แต่บน Mac มันคือคอมพิวเตอร์ที่ **ไม่มีขีดจำกัดขนาดหน้าจอเหมือนมือถือ**! เราจึงนำไอเดียนั้นมาต่อยอดให้ไร้ขอบเขต:
@@ -110,7 +116,7 @@
 ## 3. Liquid Glass Windows & การคายประจุแสง
 
 <p align="center">
-  <img src="docs/images/lyrics_window_singing.png" width="620" alt="Liquid Glass Window">
+  <img src="docs/images/lyrics_window_singing.gif" width="100%" alt="Liquid Glass Window Phosphorescence Glow Animation">
 </p>
 
 เมื่อคลิกที่ Menu Bar หน้าต่าง **Liquid Glass Popover** จะเปิดตัวขึ้น:
@@ -182,21 +188,24 @@
 
 ## 🎯 กลุ่มเป้าหมาย & ชุมชนคนรักดนตรี (Target Communities)
 
-แอพพลิเคชันนี้ถูกสร้างขึ้นมาเพื่อตอบโจทย์ผู้ใช้งานและคอมมูนิตี้คนรักเสียงเพลงและเทคโนโลยีกลุ่มต่างๆ โดยเฉพาะ:
+แอพพลิเคชันนี้ถูกสร้างขึ้นมาเพื่อตอบโจทย์ผู้ใช้งานและคอมมูนิตี้คนรักเสียงเพลง เทคโนโลยี และงานดีไซน์ที่หลากหลาย โดยเฉพาะในมุมที่หลายคนคาดไม่ถึง:
 
-| ชุมชน / ห้องคอมมูนิตี้ | ทำไมสิ่งนี้จึงตอบโจทย์คุณ? | หัวข้อแท็กค้นหา (Topics & Tags) |
+| ชุมชน / ห้องคอมมูนิตี้ | ทำไมสิ่งนี้จึงตอบโจทย์คุณ? (มุมที่คาดไม่ถึง) | หัวข้อแท็กค้นหา (Topics & Viral Tags) |
 | :--- | :--- | :--- |
-| **r/macapps & macOS Enthusiasts** | สำหรับคนที่หลงใหลในความคลีน เบื่อแอพหน้าต่างเกะกะ ต้องการยูทิลิตี้บน Menu Bar ที่กินทรัพยากรน้อยมาก (CPU < 0.8%, RAM < 45MB) สวยหรูระดับ Native | `#macapps` `#macos` `#menubar` `#minimalist` `#productivity` |
-| **r/audiophile & Music Lovers** | นักฟังเพลงตัวจริงที่ต้องการคุณภาพเสียงสูงสุด ผสาน CoreAudio Process Tap 32-bit Float ดึงสัญญาณตรงจาก Apple Music Lossless & Spotify โดยไม่ผ่าน Virtual Loopback Driver ใดๆ | `#audiophile` `#applemusic` `#spotify` `#lossless` `#coreaudio` |
-| **r/SwiftUI & Mac Developers** | นักพัฒนาที่ต้องการศึกษาหรือต่อยอด Reference Code คุณภาพสูง ผสาน SwiftUI, AppKit NSPanel, Private APIs, และ Apple Accelerate vDSP FFT | `#swift` `#swiftui` `#open-source` `#reverse-engineering` `#developer` |
-| **Karaoke & Lyrics Aficionados** | คนชอบร้องตามหรือฮัมเพลง เนื้อร้องซิงค์แม่นยำระดับคำ (Syllable Timing) พร้อมเอฟเฟกต์การคายประจุแสงที่นุ่มนวลที่สุด | `#karaoke` `#lyrics` `#timed-lyrics` `#music-singalong` |
-| **Haptic & Hardware Geeks** | ผู้หลงใหลในฮาร์ดแวร์ Apple เปลี่ยน Force Touch Trackpad บน MacBook หรือ Magic Trackpad ให้กลายเป็น Subwoofer เสมือนใต้ปลายนิ้ว | `#haptic-feedback` `#force-touch` `#taptic-engine` `#multitouch` |
+| **🛋️ r/macsetups & #DeskSetup** | สำหรับสายแต่งโต๊ะคอมคลีน ถ่ายรูปลง Pinterest / TikTok / IG ไม่ชอบหน้าต่างรกๆ แต่อยากได้ Vibe แสงสว่างเรืองรองนุ่มนวลตรงขอบ Menu Bar เพิ่มสมาธิและมู้ดตอนนั่งทำงานหรืออ่านหนังสือตอนดึก (Late-Night Lo-Fi Vibe) | `#desksetup` `#macsetups` `#aesthetic` `#lofi` `#satisfying` `#eye-candy` |
+| **🕹️ MacBook Taptic Subwoofer Hackers** | ใครจะคิดว่าคอยล์แม่เหล็ก Force Touch Trackpad บน Mac จะถูกแฮกให้กลายเป็น **Mini Subwoofer สำหรับปลายนิ้ว**! ยิงคลื่นสั่นสะเทือนตามลูกกระเดื่องและเสียงเบส 808 แบบ Zero-Latency ได้จริง | `#haptic-subwoofer` `#taptic-engine` `#force-touch` `#macbook-pro` `#hardware-hack` |
+| **🏝️ Dynamic Island for macOS Lovers** | แฟนๆ Apple ที่ชอบ Dynamic Island บน iPhone 14/15/16 Pro บัดนี้ได้ยกประสบการณ์คลื่นเสียงมีชีวิตชีวาและเด้งตามจังหวะจริงด้วย Spring Physics มาไว้บน Menu Bar ของ Mac โดยไม่เปลืองพื้นที่หน้าจอ | `#dynamic-island` `#dynamic-lake` `#waveform-animation` `#spring-physics` |
+| **🔮 UI/UX Designers & Shaders Enthusiasts** | นักออกแบบ UI ที่หลงใหลในความโปร่งแสง ถอดรหัส Apple Control Center Liquid Glass ของแท้ ด้วย Window Server C-APIs และอัลกอริทึม HSV Vibrant Quantization เกลี่ยสีตามปกอัลบั้มแบบเรียลไทม์ | `#glassmorphism` `#liquid-glass` `#translucent-ui` `#apple-design` |
+| **🎧 r/audiophile & Bit-Perfect Streamers** | นักฟังเพลงตัวจริงที่หวงแหนคุณภาพเสียง ไม่ยอมให้มี Virtual Driver หรือ Loopback ใดๆ มาลดทอนบิตเรต เราดึง 32-bit Float จากระดับ Kernel Process ด้วย CoreAudio Tap ตรงจาก Apple Music Lossless & Spotify | `#audiophile` `#lossless` `#hi-res-audio` `#coreaudio` `#bit-perfect` |
+| **💻 r/SwiftUI & Reverse-Engineering Devs** | คลังโค้ดตัวอย่างคุณภาพสูงสำหรับนักพัฒนาที่อยากศึกษาการผสาน SwiftUI, AppKit NSPanel, Private Frameworks (`MultitouchSupport`), Mach Absolute Clock, และ Accelerate vDSP FFT | `#swift` `#swiftui` `#reverse-engineering` `#private-api` `#open-source` |
+| **🎤 Karaoke & Humming Aficionados** | คนชอบร้องตามหรือแอบฮัมเพลงตอนทำงาน เนื้อร้องซิงค์แม่นยำระดับคำ พร้อมแอนิเมชันคายประจุแสงที่นุ่มนวลที่สุด ไม่ต้องเดาเนื้อเพลงอีกต่อไป | `#karaoke` `#lyrics` `#timed-lyrics` `#music-singalong` |
 
 ```
-# Discovery Tags:
-macos, menubar, lyrics, spotify, apple-music, karaoke, swiftui, swift, 
-audio-visualizer, waveform, dynamic-island, haptic-feedback, force-touch, 
-taptic-engine, coreaudio, liquid-glass, music-player, open-source, macapps, audiophile
+# Viral & Unexpected Discovery Topics:
+dynamic-island, haptic-subwoofer, trackpad-subwoofer, taptic-engine, force-touch,
+desksetup, macsetups, aesthetic, lofi, satisfying, eye-candy,
+glassmorphism, liquid-glass, audiophile, lossless, coreaudio,
+lyrics, karaoke, spotify, apple-music, macos-menubar, macapps, swiftui, reverse-engineering
 ```
 
 ---
@@ -240,6 +249,10 @@ Instead of high-latency AppKit haptic abstractions, Lyrics Menu Bar directly inv
   `CGSSetWindowBackgroundBlurRadius(cgsConnection, windowID, 30)`  
   guarantees a true liquid glass backdrop sampling ambient desktop pixels without AppKit panel flickering.
 
+<p align="center">
+  <img src="docs/images/lyrics_window_singing.gif" width="100%" alt="Liquid Glass Window Server Phosphorescence Glow">
+</p>
+
 ### 4. Monotonic Jitter-Free IPC Clock
 - Apple Music ScriptingBridge reports playback timestamps quantized to 1-second intervals.
 - Lyrics Menu Bar synthesizes continuous high-resolution time:
@@ -276,6 +289,10 @@ $$\text{Weight}(w) = \left(0.70 \cdot S(w) + 0.08 \cdot C(w) + 0.22\right) \cdot
   $$\text{Gain}_{\text{rise}} = 0.4 \cdot \text{Gain} + 0.6 \cdot \text{Sample}$$
   $$\text{Gain}_{\text{fall}} = 0.96 \cdot \text{Gain} + 0.04 \cdot \text{Sample}$$
 
+<p align="center">
+  <img src="docs/images/menubar_lyrics_and_waveform.gif" width="100%" alt="Menu Bar FFT Audio Spectrum & Dynamic Waveform">
+</p>
+
 ### 4. Adaptive Cover Art Color Blending
 - Downsamples album art to a $48 \times 48$ bitmap buffer in `deviceRGB`.
 - Filters out shadow mud ($B < 0.12$) and washed-out highlights ($S < 0.15 \land B > 0.88$).
@@ -310,19 +327,21 @@ Every mathematical model, every private API bridge, and every line of Swift code
 
 ## 🎯 Target Communities & Discovery Hubs
 
-Whether you are looking for clean desk setups, audiophile streaming, or cutting-edge Swift engineering, here is where **Lyrics Menu Bar** fits right in:
+Whether you are looking for aesthetic desk setups, audiophile streaming, or cutting-edge Swift engineering, here is where **Lyrics Menu Bar** fits right in:
 
-- **r/macapps & macOS Minimalists:** A featherweight menu bar companion that stays out of your way while delivering maximum aesthetic and functional utility (CPU < 0.8%, RAM < 45MB).
-- **r/audiophile & High-Fidelity Streamers:** Zero-latency audio interception directly from Apple Music Lossless and Spotify via private CoreAudio HAL process taps—no virtual sound cards, zero acoustic distortion.
-- **r/SwiftUI & macOS Developers:** A reference-grade open-source codebase combining modern SwiftUI with private AppKit window servers, Mach timers, and `MultitouchSupport.framework`.
-- **Karaoke & Songwriters:** Syllabic-accurate real-time word highlighting and Romanized phonetic humming assistance.
-- **Sensory & Hardware Enthusiasts:** Transforming the MacBook Force Touch Trackpad into an active tactile companion via Taptic hardware pulses.
+- **🛋️ r/macsetups & Aesthetic Workstations:** The missing jewel for clean desk setups. Provides ambient glowing lyrics on the menu bar without cluttering the screen during late-night coding or study sessions (`#desksetup` `#aesthetic` `#lofi`).
+- **🕹️ MacBook Taptic Subwoofer Hackers:** An unprecedented hardware innovation that turns the MacBook Force Touch Trackpad into an acoustic bass shaker for your fingertips with zero-latency timing (`#haptic-subwoofer` `#taptic-engine` `#force-touch`).
+- **🏝️ Dynamic Island for macOS Lovers:** Bringing the vibrant, real-time music pulse of iPhone's Dynamic Island into the macOS menu bar with 60 FPS elastic spring rebound physics (`#dynamic-island` `#audio-visualizer` `#waveform`).
+- **🔮 UI/UX Designers & Shaders Nerds:** True Apple Control Center Liquid Glass reverse-engineered with Window Server C-APIs and adaptive HSV vibrant color quantization (`#glassmorphism` `#liquid-glass`).
+- **🎧 r/audiophile & Bit-Perfect Streamers:** Zero-latency direct 32-bit floating-point audio interception via private CoreAudio HAL process taps—no virtual sound cards or audio degradation (`#audiophile` `#lossless` `#coreaudio`).
+- **💻 r/SwiftUI & Reverse-Engineering Devs:** A production-grade reference architecture showing how to dynamically invoke private frameworks (`MultitouchSupport`), Mach monotonic clocks, and Accelerate vDSP FFT (`#reverse-engineering` `#private-api` `#swiftui`).
 
 ```
-# GitHub & Social Topics:
-macos, menubar, lyrics, spotify, apple-music, karaoke, swiftui, swift, 
-audio-visualizer, waveform, dynamic-island, haptic-feedback, force-touch, 
-taptic-engine, coreaudio, liquid-glass, music-player, open-source, macapps, audiophile
+# Viral & Discovery Topics:
+dynamic-island, haptic-subwoofer, trackpad-subwoofer, taptic-engine, force-touch,
+desksetup, macsetups, aesthetic, lofi, satisfying, eye-candy,
+glassmorphism, liquid-glass, audiophile, lossless, coreaudio,
+lyrics, karaoke, spotify, apple-music, macos-menubar, macapps, swiftui, reverse-engineering
 ```
 
 ---
@@ -371,7 +390,9 @@ LyricsMenuBar/
 ├── docs/images/                     # High-resolution documentation assets
 │   ├── app_icon.png                 # Browser-compatible PNG application icon
 │   ├── benchmark_hero.png           # Full Retina desktop hero screenshot ("No Better")
+│   ├── lyrics_window_singing.gif    # High-resolution animated Liquid Glass word glow
 │   ├── lyrics_window_singing.png    # Popover window active word glow detail
+│   ├── menubar_lyrics_and_waveform.gif # High-resolution animated dynamic island waveform
 │   └── menubar_lyrics_and_waveform.png # Menu Bar real-time lyrics & equalizer
 ├── Sources/
 │   └── LyricsMenuBar/
