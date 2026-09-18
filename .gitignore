@@ -1,16 +1,20 @@
+# macOS system files
 .DS_Store
+*.swp
+*~
+
+# Swift Package Manager & Xcode builds
 /.build
 /Packages
 xcuserdata/
 DerivedData/
-.swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
-.netrc
-.agents/
-Liqoria.dmg
+.swiftpm/
+
+# Packaging temp files
 .dmg_staging*
 .temp_rw*
+
+# Development test scripts
 test_*
 test_*.*
-SpoticatMenuBar*.dmg
-LyricsMenuBar-1.1.37.dmg
+*.tmp
