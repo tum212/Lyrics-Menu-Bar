@@ -18,6 +18,14 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
+<p align="center">
+  <a href="https://reddit.com/r/macapps"><img src="https://img.shields.io/badge/Community-r%2Fmacapps-FF4500?style=flat-square&logo=reddit" alt="r/macapps"></a>
+  <a href="https://reddit.com/r/audiophile"><img src="https://img.shields.io/badge/Community-r%2Faudiophile-FF4500?style=flat-square&logo=reddit" alt="r/audiophile"></a>
+  <a href="https://reddit.com/r/SwiftUI"><img src="https://img.shields.io/badge/Community-r%2FSwiftUI-FA7343?style=flat-square&logo=swift" alt="r/SwiftUI"></a>
+  <img src="https://img.shields.io/badge/Music-Apple%20Music%20%26%20Spotify-1DB954?style=flat-square&logo=spotify" alt="Music Services">
+  <img src="https://img.shields.io/badge/Hardware-Force%20Touch%20Taptic-black?style=flat-square&logo=apple" alt="Taptic Engine">
+</p>
+
 ---
 
 ## 📑 สารบัญ / Table of Contents
@@ -29,11 +37,14 @@
   - [3. Liquid Glass Windows & การคายประจุแสง](#3-liquid-glass-windows--การคายประจุแสง)
   - [4. Trackpad Haptic Engine ระดับ Hardware](#4-trackpad-haptic-engine-ระดับ-hardware)
   - [เจาะลึก Private APIs และคณิตศาสตร์ทุกฟังก์ชัน](#เจาะลึก-private-apis-และคณิตศาสตร์ทุกฟังก์ชัน)
-  - [บทสรุป: "ต้องเข้าถึง จึงเข้าใจ"](#บทสรุป-ต้องเข้าถึง-จึงเข้าใจ)
+  - [ถ้านั่นคือความรู้สึกของคุณ...](#ถ้านั่นคือความรู้สึกของคุณ)
+  - [🎯 กลุ่มเป้าหมาย & ชุมชนคนรักดนตรี (Target Communities)](#-กลุ่มเป้าหมาย--ชุมชนคนรักดนตรี-target-communities)
 - [Part 2: English Technical Documentation](#part-2-english-technical-documentation)
   - [The Engineering Philosophy & Benchmark](#the-engineering-philosophy--benchmark)
   - [Core Subsystems & Private macOS APIs](#core-subsystems--private-macos-apis)
   - [Mathematical Models Across Every Function](#mathematical-models-across-every-function)
+  - [If That's What You Feel...](#if-thats-what-you-feel)
+  - [Target Communities & Discovery Hubs](#target-communities--discovery-hubs)
   - [Installation & macOS Permissions](#installation--macos-permissions)
   - [Building from Source](#building-from-source)
   - [Repository Architecture](#repository-architecture)
@@ -153,14 +164,40 @@
 
 ---
 
-## บทสรุป: "ต้องเข้าถึง จึงเข้าใจ"
+## ถ้านั่นคือความรู้สึกของคุณ...
 
-โจทย์ของพวกเราคือการทำลายกำแพงระหว่างผู้ฟังกับบทเพลง:
-- **เข้าถึงเนื้อเพลง:** ไม่ต้องฮัมเพลงมั่วๆ อีกต่อไปจาก Menu Bar
-- **มองเห็นเสียงเพลง:** ผ่านความมีชีวิตชีวาของ Waveform
-- **สัมผัสจังหวะเพลง:** ผ่านแรงสั่นสะเทือนของ Haptic บนปลายนิ้ว
+เหมือนกับท่อนหนึ่งในเพลง *No Better* ของ Lorde ที่พูดถึงการนั่งอยู่ในรถที่ร้อนอบอ้าวตอนบ่าย ปล่อยให้เวลาและเสียงดนตรีไหลผ่านไปช้าๆ... ความรู้สึกที่เราอยากมอบให้ไม่ใช่แอพพลิเคชันที่ซับซ้อน รกตา หรือต้องคอยกดสั่งการอะไรให้วุ่นวาย
 
-เราจะนำความเป็นไปได้ของคณิตศาสตร์และฟิสิกส์เหล่านี้ พัฒนาต่อยอดไปสู่แอพพลิเคชันอื่นๆ ในอนาคต และโปรเจกต์นี้เปิดให้ทุกคนได้ดาวน์โหลดไปใช้งานกัน **ฟรี 100%** ครับ!
+**ถ้าความรู้สึกของคุณคือ...**
+- อยากฟังเพลงเพลินๆ ตอนนั่งทำงาน แล้วเหลือบตาขึ้นมองแค่ **Menu Bar** ก็รู้เนื้อร้องที่ถูกต้องได้ทันทีโดยไม่ต้องเดาหรือฮัมมั่ว
+- อยากมองเห็นพลังงานและชีวิตของเสียงเพลงเต้นระบำผ่านแท่ง Waveform ที่เด้งรับกับเบสอย่างแม่นยำทุกย่านความถี่
+- อยากสัมผัสจังหวะดนตรีที่เต้นตุบๆ ส่งผ่านแผ่น Trackpad สู่ปลายนิ้วแบบ Real-time เหมือนกำลังสัมผัสหัวใจของบทเพลง
+- อยากได้หน้าต่างเนื้อร้อง Liquid Glass ที่สวยงาม โปร่งแสง ละมุนตา ไม่บดบังพื้นที่ทำงาน และกลมกลืนเป็นหนึ่งเดียวกับ macOS
+
+**...เราสร้าง Lyrics Menu Bar ขึ้นมาเพื่อคุณ**
+
+ความประณีตทางวิศวกรรมและคณิตศาสตร์ทั้งหมดที่เราทุ่มเทพัฒนาร่วมกันมาหลายเดือน ถูกกลั่นออกมาเพื่อให้ทุกคนได้สัมผัสความรู้สึกนี้อย่างเป็นธรรมชาติที่สุด โดยไม่มีเงื่อนไขใดๆ — ดาวน์โหลดไปใช้งานกันได้ **ฟรี 100% (Open Source)** ครับ! 🤍
+
+---
+
+## 🎯 กลุ่มเป้าหมาย & ชุมชนคนรักดนตรี (Target Communities)
+
+แอพพลิเคชันนี้ถูกสร้างขึ้นมาเพื่อตอบโจทย์ผู้ใช้งานและคอมมูนิตี้คนรักเสียงเพลงและเทคโนโลยีกลุ่มต่างๆ โดยเฉพาะ:
+
+| ชุมชน / ห้องคอมมูนิตี้ | ทำไมสิ่งนี้จึงตอบโจทย์คุณ? | หัวข้อแท็กค้นหา (Topics & Tags) |
+| :--- | :--- | :--- |
+| **r/macapps & macOS Enthusiasts** | สำหรับคนที่หลงใหลในความคลีน เบื่อแอพหน้าต่างเกะกะ ต้องการยูทิลิตี้บน Menu Bar ที่กินทรัพยากรน้อยมาก (CPU < 0.8%, RAM < 45MB) สวยหรูระดับ Native | `#macapps` `#macos` `#menubar` `#minimalist` `#productivity` |
+| **r/audiophile & Music Lovers** | นักฟังเพลงตัวจริงที่ต้องการคุณภาพเสียงสูงสุด ผสาน CoreAudio Process Tap 32-bit Float ดึงสัญญาณตรงจาก Apple Music Lossless & Spotify โดยไม่ผ่าน Virtual Loopback Driver ใดๆ | `#audiophile` `#applemusic` `#spotify` `#lossless` `#coreaudio` |
+| **r/SwiftUI & Mac Developers** | นักพัฒนาที่ต้องการศึกษาหรือต่อยอด Reference Code คุณภาพสูง ผสาน SwiftUI, AppKit NSPanel, Private APIs, และ Apple Accelerate vDSP FFT | `#swift` `#swiftui` `#open-source` `#reverse-engineering` `#developer` |
+| **Karaoke & Lyrics Aficionados** | คนชอบร้องตามหรือฮัมเพลง เนื้อร้องซิงค์แม่นยำระดับคำ (Syllable Timing) พร้อมเอฟเฟกต์การคายประจุแสงที่นุ่มนวลที่สุด | `#karaoke` `#lyrics` `#timed-lyrics` `#music-singalong` |
+| **Haptic & Hardware Geeks** | ผู้หลงใหลในฮาร์ดแวร์ Apple เปลี่ยน Force Touch Trackpad บน MacBook หรือ Magic Trackpad ให้กลายเป็น Subwoofer เสมือนใต้ปลายนิ้ว | `#haptic-feedback` `#force-touch` `#taptic-engine` `#multitouch` |
+
+```
+# Discovery Tags:
+macos, menubar, lyrics, spotify, apple-music, karaoke, swiftui, swift, 
+audio-visualizer, waveform, dynamic-island, haptic-feedback, force-touch, 
+taptic-engine, coreaudio, liquid-glass, music-player, open-source, macapps, audiophile
+```
 
 ---
 
@@ -252,6 +289,41 @@ $$\text{Weight}(w) = \left(0.70 \cdot S(w) + 0.08 \cdot C(w) + 0.22\right) \cdot
 - Marquee text motion follows a cubic Hermite polynomial:
   $$S(x) = 3x^2 - 2x^3$$
   ensuring zero velocity departure and arrival at scroll boundaries.
+
+---
+
+## If That's What You Feel...
+
+Just like that vivid line in Lorde's *No Better*—spending late summer afternoons inside a hot car with someone special, letting time drift while the music plays in the background—we built this app for moments exactly like that. Not for managing complex windows or fiddling with clunky settings, but for pure, effortless immersion.
+
+**If you ever feel like:**
+- You want to hum along to your favorite tracks and simply glance at the **macOS Menu Bar** to see the exact, synchronized words without interrupting your workflow.
+- You want to watch the pulse of the song come alive on your screen, with fluid bounce physics tuned to true acoustic transients.
+- You want to feel the heartbeat of the sub-bass directly beneath your fingertips through the Force Touch trackpad.
+- You want a Liquid Glass interface that floats elegantly over your desktop like a piece of native Apple craftwork.
+
+**...Then Lyrics Menu Bar was made for you.**
+
+Every mathematical model, every private API bridge, and every line of Swift code was crafted over months of meticulous iteration to give you this exact sensation. It is completely free, open-source, and made with love for the music community. 🤍
+
+---
+
+## 🎯 Target Communities & Discovery Hubs
+
+Whether you are looking for clean desk setups, audiophile streaming, or cutting-edge Swift engineering, here is where **Lyrics Menu Bar** fits right in:
+
+- **r/macapps & macOS Minimalists:** A featherweight menu bar companion that stays out of your way while delivering maximum aesthetic and functional utility (CPU < 0.8%, RAM < 45MB).
+- **r/audiophile & High-Fidelity Streamers:** Zero-latency audio interception directly from Apple Music Lossless and Spotify via private CoreAudio HAL process taps—no virtual sound cards, zero acoustic distortion.
+- **r/SwiftUI & macOS Developers:** A reference-grade open-source codebase combining modern SwiftUI with private AppKit window servers, Mach timers, and `MultitouchSupport.framework`.
+- **Karaoke & Songwriters:** Syllabic-accurate real-time word highlighting and Romanized phonetic humming assistance.
+- **Sensory & Hardware Enthusiasts:** Transforming the MacBook Force Touch Trackpad into an active tactile companion via Taptic hardware pulses.
+
+```
+# GitHub & Social Topics:
+macos, menubar, lyrics, spotify, apple-music, karaoke, swiftui, swift, 
+audio-visualizer, waveform, dynamic-island, haptic-feedback, force-touch, 
+taptic-engine, coreaudio, liquid-glass, music-player, open-source, macapps, audiophile
+```
 
 ---
 
