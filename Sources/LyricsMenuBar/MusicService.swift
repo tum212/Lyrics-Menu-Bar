@@ -10,13 +10,13 @@ public enum MusicSourceMode: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
-public struct MusicTrack: Equatable, @unchecked Sendable {
+public struct MusicTrack: Equatable, Sendable {
     public var id: String
     public var name: String
     public var artist: String
     public var album: String
     public var artworkURL: String?
-    public var artworkImage: NSImage?
+    public var artworkData: Data?
     public var duration: Double // in seconds
     public var source: MusicSourceMode
     
@@ -26,7 +26,7 @@ public struct MusicTrack: Equatable, @unchecked Sendable {
         artist: String,
         album: String,
         artworkURL: String? = nil,
-        artworkImage: NSImage? = nil,
+        artworkData: Data? = nil,
         duration: Double,
         source: MusicSourceMode = .spotify
     ) {
@@ -35,7 +35,7 @@ public struct MusicTrack: Equatable, @unchecked Sendable {
         self.artist = artist
         self.album = album
         self.artworkURL = artworkURL
-        self.artworkImage = artworkImage
+        self.artworkData = artworkData
         self.duration = duration
         self.source = source
     }
@@ -51,6 +51,14 @@ public final class MusicService: NSObject, ObservableObject {
     @Published public var playbackPosition: Double = 0.0
     @Published public var lastUpdateDate: Date = Date()
     @Published public var activeSource: MusicSourceMode = .spotify
+    
+    // Centralized Artwork Management (Swift 6 & @MainActor safe)
+    @Published public private(set) var artworkImage: NSImage?
+    @Published public private(set) var artworkState: ArtworkState = .idle
+    @Published public private(set) var artworkRevision: Int = 0
+    
+    private var artworkGeneration: Int = 0
+    private var artworkTask: Task<Void, Never>?
     
     private var lastMonotonicTime: TimeInterval = 0.0
     private var monotonicTrackId: String = ""
@@ -74,7 +82,6 @@ public final class MusicService: NSObject, ObservableObject {
         }
         
         // Strict forward monotonic constraint during continuous playback:
-        // Eliminates any backward time jumps and word flicker caused by AppleScript latency!
         if clampedRaw > lastMonotonicTime {
             lastMonotonicTime = clampedRaw
         }
@@ -83,10 +90,6 @@ public final class MusicService: NSObject, ObservableObject {
     
     private var timer: Timer?
     private var isPolling = false
-    
-    // Artwork caching for Apple Music
-    private var cachedMusicArtworkId: String?
-    private var cachedMusicArtworkImage: NSImage?
     
     public var sourceMode: MusicSourceMode {
         get {
@@ -106,6 +109,7 @@ public final class MusicService: NSObject, ObservableObject {
     }
     
     deinit {
+        artworkTask?.cancel()
         DistributedNotificationCenter.default().removeObserver(self)
     }
     
@@ -169,7 +173,7 @@ public final class MusicService: NSObject, ObservableObject {
             artist: artist,
             album: album,
             artworkURL: existingArtwork,
-            artworkImage: nil,
+            artworkData: nil,
             duration: duration,
             source: .spotify
         )
@@ -208,45 +212,28 @@ public final class MusicService: NSObject, ObservableObject {
                 self.currentTrack = nil
                 self.isPlaying = false
                 self.playbackPosition = 0
+                self.artworkTask?.cancel()
+                self.artworkGeneration += 1
+                self.artworkImage = nil
+                self.artworkState = .idle
+                self.artworkRevision += 1
             }
             return
         }
         
-        var artworkImg: NSImage? = nil
-        if trackId == self.cachedMusicArtworkId {
-            artworkImg = self.cachedMusicArtworkImage
-        }
-        
+        let existingArtworkData = (self.currentTrack?.id == trackId) ? self.currentTrack?.artworkData : nil
         let track = MusicTrack(
             id: trackId,
             name: name,
             artist: artist,
             album: album,
             artworkURL: nil,
-            artworkImage: artworkImg,
+            artworkData: existingArtworkData,
             duration: duration,
             source: .appleMusic
         )
         
         self.updatePlaybackState(track: track, position: position, isPlaying: newIsPlaying, source: .appleMusic, bundleID: "com.apple.Music")
-        
-        // Asynchronously fetch artwork if missing
-        if artworkImg == nil {
-            Task.detached(priority: .userInitiated) { [weak self] in
-                if let data = Self.fetchAppleMusicArtworkData() {
-                    let img = NSImage(data: data)
-                    await self?.updateCachedArtwork(trackId: trackId, image: img)
-                }
-            }
-        }
-    }
-    
-    private func updateCachedArtwork(trackId: String, image: NSImage?) {
-        self.cachedMusicArtworkId = trackId
-        self.cachedMusicArtworkImage = image
-        if self.currentTrack?.id == trackId {
-            self.currentTrack?.artworkImage = image
-        }
     }
     
     // MARK: - Polling
@@ -272,6 +259,7 @@ public final class MusicService: NSObject, ObservableObject {
     
     public func cleanup() {
         stopPolling()
+        artworkTask?.cancel()
         DistributedNotificationCenter.default().removeObserver(self)
     }
     
@@ -305,20 +293,16 @@ public final class MusicService: NSObject, ObservableObject {
                 self.currentTrack = nil
                 self.isPlaying = false
                 self.playbackPosition = 0.0
+                self.artworkTask?.cancel()
+                self.artworkGeneration += 1
+                self.artworkImage = nil
+                self.artworkState = .idle
+                self.artworkRevision += 1
             }
             return
         }
         if let track = res.track {
-            var finalTrack = track
-            if track.source == .appleMusic {
-                if track.id == self.cachedMusicArtworkId, let img = self.cachedMusicArtworkImage {
-                    finalTrack.artworkImage = img
-                } else if track.artworkImage != nil {
-                    self.cachedMusicArtworkId = track.id
-                    self.cachedMusicArtworkImage = track.artworkImage
-                }
-            }
-            self.updatePlaybackState(track: finalTrack, position: res.position, isPlaying: res.isPlaying, source: res.source, bundleID: res.source == .appleMusic ? "com.apple.Music" : "com.spotify.client")
+            self.updatePlaybackState(track: track, position: res.position, isPlaying: res.isPlaying, source: res.source, bundleID: res.source == .appleMusic ? "com.apple.Music" : "com.spotify.client")
         }
     }
     
@@ -370,7 +354,7 @@ public final class MusicService: NSObject, ObservableObject {
                 artist: artist,
                 album: album,
                 artworkURL: artworkURL.isEmpty ? nil : artworkURL,
-                artworkImage: nil,
+                artworkData: nil,
                 duration: duration,
                 source: .spotify
             )
@@ -423,7 +407,7 @@ public final class MusicService: NSObject, ObservableObject {
                 artist: artist,
                 album: album,
                 artworkURL: nil,
-                artworkImage: nil,
+                artworkData: nil,
                 duration: duration,
                 source: .appleMusic
             )
@@ -489,10 +473,81 @@ public final class MusicService: NSObject, ObservableObject {
         return nil
     }
     
+    // MARK: - Artwork Loading with Cancellation & Generation Token
+    
+    private func loadArtwork(for track: MusicTrack) {
+        let trackId = track.id
+        
+        // 1. If in-memory cache already has it, assign immediately
+        if let cached = ArtworkCache.shared.image(forKey: trackId) {
+            self.artworkImage = cached
+            self.artworkState = .loaded(trackId: trackId)
+            self.artworkRevision += 1
+            return
+        }
+        
+        // 2. Increment generation token & cancel any previous loading task
+        artworkGeneration += 1
+        let currentGen = artworkGeneration
+        artworkTask?.cancel()
+        artworkState = .loading(trackId: trackId)
+        
+        // 3. Load artwork asynchronously
+        artworkTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            
+            if track.source == .appleMusic {
+                // Fetch data via detached AppleScript task (no NSImage across concurrency boundaries)
+                let data = await Task.detached(priority: .userInitiated) {
+                    Self.fetchAppleMusicArtworkData()
+                }.value
+                
+                guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+                
+                if let data = data, let image = NSImage(data: data) {
+                    ArtworkCache.shared.setImage(image, forKey: trackId)
+                    self.artworkImage = image
+                    self.artworkState = .loaded(trackId: trackId)
+                    self.artworkRevision += 1
+                    if self.currentTrack?.id == trackId {
+                        self.currentTrack?.artworkData = data
+                    }
+                } else {
+                    self.artworkImage = nil
+                    self.artworkState = .failed(trackId: trackId, error: "No Apple Music artwork")
+                    self.artworkRevision += 1
+                }
+            } else {
+                // Spotify URL / URI
+                guard let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(track.artworkURL) else {
+                    guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+                    self.artworkImage = nil
+                    self.artworkState = .idle
+                    return
+                }
+                
+                let image = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: trackId)
+                
+                guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+                
+                if let image = image {
+                    self.artworkImage = image
+                    self.artworkState = .loaded(trackId: trackId)
+                    self.artworkRevision += 1
+                } else {
+                    self.artworkImage = nil
+                    self.artworkState = .failed(trackId: trackId, error: "Failed to download Spotify artwork")
+                    self.artworkRevision += 1
+                }
+            }
+        }
+    }
+
     // MARK: - Unified Anti-Jitter Playback Synchronization
     
     private func updatePlaybackState(track: MusicTrack, position: Double, isPlaying: Bool, source: MusicSourceMode, bundleID: String) {
         let isTrackChanged = (self.currentTrack?.id != track.id)
+        let isArtworkChanged = (self.currentTrack?.artworkURL != track.artworkURL || self.currentTrack?.artworkData != track.artworkData)
         let isPlayStateChanged = (self.isPlaying != isPlaying)
         
         let now = Date()
@@ -519,8 +574,9 @@ public final class MusicService: NSObject, ObservableObject {
         if isPlayStateChanged {
             self.isPlaying = isPlaying
         }
-        if isTrackChanged {
+        if isTrackChanged || isArtworkChanged {
             self.currentTrack = track
+            loadArtwork(for: track)
         }
     }
     

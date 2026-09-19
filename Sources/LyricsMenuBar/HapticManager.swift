@@ -292,9 +292,21 @@ final class HapticManager: @unchecked Sendable {
             scheduleTransient(at: eng.currentTime, isDeep: isDeep, intensity: intensity, engine: eng)
         } else {
             DispatchQueue.main.async {
-                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
             }
         }
+    }
+
+    /// Public @MainActor helper for UI feedback (steppers, sliders, buttons)
+    @MainActor
+    public func performFeedback(pattern: NSHapticFeedbackManager.FeedbackPattern = .levelChange) {
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
+    }
+
+    /// Public @MainActor helper for toggle clicks
+    @MainActor
+    public func performToggleFeedback() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
     }
 
     /// Fires a single test pulse of the given MTActuator type at full amplitude.
@@ -317,6 +329,10 @@ final class HapticManager: @unchecked Sendable {
                         let player = try eng.makePlayer(with: p)
                         try player.start(atTime: eng.currentTime)
                     }()
+                } else {
+                    DispatchQueue.main.async {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+                    }
                 }
                 return
             }

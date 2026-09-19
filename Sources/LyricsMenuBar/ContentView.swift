@@ -1,11 +1,35 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Native Optical Liquid Glass (Control Center Material)
+struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .popover
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+    var state: NSVisualEffectView.State = .active
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = state
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
+        nsView.state = state
+    }
+}
+
 // MARK: - Main View
 struct ContentView: View {
-    @ObservedObject var spotify: SpotifyService
+    @ObservedObject var musicService: MusicService
     @ObservedObject var lyricsService: LyricsService
     @ObservedObject var audioAnalyzer: AudioAnalyzer
+
+    // Backward-compatibility alias
+    private var spotify: MusicService { musicService }
 
     @Environment(\.colorScheme) var colorScheme
 
@@ -20,23 +44,21 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            // Unified single-piece Optical Liquid Glass surface
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.ultraThinMaterial)
+            // Unified single-piece Optical Liquid Glass surface (Control Center Refraction)
+            VisualEffectBackground(material: .popover, blendingMode: .behindWindow, state: .active)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .strokeBorder(
                             LinearGradient(
-                                stops: [
-                                    .init(color: .white.opacity(0.55), location: 0.0),
-                                    .init(color: .white.opacity(0.20), location: 0.25),
-                                    .init(color: .white.opacity(0.06), location: 0.65),
-                                    .init(color: .white.opacity(0.28), location: 1.0)
+                                colors: [
+                                    Color.white.opacity(0.25),
+                                    Color.white.opacity(0.05)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             ),
-                            lineWidth: 1.0
+                            lineWidth: 0.5
                         )
                 )
 
@@ -46,22 +68,10 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     // Album Art
                     Group {
-                        if let track = spotify.currentTrack {
-                            if let directImage = track.artworkImage {
-                                Image(nsImage: directImage)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                            } else if let urlString = track.artworkURL, let url = URL(string: urlString) {
-                                AsyncImage(url: url) { phase in
-                                    if let image = phase.image {
-                                        image.resizable().aspectRatio(contentMode: .fill)
-                                    } else {
-                                        placeholderArt
-                                    }
-                                }
-                            } else {
-                                placeholderArt
-                            }
+                        if let image = musicService.artworkImage {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
                         } else {
                             placeholderArt
                         }
@@ -73,14 +83,14 @@ struct ContentView: View {
                     Spacer().frame(height: 10)
 
                     // Track Info
-                    Text(spotify.currentTrack?.name ?? "No Music Playing")
+                    Text(musicService.currentTrack?.name ?? "No Music Playing")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: 130, alignment: .center)
 
-                    Text(spotify.currentTrack?.artist ?? "Open Spotify or Apple Music")
+                    Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.7))
                         .lineLimit(1)
@@ -91,22 +101,22 @@ struct ContentView: View {
 
                     // Playback Controls
                     HStack(spacing: 16) {
-                        Button(action: { spotify.previousTrack() }) {
+                        Button(action: { musicService.previousTrack() }) {
                             Image(systemName: "backward.fill")
                                 .font(.system(size: 16))
                                 .foregroundColor(.white)
                         }
                         .buttonStyle(PlainButtonStyle()).focusable(false)
 
-                        Button(action: { spotify.playPause() }) {
-                            Image(systemName: spotify.isPlaying ? "pause.fill" : "play.fill")
+                        Button(action: { musicService.playPause() }) {
+                            Image(systemName: musicService.isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 24))
                                 .foregroundColor(.white)
                                 .frame(width: 24)
                         }
                         .buttonStyle(PlainButtonStyle()).focusable(false)
 
-                        Button(action: { spotify.nextTrack() }) {
+                        Button(action: { musicService.nextTrack() }) {
                             Image(systemName: "forward.fill")
                                 .font(.system(size: 16))
                                 .foregroundColor(.white)
@@ -139,21 +149,6 @@ struct ContentView: View {
 
             // Top Right Controls (Glass Buttons)
             HStack(spacing: 8) {
-                // System Audio Tap Status Indicator (Privacy transparency)
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(audioAnalyzer.isRunning ? Color.green : Color.gray.opacity(0.4))
-                        .frame(width: 5, height: 5)
-                    Image(systemName: audioAnalyzer.isRunning ? "waveform" : "waveform.slash")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.white.opacity(audioAnalyzer.isRunning ? 0.85 : 0.4))
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5))
-                .help(audioAnalyzer.isRunning ? "System Audio Visualizer: Active (Capturing output for waveform)" : "System Audio Visualizer: Inactive")
-
                 NativeSettingsMenu()
                     .frame(width: 26, height: 26)
                     .background(.ultraThinMaterial, in: Circle())
@@ -174,9 +169,9 @@ struct ContentView: View {
             }
             .padding([.top, .trailing], 14)
         }
-        .onChange(of: spotify.currentTrack?.id) { [spotify] _ in
+        .onChange(of: musicService.currentTrack?.id) { [musicService] _ in
             LyricLineLayoutCache.shared.clear()
-            if let track = spotify.currentTrack {
+            if let track = musicService.currentTrack {
                 lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
             } else {
                 lyricsService.lyrics = []
@@ -186,11 +181,24 @@ struct ContentView: View {
         .onChange(of: lyricsService.lyrics.count) { _ in
             LyricLineLayoutCache.shared.clear()
         }
-        .onChange(of: spotify.isPlaying) { [spotify] _ in
-            if spotify.isPlaying { audioAnalyzer.start() } else { audioAnalyzer.stop() }
+        .onChange(of: musicService.isPlaying) { isPlaying in
+            if isPlaying && waveformBars > 0 && UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
+                audioAnalyzer.start()
+            } else {
+                audioAnalyzer.stop()
+            }
         }
         .onAppear {
-            if spotify.isPlaying { audioAnalyzer.start() }
+            if musicService.isPlaying && waveformBars > 0 && UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
+                audioAnalyzer.start()
+            } else {
+                audioAnalyzer.stop()
+            }
+        }
+        .onDisappear {
+            if waveformBars == 0 {
+                audioAnalyzer.stop()
+            }
         }
         .background(Color.clear)
     }
@@ -270,16 +278,19 @@ struct ContentView: View {
     private var placeholderArt: some View {
         ZStack {
             LinearGradient(
-                gradient: Gradient(colors: [Color.purple.opacity(0.8), Color.blue.opacity(0.8)]),
+                colors: [Color.white.opacity(0.08), Color.white.opacity(0.03)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Image(systemName: "music.note")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 40, height: 40)
-                .foregroundColor(.white.opacity(0.7))
+            Image(systemName: "music.quarternote.3")
+                .font(.system(size: 38, weight: .regular))
+                .foregroundStyle(.white.opacity(0.45))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+        )
     }
 
     private func getActiveLyricsInfo(currentDate: Date) -> (lines: [LyricLine], progress: Double, activeId: UUID?, activeLine: LyricLine?, currentTime: TimeInterval, isUnsynced: Bool) {

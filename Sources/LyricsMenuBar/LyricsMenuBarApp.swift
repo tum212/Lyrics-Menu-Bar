@@ -89,7 +89,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ])
         
         let contentView = ContentView(
-            spotify: spotify,
+            musicService: spotify,
             lyricsService: lyricsService,
             audioAnalyzer: audioAnalyzer
         )
@@ -763,40 +763,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             
             // --- 2. ART & WAVEFORM UPDATING ---
-            let artKey = track.artworkURL ?? track.id
+            let artKey = "\(track.id)_\(spotify.artworkRevision)"
             if cachedAlbumArtTrackId != artKey {
                 cachedAlbumArtTrackId = artKey
-                cachedAlbumArtImage = nil // Reset cache
                 
-                if let directImage = track.artworkImage {
+                if let directImage = spotify.artworkImage {
                     let roundedImage = self.roundCorners(of: directImage, size: NSSize(width: 20, height: 20), radius: 4)
                     let theme = ColorExtractor.extractWaveformTheme(from: directImage)
                     self.cachedAlbumArtImage = roundedImage
                     self.cachedWaveformTheme = theme
-                } else if let urlString = track.artworkURL, let url = URL(string: urlString) {
-                    URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
-                        guard let self = self else { return }
-                        if let data = data, let image = NSImage(data: data) {
-                            DispatchQueue.main.async {
-                                let roundedImage = self.roundCorners(of: image, size: NSSize(width: 20, height: 20), radius: 4)
-                                let theme = ColorExtractor.extractWaveformTheme(from: image)
-                                self.cachedAlbumArtImage = roundedImage
-                                self.cachedWaveformTheme = theme
-                            }
-                        } else {
-                            DispatchQueue.main.async {
-                                let fallback = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
-                                fallback?.isTemplate = true
-                                self.cachedAlbumArtImage = fallback
-                                self.cachedWaveformTheme = .fallback
-                            }
-                        }
-                    }.resume()
                 } else {
-                    let fallback = NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)
+                    let fallback = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: nil)
                     fallback?.isTemplate = true
-                    cachedAlbumArtImage = fallback
-                    cachedWaveformTheme = .fallback
+                    self.cachedAlbumArtImage = fallback
+                    self.cachedWaveformTheme = .fallback
                 }
             }
             
