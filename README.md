@@ -18,16 +18,6 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
-<p align="center">
-  <a href="https://reddit.com/r/macapps"><img src="https://img.shields.io/badge/Community-r%2Fmacapps-FF4500?style=flat-square&logo=reddit" alt="r/macapps"></a>
-  <a href="https://reddit.com/r/macsetups"><img src="https://img.shields.io/badge/Aesthetic-r%2Fmacsetups-9B51E0?style=flat-square&logo=reddit" alt="r/macsetups"></a>
-  <a href="https://reddit.com/r/audiophile"><img src="https://img.shields.io/badge/Community-r%2Faudiophile-FF4500?style=flat-square&logo=reddit" alt="r/audiophile"></a>
-  <a href="https://reddit.com/r/SwiftUI"><img src="https://img.shields.io/badge/Community-r%2FSwiftUI-FA7343?style=flat-square&logo=swift" alt="r/SwiftUI"></a>
-  <img src="https://img.shields.io/badge/Hardware-Trackpad%20Subwoofer-black?style=flat-square&logo=apple" alt="Trackpad Subwoofer">
-  <img src="https://img.shields.io/badge/Feature-Dynamic%20Island%20for%20Mac-007AFF?style=flat-square&logo=apple" alt="Dynamic Island for Mac">
-  <img src="https://img.shields.io/badge/UI-Liquid%20Glass%20Shader-34C759?style=flat-square" alt="Liquid Glass">
-</p>
-
 ---
 
 ## 📑 สารบัญ / Table of Contents
@@ -40,13 +30,11 @@
   - [4. Trackpad Haptic Engine ระดับ Hardware](#4-trackpad-haptic-engine-ระดับ-hardware)
   - [เจาะลึก Private APIs และคณิตศาสตร์ทุกฟังก์ชัน](#เจาะลึก-private-apis-และคณิตศาสตร์ทุกฟังก์ชัน)
   - [ถ้านั่นคือความรู้สึกของคุณ...](#ถ้านั่นคือความรู้สึกของคุณ)
-  - [🎯 กลุ่มเป้าหมาย & ชุมชนคนรักดนตรี (Target Communities)](#-กลุ่มเป้าหมาย--ชุมชนคนรักดนตรี-target-communities)
 - [Part 2: English Technical Documentation](#part-2-english-technical-documentation)
   - [The Engineering Philosophy & Benchmark](#the-engineering-philosophy--benchmark)
   - [Core Subsystems & Private macOS APIs](#core-subsystems--private-macos-apis)
   - [Mathematical Models Across Every Function](#mathematical-models-across-every-function)
   - [If That's What You Feel...](#if-thats-what-you-feel)
-  - [Target Communities & Discovery Hubs](#target-communities--discovery-hubs)
   - [Installation & macOS Permissions](#installation--macos-permissions)
   - [Building from Source](#building-from-source)
   - [Repository Architecture](#repository-architecture)
@@ -186,30 +174,6 @@
 
 ---
 
-## 🎯 กลุ่มเป้าหมาย & ชุมชนคนรักดนตรี (Target Communities)
-
-แอพพลิเคชันนี้ถูกสร้างขึ้นมาเพื่อตอบโจทย์ผู้ใช้งานและคอมมูนิตี้คนรักเสียงเพลง เทคโนโลยี และงานดีไซน์ที่หลากหลาย โดยเฉพาะในมุมที่หลายคนคาดไม่ถึง:
-
-| ชุมชน / ห้องคอมมูนิตี้ | ทำไมสิ่งนี้จึงตอบโจทย์คุณ? (มุมที่คาดไม่ถึง) | หัวข้อแท็กค้นหา (Topics & Viral Tags) |
-| :--- | :--- | :--- |
-| **🛋️ r/macsetups & #DeskSetup** | สำหรับสายแต่งโต๊ะคอมคลีน ถ่ายรูปลง Pinterest / TikTok / IG ไม่ชอบหน้าต่างรกๆ แต่อยากได้ Vibe แสงสว่างเรืองรองนุ่มนวลตรงขอบ Menu Bar เพิ่มสมาธิและมู้ดตอนนั่งทำงานหรืออ่านหนังสือตอนดึก (Late-Night Lo-Fi Vibe) | `#desksetup` `#macsetups` `#aesthetic` `#lofi` `#satisfying` `#eye-candy` |
-| **🕹️ MacBook Taptic Subwoofer Hackers** | ใครจะคิดว่าคอยล์แม่เหล็ก Force Touch Trackpad บน Mac จะถูกแฮกให้กลายเป็น **Mini Subwoofer สำหรับปลายนิ้ว**! ยิงคลื่นสั่นสะเทือนตามลูกกระเดื่องและเสียงเบส 808 แบบ Zero-Latency ได้จริง | `#haptic-subwoofer` `#taptic-engine` `#force-touch` `#macbook-pro` `#hardware-hack` |
-| **🏝️ Dynamic Island for macOS Lovers** | แฟนๆ Apple ที่ชอบ Dynamic Island บน iPhone 14/15/16 Pro บัดนี้ได้ยกประสบการณ์คลื่นเสียงมีชีวิตชีวาและเด้งตามจังหวะจริงด้วย Spring Physics มาไว้บน Menu Bar ของ Mac โดยไม่เปลืองพื้นที่หน้าจอ | `#dynamic-island` `#dynamic-lake` `#waveform-animation` `#spring-physics` |
-| **🔮 UI/UX Designers & Shaders Enthusiasts** | นักออกแบบ UI ที่หลงใหลในความโปร่งแสง ถอดรหัส Apple Control Center Liquid Glass ของแท้ ด้วย Window Server C-APIs และอัลกอริทึม HSV Vibrant Quantization เกลี่ยสีตามปกอัลบั้มแบบเรียลไทม์ | `#glassmorphism` `#liquid-glass` `#translucent-ui` `#apple-design` |
-| **🎧 r/audiophile & Bit-Perfect Streamers** | นักฟังเพลงตัวจริงที่หวงแหนคุณภาพเสียง ไม่ยอมให้มี Virtual Driver หรือ Loopback ใดๆ มาลดทอนบิตเรต เราดึง 32-bit Float จากระดับ Kernel Process ด้วย CoreAudio Tap ตรงจาก Apple Music Lossless & Spotify | `#audiophile` `#lossless` `#hi-res-audio` `#coreaudio` `#bit-perfect` |
-| **💻 r/SwiftUI & Reverse-Engineering Devs** | คลังโค้ดตัวอย่างคุณภาพสูงสำหรับนักพัฒนาที่อยากศึกษาการผสาน SwiftUI, AppKit NSPanel, Private Frameworks (`MultitouchSupport`), Mach Absolute Clock, และ Accelerate vDSP FFT | `#swift` `#swiftui` `#reverse-engineering` `#private-api` `#open-source` |
-| **🎤 Karaoke & Humming Aficionados** | คนชอบร้องตามหรือแอบฮัมเพลงตอนทำงาน เนื้อร้องซิงค์แม่นยำระดับคำ พร้อมแอนิเมชันคายประจุแสงที่นุ่มนวลที่สุด ไม่ต้องเดาเนื้อเพลงอีกต่อไป | `#karaoke` `#lyrics` `#timed-lyrics` `#music-singalong` |
-
-```
-# Viral & Unexpected Discovery Topics:
-dynamic-island, haptic-subwoofer, trackpad-subwoofer, taptic-engine, force-touch,
-desksetup, macsetups, aesthetic, lofi, satisfying, eye-candy,
-glassmorphism, liquid-glass, audiophile, lossless, coreaudio,
-lyrics, karaoke, spotify, apple-music, macos-menubar, macapps, swiftui, reverse-engineering
-```
-
----
-
 # Part 2: English Technical Documentation
 
 ## The Engineering Philosophy & Benchmark
@@ -322,27 +286,6 @@ Just like that vivid line in Lorde's *No Better*—spending late summer afternoo
 **...Then Lyrics Menu Bar was made for you.**
 
 Every mathematical model, every private API bridge, and every line of Swift code was crafted over months of meticulous iteration to give you this exact sensation. It is completely free, open-source, and made with love for the music community. 🤍
-
----
-
-## 🎯 Target Communities & Discovery Hubs
-
-Whether you are looking for aesthetic desk setups, audiophile streaming, or cutting-edge Swift engineering, here is where **Lyrics Menu Bar** fits right in:
-
-- **🛋️ r/macsetups & Aesthetic Workstations:** The missing jewel for clean desk setups. Provides ambient glowing lyrics on the menu bar without cluttering the screen during late-night coding or study sessions (`#desksetup` `#aesthetic` `#lofi`).
-- **🕹️ MacBook Taptic Subwoofer Hackers:** An unprecedented hardware innovation that turns the MacBook Force Touch Trackpad into an acoustic bass shaker for your fingertips with zero-latency timing (`#haptic-subwoofer` `#taptic-engine` `#force-touch`).
-- **🏝️ Dynamic Island for macOS Lovers:** Bringing the vibrant, real-time music pulse of iPhone's Dynamic Island into the macOS menu bar with 60 FPS elastic spring rebound physics (`#dynamic-island` `#audio-visualizer` `#waveform`).
-- **🔮 UI/UX Designers & Shaders Nerds:** True Apple Control Center Liquid Glass reverse-engineered with Window Server C-APIs and adaptive HSV vibrant color quantization (`#glassmorphism` `#liquid-glass`).
-- **🎧 r/audiophile & Bit-Perfect Streamers:** Zero-latency direct 32-bit floating-point audio interception via private CoreAudio HAL process taps—no virtual sound cards or audio degradation (`#audiophile` `#lossless` `#coreaudio`).
-- **💻 r/SwiftUI & Reverse-Engineering Devs:** A production-grade reference architecture showing how to dynamically invoke private frameworks (`MultitouchSupport`), Mach monotonic clocks, and Accelerate vDSP FFT (`#reverse-engineering` `#private-api` `#swiftui`).
-
-```
-# Viral & Discovery Topics:
-dynamic-island, haptic-subwoofer, trackpad-subwoofer, taptic-engine, force-touch,
-desksetup, macsetups, aesthetic, lofi, satisfying, eye-candy,
-glassmorphism, liquid-glass, audiophile, lossless, coreaudio,
-lyrics, karaoke, spotify, apple-music, macos-menubar, macapps, swiftui, reverse-engineering
-```
 
 ---
 
