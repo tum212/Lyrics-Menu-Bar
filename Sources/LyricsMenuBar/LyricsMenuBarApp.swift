@@ -126,7 +126,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = self.statusItem.button {
-            let img = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Lyrics Menu Bar")
+            let img = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: "Lyrics Menu Bar")
             img?.isTemplate = true
             button.image = img
             button.imagePosition = .imageOnly
@@ -289,6 +289,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         if let track = spotify.currentTrack {
             guard let button = self.statusItem?.button else { return }
+            let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let primaryTextColor = isDark ? NSColor.white : NSColor(white: 0.1, alpha: 1.0)
             
             // Fast path: paused + no sparkle + no animation in progress → skip heavy redraw
             let sparkleTime = now.timeIntervalSince(trackChangedTime)
@@ -543,7 +545,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         ctx.setShouldSubpixelQuantizeFonts(false)
                     }
                     var attr = attributes
-                    attr[.foregroundColor] = NSColor.white.withAlphaComponent(1.0)
+                    attr[.foregroundColor] = isDark ? NSColor.white.withAlphaComponent(1.0) : NSColor(white: 0.1, alpha: 1.0)
                     currentLineText.draw(at: textRect.origin, withAttributes: attr)
                     newGrayImg.unlockFocus()
                     currentCachedGrayText = newGrayImg
@@ -557,7 +559,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         ctx.setShouldSubpixelQuantizeFonts(false)
                     }
                     var attrW = attributes
-                    attrW[.foregroundColor] = NSColor.white
+                    attrW[.foregroundColor] = primaryTextColor
                     currentLineText.draw(at: textRect.origin, withAttributes: attrW)
                     newWhiteImg.unlockFocus()
                     currentCachedWhiteText = newWhiteImg
@@ -630,7 +632,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         
                         NSGraphicsContext.current?.saveGraphicsState()
                         let shadow = NSShadow()
-                        shadow.shadowColor = NSColor.white.withAlphaComponent(alpha * 0.85)
+                        shadow.shadowColor = primaryTextColor.withAlphaComponent(alpha * 0.85)
                         shadow.shadowBlurRadius = 5.0
                         shadow.shadowOffset = .zero
                         shadow.set()
@@ -642,7 +644,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         path.curve(to: NSPoint(x: center.x - s, y: center.y), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x - s * 0.3, y: center.y))
                         path.curve(to: NSPoint(x: center.x, y: center.y + s), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x, y: center.y + s * 0.3))
                         
-                        NSColor.white.withAlphaComponent(alpha).setFill()
+                        primaryTextColor.withAlphaComponent(alpha).setFill()
                         path.fill()
                         NSGraphicsContext.current?.restoreGraphicsState()
                     }
@@ -675,10 +677,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         
                         NSGraphicsContext.current?.compositingOperation = .destinationIn
                         if leadStart > 0 {
-                            NSColor.white.setFill()
+                            primaryTextColor.setFill()
                             NSRect(x: 0, y: 0, width: leadStart, height: safeSize.height).fill()
                         }
-                        if leadEnd > leadStart, let grad = NSGradient(colors: [NSColor.white, NSColor.clear]) {
+                        if leadEnd > leadStart, let grad = NSGradient(colors: [primaryTextColor, NSColor.clear]) {
                             grad.draw(from: NSPoint(x: leadStart, y: 0), to: NSPoint(x: leadEnd, y: 0), options: [])
                         }
                         if leadEnd < safeSize.width {
@@ -724,7 +726,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             
                             NSGraphicsContext.current?.saveGraphicsState()
                             let shadow = NSShadow()
-                            shadow.shadowColor = NSColor.white.withAlphaComponent(alpha)
+                            shadow.shadowColor = primaryTextColor.withAlphaComponent(alpha)
                             shadow.shadowBlurRadius = 4
                             shadow.shadowOffset = .zero
                             shadow.set()
@@ -736,7 +738,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             path.curve(to: NSPoint(x: center.x - s, y: center.y), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x - s * 0.3, y: center.y))
                             path.curve(to: NSPoint(x: center.x, y: center.y + s), controlPoint1: NSPoint(x: center.x - s * 0.3, y: center.y), controlPoint2: NSPoint(x: center.x, y: center.y + s * 0.3))
                             
-                            NSColor.white.withAlphaComponent(alpha).setFill()
+                            primaryTextColor.withAlphaComponent(alpha).setFill()
                             path.fill()
                             NSGraphicsContext.current?.restoreGraphicsState()
                         }
@@ -935,7 +937,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             combinedImage.unlockFocus()
             
-            combinedImage.isTemplate = false
+            let hasRealArt = showAlbumArt && (spotify.artworkImage != nil)
+            combinedImage.isTemplate = !hasRealArt
             button.image = combinedImage
             button.imagePosition = .imageOnly
             button.needsDisplay = true
@@ -943,7 +946,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             // No track playing
             if let button = self.statusItem?.button {
-                let img = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Lyrics Menu Bar")
+                let img = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: "Lyrics Menu Bar")
                 img?.isTemplate = true
                 button.image = img
                 button.imagePosition = .imageOnly

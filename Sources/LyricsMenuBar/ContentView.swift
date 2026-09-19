@@ -35,6 +35,7 @@ struct ContentView: View {
 
     // Track which lyric index is active for scroll animation
     @State private var displayedIndex: Int = 0
+    @State private var isLyricsHovered: Bool = false
     
     // User preferences
     @AppStorage("showLyrics") private var showLyrics = true
@@ -125,17 +126,7 @@ struct ContentView: View {
                     }
                 }
                 .frame(width: 130)
-
-                // Delicate vertical glass divider
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.clear, .white.opacity(0.15), .clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 1, height: 190)
+                Spacer().frame(width: 4)
 
                 // MARK: Right Column - Continuous Lyrics Stream
                 TimelineView(.animation) { timeline in
@@ -228,6 +219,7 @@ struct ContentView: View {
                                 line: line,
                                 isActive: isActive,
                                 isPast: isPast,
+                                isLyricsHovered: isLyricsHovered,
                                 currentTime: info.currentTime,
                                 fallbackProgress: info.progress,
                                 isUnsynced: info.isUnsynced,
@@ -248,6 +240,11 @@ struct ContentView: View {
                     }
                     .padding(.vertical, 10)
                     .padding(.horizontal, 4)
+                }
+                .onHover { hovering in
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        isLyricsHovered = hovering
+                    }
                 }
                 // Apple Music style: scroll current line smoothly to ~35% from top
                 .onChange(of: info.activeId) { [proxy] newId in
@@ -414,6 +411,7 @@ struct LyricLineRowView: View {
     let line: LyricLine
     let isActive: Bool
     let isPast: Bool
+    let isLyricsHovered: Bool
     let currentTime: TimeInterval
     let fallbackProgress: Double
     let isUnsynced: Bool
@@ -422,18 +420,23 @@ struct LyricLineRowView: View {
     @State private var isHovered = false
     
     var body: some View {
-        let font = NSFont.systemFont(ofSize: 20, weight: .bold)
+        let isBgVocal = line.isBackgroundVocal
+        let fontSize: CGFloat = isBgVocal ? 15 : 20
+        let fontWeight: Font.Weight = isBgVocal ? .semibold : .bold
+        let font = NSFont.systemFont(ofSize: fontSize, weight: isBgVocal ? .semibold : .bold)
         let containerWidth: CGFloat = 260.0
+        let effectiveHover = isHovered || isLyricsHovered
         
         Group {
             if isUnsynced {
-                unsyncedView(containerWidth: containerWidth, font: font)
+                unsyncedView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
             } else if !line.words.isEmpty {
-                wordKaraokeView(containerWidth: containerWidth, font: font)
+                wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
             } else {
-                fallbackWipeView(containerWidth: containerWidth, font: font)
+                fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
             }
         }
+        .padding(.leading, isBgVocal ? 24 : 0)
         .padding(.vertical, 3)
         .padding(.horizontal, 6)
         .background(
@@ -441,7 +444,11 @@ struct LyricLineRowView: View {
                 .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
         )
         .contentShape(Rectangle())
-        .animation(.easeInOut(duration: 0.38), value: isActive)
+        .blur(radius: (isActive || effectiveHover) ? 0 : 2.5)
+        .opacity(isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.35 : 0.45)))
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isActive)
         .onTapGesture {
             onSeek()
         }
@@ -456,24 +463,27 @@ struct LyricLineRowView: View {
     }
     
     @ViewBuilder
-    private func unsyncedView(containerWidth: CGFloat, font: NSFont) -> some View {
-        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: containerWidth, font: font)
+    private func unsyncedView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool) -> some View {
+        let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
+        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
         VStack(alignment: .leading, spacing: 4) {
             ForEach(0..<lines.count, id: \.self) { i in
                 Text(lines[i])
-                    .font(.system(size: 20, weight: .bold))
+                    .font(.system(size: fontSize, weight: fontWeight))
+                    .italic(isBgVocal)
                     .foregroundColor(isActive ? .white : .white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60)))
                     .shadow(color: isActive ? .white.opacity(0.40) : .clear, radius: 4)
                     .animation(.easeInOut(duration: 0.38), value: isActive)
-                    .frame(height: 28, alignment: .leading)
+                    .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
             }
         }
-        .frame(width: containerWidth, alignment: .leading)
+        .frame(width: effectiveWidth, alignment: .leading)
     }
     
     @ViewBuilder
-    private func wordKaraokeView(containerWidth: CGFloat, font: NSFont) -> some View {
-        let wrappedLines = LyricLineLayoutCache.shared.wrappedWords(for: line, width: containerWidth, font: font)
+    private func wordKaraokeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool) -> some View {
+        let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
+        let wrappedLines = LyricLineLayoutCache.shared.wrappedWords(for: line, width: effectiveWidth, font: font)
         VStack(alignment: .leading, spacing: 6) {
             ForEach(0..<wrappedLines.count, id: \.self) { lineIdx in
                 let rowWords = wrappedLines[lineIdx]
@@ -485,19 +495,21 @@ struct LyricLineRowView: View {
                             isPast: isPast,
                             isHovered: isHovered,
                             currentTime: currentTime,
-                            fontSize: 20,
-                            fontWeight: .bold
+                            fontSize: fontSize,
+                            fontWeight: fontWeight,
+                            isItalic: isBgVocal
                         )
                     }
                 }
             }
         }
-        .frame(width: containerWidth, alignment: .leading)
+        .frame(width: effectiveWidth, alignment: .leading)
     }
     
     @ViewBuilder
-    private func fallbackWipeView(containerWidth: CGFloat, font: NSFont) -> some View {
-        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: containerWidth, font: font)
+    private func fallbackWipeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool) -> some View {
+        let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
+        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
         let totalChars = max(1, lines.reduce(0) { $0 + $1.count })
         
         var charAccumulator = 0
@@ -531,12 +543,14 @@ struct LyricLineRowView: View {
                 
                 ZStack(alignment: .leading) {
                     Text(lineText)
-                        .font(.system(size: 20, weight: .bold))
+                        .font(.system(size: fontSize, weight: fontWeight))
+                        .italic(isBgVocal)
                         .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
                         .animation(.easeInOut(duration: 0.38), value: isActive)
                     
                     Text(lineText)
-                        .font(.system(size: 20, weight: .bold))
+                        .font(.system(size: fontSize, weight: fontWeight))
+                        .italic(isBgVocal)
                         .foregroundColor(.white)
                         .mask(
                             LinearGradient(
@@ -553,10 +567,10 @@ struct LyricLineRowView: View {
                         .opacity(lp > 0.0 ? (isActive ? 1.0 : 0.0) : 0.0)
                         .animation(.easeInOut(duration: 0.38), value: isActive)
                 }
-                .frame(height: 28, alignment: .leading)
+                .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
             }
         }
-        .frame(width: containerWidth, alignment: .leading)
+        .frame(width: effectiveWidth, alignment: .leading)
     }
 }
 
@@ -569,6 +583,7 @@ struct WordLyricItemView: View {
     let currentTime: TimeInterval
     var fontSize: CGFloat = 20
     var fontWeight: Font.Weight = .bold
+    var isItalic: Bool = false
     
     var body: some View {
         let font = Font.system(size: fontSize, weight: fontWeight)
@@ -581,7 +596,7 @@ struct WordLyricItemView: View {
         let progress: CGFloat = CGFloat(max(0.0, min(1.0, rawProgress)))
         
         let hasStarted = currentTime >= wordStart
-        let isActivelySinging = currentTime >= wordStart && currentTime < wordEnd
+        let isActivelySinging = isActive && (currentTime >= wordStart && currentTime < wordEnd)
         
         let glow = computeGlow(hasStarted: hasStarted, isActivelySinging: isActivelySinging, wordEnd: wordEnd)
         
@@ -589,12 +604,14 @@ struct WordLyricItemView: View {
             // Base layer: unlit typography with smooth opacity transition
             Text(word.text)
                 .font(font)
+                .italic(isItalic)
                 .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
                 .animation(.easeInOut(duration: 0.38), value: isActive)
             
             // Illuminated layer: SINGLE stable view that never unmounts while active
             Text(word.text)
                 .font(font)
+                .italic(isItalic)
                 .foregroundColor(.white)
                 .mask(
                     GeometryReader { geo in
@@ -619,11 +636,13 @@ struct WordLyricItemView: View {
                 .opacity(isActive ? (hasStarted ? 1.0 : 0.0) : 0.0)
                 .animation(.easeInOut(duration: 0.38), value: isActive)
         }
+        .scaleEffect(isActivelySinging ? 1.08 : 1.0, anchor: .bottomLeading)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isActivelySinging)
     }
     
     private func computeGlow(hasStarted: Bool, isActivelySinging: Bool, wordEnd: TimeInterval) -> (opacity: Double, radius: CGFloat) {
         if isActivelySinging {
-            return (0.75, 5.5)
+            return (0.85, 6.0)
         } else if hasStarted {
             let timeSinceEnd = max(0.0, currentTime - wordEnd)
             let decayDuration: Double = 0.32
@@ -713,7 +732,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
             
             let widthItem = NSMenuItem(title: "Lyrics Width", action: nil, keyEquivalent: "")
             let widthMenu = NSMenu(title: "Lyrics Width")
-            var widths = [0, 50, 150, 200, 250, 300]
+            var widths = [0, 50, 100, 150, 200, 250, 300]
             if !widths.contains(parent.lyricsMaxWidth) {
                 widths.append(parent.lyricsMaxWidth)
                 widths.sort()

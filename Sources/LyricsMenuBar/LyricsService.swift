@@ -37,6 +37,12 @@ public struct LyricLine: Identifiable, Equatable, Sendable {
     public init(time: TimeInterval, text: String) {
         self.init(id: UUID(), time: time, endTime: 0, text: text, words: [])
     }
+    
+    public var isBackgroundVocal: Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return (trimmed.hasPrefix("(") && trimmed.hasSuffix(")")) ||
+               (trimmed.hasPrefix("[") && trimmed.hasSuffix("]"))
+    }
 }
 
 public enum LyricTimingCalculator {
@@ -541,6 +547,12 @@ public final class LyricsService: ObservableObject {
         // 1. Strip UTF-8 BOM if present
         let cleanLRC = lrc.replacingOccurrences(of: "\u{FEFF}", with: "")
         
+        // 1.1 Support enriched TTML format
+        if cleanLRC.contains("<tt") || cleanLRC.contains("<p begin=") {
+            let ttmlLines = parseTTML(cleanLRC)
+            if !ttmlLines.isEmpty { return ttmlLines }
+        }
+        
         // 2. Parse [offset: +/-ms] (e.g., [offset: 500] or [offset:-250])
         var timeOffset: TimeInterval = 0.0
         let offsetRegex = try? NSRegularExpression(pattern: "\\[offset:\\s*([+-]?\\d+)\\]", options: .caseInsensitive)
@@ -610,7 +622,7 @@ public final class LyricsService: ObservableObject {
     }
     
     nonisolated private func parseELRCLine(content: String) -> (text: String, words: [LyricWord])? {
-        let pattern = "<(\\d+):(\\d+(?:\\.\\d+)?)>([^<]*)"
+        let pattern = "(?:<|\\(|\\[)(\\d+):(\\d+(?:\\.\\d+)?)(?:>|\\)|\\])([^<\\(\\[]*)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let ns = content as NSString
         let matches = regex.matches(in: content, range: NSRange(location: 0, length: ns.length))
@@ -665,6 +677,79 @@ public final class LyricsService: ObservableObject {
         }
         
         return words.isEmpty ? nil : (fullText.trimmingCharacters(in: .whitespaces), words)
+    }
+    
+    nonisolated private func parseTTML(_ ttml: String) -> [LyricLine] {
+        var lines: [LyricLine] = []
+        let pPattern = "<p\\s+begin=\"([^\"]+)\"\\s+end=\"([^\"]+)\"[^>]*>(.*?)</p>"
+        guard let pRegex = try? NSRegularExpression(pattern: pPattern, options: [.dotMatchesLineSeparators]) else { return [] }
+        let ns = ttml as NSString
+        let matches = pRegex.matches(in: ttml, range: NSRange(location: 0, length: ns.length))
+        
+        for match in matches {
+            guard let br = Range(match.range(at: 1), in: ttml),
+                  let er = Range(match.range(at: 2), in: ttml),
+                  let cr = Range(match.range(at: 3), in: ttml) else { continue }
+            
+            let beginStr = String(ttml[br])
+            let endStr = String(ttml[er])
+            let innerContent = String(ttml[cr])
+            
+            guard let startTime = parseTimestamp(beginStr),
+                  let endTime = parseTimestamp(endStr) else { continue }
+            
+            let spanPattern = "<span\\s+begin=\"([^\"]+)\"\\s+end=\"([^\"]+)\"[^>]*>([^<]*)</span>"
+            if let spanRegex = try? NSRegularExpression(pattern: spanPattern),
+               let spanMatches = Optional(spanRegex.matches(in: innerContent, range: NSRange(location: 0, length: (innerContent as NSString).length))),
+               !spanMatches.isEmpty {
+                var words: [LyricWord] = []
+                var fullText = ""
+                for (idx, sm) in spanMatches.enumerated() {
+                    if let sbr = Range(sm.range(at: 1), in: innerContent),
+                       let ser = Range(sm.range(at: 2), in: innerContent),
+                       let str = Range(sm.range(at: 3), in: innerContent),
+                       let ws = parseTimestamp(String(innerContent[sbr])),
+                       let we = parseTimestamp(String(innerContent[ser])) {
+                        let wText = String(innerContent[str]).trimmingCharacters(in: .whitespaces)
+                        if !wText.isEmpty {
+                            words.append(LyricWord(text: wText, startTime: ws, endTime: we, index: idx))
+                            fullText += (fullText.isEmpty ? "" : " ") + wText
+                        }
+                    }
+                }
+                if !words.isEmpty {
+                    lines.append(LyricLine(time: startTime, endTime: endTime, text: fullText, words: words))
+                    continue
+                }
+            }
+            
+            let clean = innerContent.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+            if !clean.isEmpty {
+                lines.append(LyricLine(time: startTime, endTime: endTime, text: clean, words: []))
+            }
+        }
+        
+        let sorted = lines.sorted { $0.time < $1.time }
+        return LyricTimingCalculator.computeWordTimings(for: sorted)
+    }
+    
+    nonisolated private func parseTimestamp(_ str: String) -> TimeInterval? {
+        let trimmed = str.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasSuffix("ms"), let ms = Double(trimmed.dropLast(2)) {
+            return ms / 1000.0
+        }
+        if trimmed.hasSuffix("s"), let s = Double(trimmed.dropLast(1)) {
+            return s
+        }
+        let parts = trimmed.components(separatedBy: ":")
+        if parts.count == 3, let h = Double(parts[0]), let m = Double(parts[1]), let s = Double(parts[2]) {
+            return h * 3600.0 + m * 60.0 + s
+        } else if parts.count == 2, let m = Double(parts[0]), let s = Double(parts[1]) {
+            return m * 60.0 + s
+        } else if let sec = Double(trimmed) {
+            return sec
+        }
+        return nil
     }
     
     nonisolated private func parsePlain(_ text: String) -> [LyricLine] {
