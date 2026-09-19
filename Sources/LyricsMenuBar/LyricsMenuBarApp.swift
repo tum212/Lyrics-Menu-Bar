@@ -161,16 +161,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 2. Setup Native Liquid Glass Material Layer (AppKit GPU Compositing)
         let visualEffect = NSVisualEffectView()
-        visualEffect.material = .popover
+        visualEffect.material = .hudWindow
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.layer?.cornerRadius = 20
-        visualEffect.layer?.masksToBounds = true
+        visualEffect.layer?.masksToBounds = false
+
+        let mask = NSImage(size: NSSize(width: 480, height: 240), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 20, yRadius: 20).fill()
+            return true
+        }
+        visualEffect.maskImage = mask
 
         // 3. Setup HostingView & Pin to VisualEffectView
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.isOpaque = false
 
         visualEffect.addSubview(hostingView)
         NSLayoutConstraint.activate([

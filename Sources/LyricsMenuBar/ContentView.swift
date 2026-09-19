@@ -86,9 +86,20 @@ struct ContentView: View {
         RoundedRectangle(cornerRadius: 20, style: .continuous)
             .strokeBorder(
                 specularEdgeEnabled
-                    ? (colorScheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.35))
-                    : Color.clear,
-                lineWidth: specularEdgeEnabled ? 0.5 : 0.0
+                    ? LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.30 : 0.50),
+                            Color.white.opacity(colorScheme == .dark ? 0.08 : 0.15)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    : LinearGradient(
+                        colors: [Color.clear, Color.clear],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                lineWidth: specularEdgeEnabled ? 0.75 : 0.0
             )
             .animation(.easeInOut(duration: 0.2), value: specularEdgeEnabled)
     }
@@ -732,7 +743,9 @@ struct NativeSettingsMenu: NSViewRepresentable {
         return button
     }
     
-    func updateNSView(_ nsView: NSButton, context: Context) {}
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        context.coordinator.parent = self
+    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -749,18 +762,27 @@ struct NativeSettingsMenu: NSViewRepresentable {
         @objc func showMenu(_ sender: NSButton) {
             let menu = NSMenu(title: "Settings")
             
+            // Read fresh values from UserDefaults
+            let showLyrics = UserDefaults.standard.object(forKey: "showLyrics") != nil ? UserDefaults.standard.bool(forKey: "showLyrics") : parent.showLyrics
+            let showAlbumArt = UserDefaults.standard.object(forKey: "showAlbumArt") != nil ? UserDefaults.standard.bool(forKey: "showAlbumArt") : parent.showAlbumArt
+            let musicSourceMode = UserDefaults.standard.string(forKey: "musicSourceMode") ?? parent.musicSourceMode
+            let lyricsFocusMode = UserDefaults.standard.object(forKey: "lyricsFocusMode") != nil ? UserDefaults.standard.bool(forKey: "lyricsFocusMode") : parent.lyricsFocusMode
+            let lyricsMaxWidth = UserDefaults.standard.object(forKey: "lyricsMaxWidth") != nil ? UserDefaults.standard.integer(forKey: "lyricsMaxWidth") : parent.lyricsMaxWidth
+            let specularEdgeEnabled = UserDefaults.standard.object(forKey: "specularEdgeEnabled") != nil ? UserDefaults.standard.bool(forKey: "specularEdgeEnabled") : parent.specularEdgeEnabled
+            let hapticIntensity = UserDefaults.standard.object(forKey: "hapticIntensity") != nil ? UserDefaults.standard.integer(forKey: "hapticIntensity") : parent.hapticIntensity
+            
             // ── 1. General Submenu ──────────────────────────────────────────
             let generalItem = NSMenuItem(title: "General", action: nil, keyEquivalent: "")
             let generalMenu = NSMenu(title: "General")
             
             let lyricsItem = NSMenuItem(title: "Lyrics in Menu Bar", action: #selector(toggleLyrics), keyEquivalent: "")
             lyricsItem.target = self
-            lyricsItem.state = parent.showLyrics ? .on : .off
+            lyricsItem.state = showLyrics ? .on : .off
             generalMenu.addItem(lyricsItem)
             
             let albumItem = NSMenuItem(title: "Album Cover", action: #selector(toggleAlbum), keyEquivalent: "")
             albumItem.target = self
-            albumItem.state = parent.showAlbumArt ? .on : .off
+            albumItem.state = showAlbumArt ? .on : .off
             generalMenu.addItem(albumItem)
             
             let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
@@ -781,7 +803,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
                 let item = NSMenuItem(title: title, action: #selector(setMusicSource(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = key
-                item.state = parent.musicSourceMode == key ? .on : .off
+                item.state = musicSourceMode == key ? .on : .off
                 sourceMenu.addItem(item)
             }
             sourceItem.submenu = sourceMenu
@@ -796,14 +818,14 @@ struct NativeSettingsMenu: NSViewRepresentable {
             
             let focusItem = NSMenuItem(title: "Lyrics Focus Mode", action: #selector(toggleFocusMode), keyEquivalent: "")
             focusItem.target = self
-            focusItem.state = parent.lyricsFocusMode ? .on : .off
+            focusItem.state = lyricsFocusMode ? .on : .off
             lyricsSectionMenu.addItem(focusItem)
             
             let widthItem = NSMenuItem(title: "Lyrics Width", action: nil, keyEquivalent: "")
             let widthMenu = NSMenu(title: "Lyrics Width")
             var widths = [0, 50, 100, 150, 200, 250, 260, 300]
-            if !widths.contains(parent.lyricsMaxWidth) {
-                widths.append(parent.lyricsMaxWidth)
+            if !widths.contains(lyricsMaxWidth) {
+                widths.append(lyricsMaxWidth)
                 widths.sort()
             }
             for w in widths {
@@ -811,7 +833,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
                 let item = NSMenuItem(title: title, action: #selector(setWidth(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = w
-                item.state = parent.lyricsMaxWidth == w ? .on : .off
+                item.state = lyricsMaxWidth == w ? .on : .off
                 widthMenu.addItem(item)
             }
             widthMenu.addItem(.separator())
@@ -830,7 +852,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
             
             let specularItem = NSMenuItem(title: "Specular Edge Highlight", action: #selector(toggleSpecularEdge), keyEquivalent: "")
             specularItem.target = self
-            specularItem.state = parent.specularEdgeEnabled ? .on : .off
+            specularItem.state = specularEdgeEnabled ? .on : .off
             appearanceMenu.addItem(specularItem)
             
             appearanceItem.submenu = appearanceMenu
@@ -847,7 +869,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
                 let item = NSMenuItem(title: mode, action: #selector(setHaptic(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = i
-                item.state = parent.hapticIntensity == i ? .on : .off
+                item.state = hapticIntensity == i ? .on : .off
                 intensityMenu.addItem(item)
             }
             intensityItem.submenu = intensityMenu
@@ -951,23 +973,54 @@ struct NativeSettingsMenu: NSViewRepresentable {
             alert.runModal()
         }
         
-        @objc func toggleFocusMode() { parent.lyricsFocusMode.toggle() }
-        @objc func toggleSpecularEdge() { parent.specularEdgeEnabled.toggle() }
-        @objc func toggleLyrics() { parent.showLyrics.toggle() }
-        @objc func toggleAlbum() { parent.showAlbumArt.toggle() }
+        @objc func toggleFocusMode() {
+            let current = UserDefaults.standard.object(forKey: "lyricsFocusMode") != nil ? UserDefaults.standard.bool(forKey: "lyricsFocusMode") : parent.lyricsFocusMode
+            let newVal = !current
+            UserDefaults.standard.set(newVal, forKey: "lyricsFocusMode")
+            parent.lyricsFocusMode = newVal
+        }
+        @objc func toggleSpecularEdge() {
+            let current = UserDefaults.standard.object(forKey: "specularEdgeEnabled") != nil ? UserDefaults.standard.bool(forKey: "specularEdgeEnabled") : parent.specularEdgeEnabled
+            let newVal = !current
+            UserDefaults.standard.set(newVal, forKey: "specularEdgeEnabled")
+            parent.specularEdgeEnabled = newVal
+        }
+        @objc func toggleLyrics() {
+            let current = UserDefaults.standard.object(forKey: "showLyrics") != nil ? UserDefaults.standard.bool(forKey: "showLyrics") : parent.showLyrics
+            let newVal = !current
+            UserDefaults.standard.set(newVal, forKey: "showLyrics")
+            parent.showLyrics = newVal
+        }
+        @objc func toggleAlbum() {
+            let current = UserDefaults.standard.object(forKey: "showAlbumArt") != nil ? UserDefaults.standard.bool(forKey: "showAlbumArt") : parent.showAlbumArt
+            let newVal = !current
+            UserDefaults.standard.set(newVal, forKey: "showAlbumArt")
+            parent.showAlbumArt = newVal
+        }
         @objc func toggleAudioFeatures() {
-            parent.audioFeaturesEnabled.toggle()
-            UserDefaults.standard.set(parent.audioFeaturesEnabled, forKey: "audioFeaturesEnabled")
-            if parent.audioFeaturesEnabled {
+            let current = UserDefaults.standard.object(forKey: "audioFeaturesEnabled") != nil ? UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") : parent.audioFeaturesEnabled
+            let newVal = !current
+            UserDefaults.standard.set(newVal, forKey: "audioFeaturesEnabled")
+            parent.audioFeaturesEnabled = newVal
+            if newVal {
                 NotificationCenter.default.post(name: Notification.Name("AudioFeaturesEnabled"), object: nil)
             } else {
                 NotificationCenter.default.post(name: Notification.Name("AudioFeaturesDisabled"), object: nil)
             }
         }
         @objc func toggleLaunchAtLogin() { LaunchAtLoginManager.isEnabled.toggle() }
-        @objc func setWidth(_ sender: NSMenuItem) { parent.lyricsMaxWidth = sender.tag }
-        @objc func setHaptic(_ sender: NSMenuItem) { parent.hapticIntensity = sender.tag }
-        @objc func setWaveform(_ sender: NSMenuItem) { parent.waveformBars = sender.tag }
+        @objc func setWidth(_ sender: NSMenuItem) {
+            UserDefaults.standard.set(sender.tag, forKey: "lyricsMaxWidth")
+            parent.lyricsMaxWidth = sender.tag
+        }
+        @objc func setHaptic(_ sender: NSMenuItem) {
+            UserDefaults.standard.set(sender.tag, forKey: "hapticIntensity")
+            parent.hapticIntensity = sender.tag
+        }
+        @objc func setWaveform(_ sender: NSMenuItem) {
+            UserDefaults.standard.set(sender.tag, forKey: "waveformBars")
+            parent.waveformBars = sender.tag
+        }
         @objc func quit() { NSApplication.shared.terminate(nil) }
 
         @objc func setHapticType(_ sender: NSMenuItem) {
