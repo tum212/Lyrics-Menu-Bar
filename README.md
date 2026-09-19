@@ -76,7 +76,7 @@
 ## 1. Lyrics ที่ Menu Bar & ดาวประกายแสง
 
 <p align="center">
-  <img src="docs/images/menubar_lyrics_and_waveform.png" width="680" alt="Menu Bar Real-Time Lyrics & Waveform">
+  <img src="docs/images/menubar_interlude_stars.gif" width="100%" alt="Menu Bar Real-Time Melody Interlude Stars">
 </p>
 
 เนื้อเพลงบน Menu Bar คือสิ่งที่ทำงานอยู่เบื้องหน้าในทุกหน้าต่าง ไม่ว่าคุณจะเปิดกี่แอพหรือสลับไปกี่ Space:
@@ -266,10 +266,15 @@ $$\text{Weight}(w) = \left(0.70 \cdot S(w) + 0.08 \cdot C(w) + 0.22\right) \cdot
   $$B_{\text{top}} = \text{clamp}(0.68, 0.94, B \times 1.7 + 0.22)$$
   $$B_{\text{bottom}} = \text{clamp}(0.42, 0.72, B \times 1.35 + 0.08)$$
 
-### 5. $C^1$ Smooth Cubic Hermite Marquee Motion
+### 5. $C^1$ Smooth Cubic Hermite Marquee Motion & Interlude Stars
 - Marquee text motion follows a cubic Hermite polynomial:
   $$S(x) = 3x^2 - 2x^3$$
   ensuring zero velocity departure and arrival at scroll boundaries.
+- Pulsating triple-star interlude indicator (✦ ✦ ✦) keeps visual rhythm during instrumental solos.
+
+<p align="center">
+  <img src="docs/images/menubar_interlude_stars.gif" width="100%" alt="Menu Bar Melody Interlude Stars Animation">
+</p>
 
 ---
 
@@ -335,6 +340,7 @@ LyricsMenuBar/
 │   ├── benchmark_hero.png           # Full Retina desktop hero screenshot ("No Better")
 │   ├── lyrics_window_singing.gif    # High-resolution animated Liquid Glass word glow
 │   ├── lyrics_window_singing.png    # Popover window active word glow detail
+│   ├── menubar_interlude_stars.gif  # High-resolution animated melody interlude stars
 │   ├── menubar_lyrics_and_waveform.gif # High-resolution animated dynamic island waveform
 │   └── menubar_lyrics_and_waveform.png # Menu Bar real-time lyrics & equalizer
 ├── Sources/
