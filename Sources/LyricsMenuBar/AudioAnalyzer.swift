@@ -9,7 +9,7 @@ import AppKit
 import Combine
 
 // MARK: - Mach time → seconds helper (used in IOProc → Haptic pipeline)
-private nonisolated(unsafe) let _machTimebaseInfo: mach_timebase_info_data_t = {
+private let _machTimebaseInfo: mach_timebase_info_data_t = {
     var info = mach_timebase_info_data_t()
     mach_timebase_info(&info)
     return info
@@ -20,7 +20,7 @@ func machTimeToSeconds(_ t: UInt64) -> Double {
     return Double(t) * Double(_machTimebaseInfo.numer) / Double(_machTimebaseInfo.denom) * 1e-9
 }
 
-// MARK: - Global IOProc Callback
+// MARK: - Global IOProc Callback (Real-time Audio Thread)
 func tapIOProc(
     inDevice: AudioObjectID,
     inNow: UnsafePointer<AudioTimeStamp>,
@@ -38,18 +38,9 @@ func tapIOProc(
     let outputHostTime = inOutputTime.pointee.mHostTime
 
     let bufferListPtr = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
-    if bufferListPtr.count > 0 {
-        let buffer = bufferListPtr[0]
-        let byteSize = Int(buffer.mDataByteSize)
-        let frameCount = byteSize / MemoryLayout<Float32>.size
-        if let data = buffer.mData, frameCount > 0 {
-            let floatData = data.assumingMemoryBound(to: Float32.self)
-            let bufferPtr = UnsafeBufferPointer(start: floatData, count: frameCount)
-            analyzer.processFloatData(bufferPtr, count: frameCount, sampleRate: 44100.0,
-                                      outputHostTime: outputHostTime)
-        }
-    }
+    guard bufferListPtr.count > 0 else { return noErr }
 
+    analyzer.processAudioBufferList(bufferListPtr, outputHostTime: outputHostTime)
     return noErr
 }
 
@@ -63,24 +54,32 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
     private var ioProcID: AudioDeviceIOProcID? = nil
     public private(set) var isRunning = false
     public private(set) var bandCount = 14
-    private var spectrumBuffer = [Float](repeating: 0, count: 14)
-    private var bandGains = [Float](repeating: 0.05, count: 14)
-    private let lock = NSLock()
+    public private(set) var sampleRate: Float = 44100.0
+
+    private var spectrumBuffer = [Float](repeating: 0, count: 128)
+    private var bandGains = [Float](repeating: 0.05, count: 128)
+    private var spinLock = os_unfair_lock()
+
+    // Pre-allocated buffers for ZERO-ALLOCATION real-time audio thread:
+    private let fftSize = 4096
+    private var circularBuffer: [Float] = Array(repeating: 0, count: 4096)
+    private var circularIndex: Int = 0
+    private var unwrappedBuffer: [Float] = Array(repeating: 0, count: 4096)
+    private var downmixBuffer: [Float] = Array(repeating: 0, count: 4096)
+    private var rawBandsBuffer: [Float] = Array(repeating: 0, count: 128)
+    private var newAmplitudesBuffer: [CGFloat] = Array(repeating: 0.01, count: 128)
 
     // Pre-allocated FFT buffers
-    private var fftRealP:     [Float] = []
-    private var fftImagP:     [Float] = []
-    private var fftMagnitudes:[Float] = []
-    private var fftWindow:    [Float] = []
-    private var fftWindowed:  [Float] = []
-    private var fftActual:    [Float] = []
+    private var fftRealP:      [Float] = []
+    private var fftImagP:      [Float] = []
+    private var fftMagnitudes: [Float] = []
+    private var fftWindow:     [Float] = []
+    private var fftWindowed:   [Float] = []
+    private var fftActual:     [Float] = []
 
-    // Silence Detection
-    private var silenceFrames: Int = 0
-    private let silenceThresholdFrames: Int = 300
-    private var diagnosticShown: Bool = false
+    private var cachedHapticIntensity: Int = UserDefaults.standard.integer(forKey: "hapticIntensity")
+    private var lastUIDispatchHostTime: UInt64 = 0
 
-    private var bassPeak: Float = 0.0001
     private var cachedFFTSetup: FFTSetup?
     private var cachedLog2n: vDSP_Length = 0
     private var observers: [Any] = []
@@ -95,6 +94,27 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
             }
         }
         observers.append(obs)
+
+        // Cache haptic intensity outside real-time audio thread
+        let hapticObs = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.cachedHapticIntensity = UserDefaults.standard.integer(forKey: "hapticIntensity")
+        }
+        observers.append(hapticObs)
+
+        preallocateFFT()
+    }
+
+    private func preallocateFFT() {
+        let halfLen = fftSize / 2
+        cachedLog2n    = vDSP_Length(log2(Float(fftSize)))
+        cachedFFTSetup = vDSP_create_fftsetup(cachedLog2n, FFTRadix(kFFTRadix2))
+        fftRealP       = [Float](repeating: 0, count: halfLen)
+        fftImagP       = [Float](repeating: 0, count: halfLen)
+        fftMagnitudes  = [Float](repeating: 0, count: halfLen)
+        fftWindow      = [Float](repeating: 0, count: fftSize)
+        fftWindowed    = [Float](repeating: 0, count: fftSize)
+        fftActual      = [Float](repeating: 0, count: halfLen)
+        vDSP_hann_window(&fftWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
     }
 
     public func retarget(bundleID: String) {
@@ -109,36 +129,46 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
     }
 
     deinit {
+        stop()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         if let setup = cachedFFTSetup { vDSP_destroy_fftsetup(setup) }
     }
 
     public func updateBandCount(_ count: Int) {
-        guard count > 0, count != bandCount else { return }
-        lock.lock()
-        defer { lock.unlock() }
+        guard count > 0, count <= 128, count != bandCount else { return }
+        os_unfair_lock_lock(&spinLock)
         bandCount = count
-        spectrumBuffer = [Float](repeating: 0, count: count)
-        bandGains = [Float](repeating: 0.05, count: count)
+        for i in 0..<count {
+            spectrumBuffer[i] = 0
+            bandGains[i] = 0.05
+        }
+        os_unfair_lock_unlock(&spinLock)
     }
 
     public func start() {
         guard !isRunning else { return }
+        guard UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") else { return }
         requestAccessAndSetup()
     }
 
     public func stop() {
         guard isRunning else { return }
-        if let ioProcID = ioProcID, aggregateDeviceID != 0 {
-            AudioDeviceStop(aggregateDeviceID, ioProcID)
-            AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+        isRunning = false
+        if let validIOProcID = ioProcID, aggregateDeviceID != 0 {
+            _ = AudioDeviceStop(aggregateDeviceID, validIOProcID)
+            _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, validIOProcID)
+            _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             self.ioProcID = nil
             self.aggregateDeviceID = 0
+        }
+        if tapID != 0 {
+            if #available(macOS 14.2, *) {
+                _ = AudioHardwareDestroyProcessTap(tapID)
+            }
             self.tapID = 0
         }
-        isRunning = false
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             self.amplitudes = Array(repeating: 0.0, count: self.bandCount)
         }
     }
@@ -201,13 +231,12 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
 
         let targetApps = NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleID).filter { !$0.isTerminated }
         guard let targetApp = targetApps.first else {
-            print("Target music app (\(targetBundleID)) is not running")
             return
         }
         currentTargetBundleID = targetBundleID
         
         var pid: pid_t = pid_t(targetApp.processIdentifier)
-        var pidSize = UInt32(MemoryLayout<pid_t>.size)
+        let pidSize = UInt32(MemoryLayout<pid_t>.size)
         
         var processID: AudioObjectID = 0
         var processIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
@@ -247,8 +276,13 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
         var uid: CFString = "" as CFString
         var uidSize = UInt32(MemoryLayout<CFString>.size)
         var uidAddress = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyUID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        withUnsafeMutablePointer(to: &uid) { uidPtr in
+        let uidStatus = withUnsafeMutablePointer(to: &uid) { uidPtr in
             AudioObjectGetPropertyData(newTapID, &uidAddress, 0, nil, &uidSize, uidPtr)
+        }
+        guard uidStatus == noErr else {
+            AudioHardwareDestroyProcessTap(newTapID)
+            self.tapID = 0
+            return
         }
         
         let tapDict: [String: Any] = [
@@ -266,16 +300,48 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
         let aggStatus = AudioHardwareCreateAggregateDevice(aggregateDict as CFDictionary, &aggregateID)
         guard aggStatus == noErr, aggregateID != 0 else {
             print("Failed to create aggregate device: \(aggStatus)")
+            AudioHardwareDestroyProcessTap(newTapID)
+            self.tapID = 0
             return
         }
         
         self.aggregateDeviceID = aggregateID
+
+        // Dynamic Sample Rate Detection from hardware
+        var nominalSR: Float64 = 44100.0
+        var srSize = UInt32(MemoryLayout<Float64>.size)
+        var srAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectGetPropertyData(aggregateID, &srAddress, 0, nil, &srSize, &nominalSR) == noErr, nominalSR > 8000 {
+            self.sampleRate = Float(nominalSR)
+        } else {
+            var defaultDev: AudioObjectID = 0
+            var devSize = UInt32(MemoryLayout<AudioObjectID>.size)
+            var devAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            if AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &devAddress, 0, nil, &devSize, &defaultDev) == noErr {
+                if AudioObjectGetPropertyData(defaultDev, &srAddress, 0, nil, &srSize, &nominalSR) == noErr, nominalSR > 8000 {
+                    self.sampleRate = Float(nominalSR)
+                }
+            }
+        }
+
         let clientData = Unmanaged.passUnretained(self).toOpaque()
         
         var newIOProcID: AudioDeviceIOProcID? = nil
         let ioStatus = AudioDeviceCreateIOProcID(aggregateID, tapIOProc, clientData, &newIOProcID)
         guard ioStatus == noErr, let validIOProcID = newIOProcID else {
             print("Failed to create IOProc: \(ioStatus)")
+            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            AudioHardwareDestroyProcessTap(newTapID)
+            self.aggregateDeviceID = 0
+            self.tapID = 0
             return
         }
         self.ioProcID = validIOProcID
@@ -283,67 +349,91 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
         let startStatus = AudioDeviceStart(aggregateID, validIOProcID)
         if startStatus == noErr {
             self.isRunning = true
-            print("✅ CoreAudio Process Tap started on \(targetBundleID)!")
+            print("✅ CoreAudio Process Tap started on \(targetBundleID) @ \(self.sampleRate)Hz")
         } else {
             print("Failed to start IOProc: \(startStatus)")
+            _ = AudioDeviceDestroyIOProcID(aggregateID, validIOProcID)
+            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            AudioHardwareDestroyProcessTap(newTapID)
+            self.ioProcID = nil
+            self.aggregateDeviceID = 0
+            self.tapID = 0
         }
     }
 
-    // MARK: - Sliding-window FFT
+    // MARK: - Multi-channel & Non-interleaved Downmix (Zero Allocation)
 
-    private let fftSize = 4096
-    private var circularBuffer: [Float] = Array(repeating: 0, count: 4096)
-    private var circularIndex: Int = 0
-    private var lastPrintTime = Date()
-    
-    // Bridging call for IOProc — carries the hardware output timestamp for zero-latency haptics
-    fileprivate func processFloatData(_ floatData: UnsafeBufferPointer<Float>, count: Int, sampleRate: Float,
-                                      outputHostTime: UInt64) {
-        processFFT(floatData: floatData, count: count, sampleRate: sampleRate,
-                   outputHostTime: outputHostTime)
+    fileprivate func processAudioBufferList(_ bufferListPtr: UnsafeMutableAudioBufferListPointer, outputHostTime: UInt64) {
+        let maxFrames = downmixBuffer.count
+        
+        if bufferListPtr.count >= 2 {
+            // Non-interleaved stereo: buffer 0 is Left, buffer 1 is Right
+            guard let lPtr = bufferListPtr[0].mData?.assumingMemoryBound(to: Float32.self),
+                  let rPtr = bufferListPtr[1].mData?.assumingMemoryBound(to: Float32.self) else { return }
+            let frames = min(maxFrames, Int(bufferListPtr[0].mDataByteSize) / MemoryLayout<Float32>.size)
+            guard frames > 0 else { return }
+            
+            // Downmix to mono: (L + R) * 0.5 into pre-allocated downmixBuffer
+            for i in 0..<frames {
+                downmixBuffer[i] = (lPtr[i] + rPtr[i]) * 0.5
+            }
+            downmixBuffer.withUnsafeBufferPointer { ptr in
+                processFFT(floatData: ptr, count: frames, sampleRate: sampleRate, outputHostTime: outputHostTime)
+            }
+        } else if bufferListPtr[0].mNumberChannels == 2 {
+            // Interleaved stereo: L, R, L, R...
+            guard let data = bufferListPtr[0].mData?.assumingMemoryBound(to: Float32.self) else { return }
+            let totalFloats = Int(bufferListPtr[0].mDataByteSize) / MemoryLayout<Float32>.size
+            let frames = min(maxFrames, totalFloats / 2)
+            guard frames > 0 else { return }
+            
+            for i in 0..<frames {
+                downmixBuffer[i] = (data[i * 2] + data[i * 2 + 1]) * 0.5
+            }
+            downmixBuffer.withUnsafeBufferPointer { ptr in
+                processFFT(floatData: ptr, count: frames, sampleRate: sampleRate, outputHostTime: outputHostTime)
+            }
+        } else {
+            // Mono: 1 buffer, 1 channel
+            guard let data = bufferListPtr[0].mData?.assumingMemoryBound(to: Float32.self) else { return }
+            let frames = min(maxFrames, Int(bufferListPtr[0].mDataByteSize) / MemoryLayout<Float32>.size)
+            guard frames > 0 else { return }
+            
+            let bufferPtr = UnsafeBufferPointer(start: data, count: frames)
+            processFFT(floatData: bufferPtr, count: frames, sampleRate: sampleRate, outputHostTime: outputHostTime)
+        }
     }
+
+    // MARK: - Sliding-window FFT (Zero Heap Allocations)
 
     private func processFFT(floatData: UnsafeBufferPointer<Float>, count: Int, sampleRate: Float,
-                             outputHostTime: UInt64) {
+                            outputHostTime: UInt64) {
+        guard let fftSetup = cachedFFTSetup else { return }
         let halfLen = fftSize / 2
 
-        if Date().timeIntervalSince(lastPrintTime) > 1.0 {
-            var maxVal: Float = 0
-            if count > 0 { vDSP_maxv(floatData.baseAddress!, 1, &maxVal, vDSP_Length(count)) }
-            print("🔊 CoreAudio Tap Frames=\(count) maxAmp=\(maxVal)")
-            lastPrintTime = Date()
+        // Fill circular buffer without allocations
+        if let src = floatData.baseAddress {
+            for i in 0..<count {
+                circularBuffer[circularIndex] = src[i]
+                circularIndex = (circularIndex + 1) % fftSize
+            }
         }
 
-        // Lazy-init FFT
-        if cachedFFTSetup == nil || fftRealP.count != halfLen {
-            if let old = cachedFFTSetup { vDSP_destroy_fftsetup(old) }
-            cachedLog2n    = vDSP_Length(log2(Float(fftSize)))
-            cachedFFTSetup = vDSP_create_fftsetup(cachedLog2n, FFTRadix(kFFTRadix2))
-            fftRealP      = [Float](repeating: 0, count: halfLen)
-            fftImagP      = [Float](repeating: 0, count: halfLen)
-            fftMagnitudes = [Float](repeating: 0, count: halfLen)
-            fftWindow     = [Float](repeating: 0, count: fftSize)
-            fftWindowed   = [Float](repeating: 0, count: fftSize)
-            fftActual     = [Float](repeating: 0, count: halfLen)
-            vDSP_hann_window(&fftWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-        }
-        guard let fftSetup = cachedFFTSetup else { return }
-
-        // Fill circular buffer
-        let src = floatData.baseAddress!
-        for i in 0..<count {
-            circularBuffer[circularIndex] = src[i]
-            circularIndex = (circularIndex + 1) % fftSize
-        }
-
-        // Unwrap into contiguous array
-        var latest = [Float](repeating: 0, count: fftSize)
+        // Unwrap into contiguous pre-allocated unwrappedBuffer using zero-alloc pointer copy
         let tail = fftSize - circularIndex
-        if tail > 0 { latest[0..<tail] = circularBuffer[circularIndex..<fftSize] }
-        if circularIndex > 0 { latest[tail..<fftSize] = circularBuffer[0..<circularIndex] }
+        circularBuffer.withUnsafeBufferPointer { cPtr in
+            unwrappedBuffer.withUnsafeMutableBufferPointer { uPtr in
+                if tail > 0 {
+                    uPtr.baseAddress!.advanced(by: 0).initialize(from: cPtr.baseAddress!.advanced(by: circularIndex), count: tail)
+                }
+                if circularIndex > 0 {
+                    uPtr.baseAddress!.advanced(by: tail).initialize(from: cPtr.baseAddress!, count: circularIndex)
+                }
+            }
+        }
 
         // Window + FFT
-        vDSP_vmul(latest, 1, &fftWindow, 1, &fftWindowed, 1, vDSP_Length(fftSize))
+        vDSP_vmul(unwrappedBuffer, 1, &fftWindow, 1, &fftWindowed, 1, vDSP_Length(fftSize))
 
         fftWindowed.withUnsafeBufferPointer { wPtr in
             wPtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfLen) { cPtr in
@@ -364,11 +454,10 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
         let minHz: Float = 60, maxHz: Float = 16000
         let hzPerBin = sampleRate / Float(fftSize)
 
-        lock.lock()
-        let currentBandCount = bandCount
-        lock.unlock()
+        os_unfair_lock_lock(&spinLock)
+        let currentBandCount = min(128, bandCount)
+        os_unfair_lock_unlock(&spinLock)
 
-        var rawBands = [Float](repeating: 0, count: currentBandCount)
         var frameMax: Float = 0.000001
 
         for i in 0..<currentBandCount {
@@ -390,17 +479,15 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
             default:          boost = 1.0
             }
             let boosted = avg * boost
-            rawBands[i] = boosted
+            rawBandsBuffer[i] = boosted
             if boosted > frameMax { frameMax = boosted }
         }
 
-        // Haptics — hardware-timestamp-aware for true zero latency
-        let hapticIntensity = UserDefaults.standard.integer(forKey: "hapticIntensity")
+        // Haptics — using cached haptic intensity (no UserDefaults read in IOProc)
+        let hapticIntensity = cachedHapticIntensity
         if hapticIntensity > 0 {
-            // Sub-bass (kick drum body): 20–80 Hz
             let deepMinBin = max(1, Int(20.0 / hzPerBin))
             let deepMaxBin = min(halfLen - 1, Int(80.0 / hzPerBin))
-            // Punch bass: 80–150 Hz
             let stdMinBin  = deepMaxBin
             let stdMaxBin  = min(halfLen - 1, Int(150.0 / hzPerBin))
             var deepSum: Float = 0
@@ -410,7 +497,6 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
             if stdMaxBin > stdMinBin { for j in stdMinBin..<stdMaxBin { stdSum += fftActual[j] } }
             let stdAvg = stdSum / max(1, Float(stdMaxBin - stdMinBin))
 
-            // Pass hardware timestamp so haptic fires exactly when DAC outputs the beat
             HapticManager.shared.updateHapticFeedback(
                 deepBass: deepAvg,
                 standardBass: stdAvg,
@@ -422,10 +508,9 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
         }
 
         // Per-band auto-gain + smoothing
-        var newAmplitudes = [CGFloat](repeating: 0.01, count: currentBandCount)
-        lock.lock()
+        os_unfair_lock_lock(&spinLock)
         for i in 0..<currentBandCount {
-            let val = rawBands[i]
+            let val = rawBandsBuffer[i]
             bandGains[i] = val > bandGains[i]
                 ? bandGains[i] * 0.4 + val * 0.6
                 : bandGains[i] * 0.98 + val * 0.02
@@ -435,10 +520,18 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
             scaled = pow(scaled, 0.5)
             let cur = spectrumBuffer[i]
             spectrumBuffer[i] = scaled > cur ? cur * 0.3 + scaled * 0.7 : cur * 0.5 + scaled * 0.5
-            newAmplitudes[i] = CGFloat(spectrumBuffer[i])
+            newAmplitudesBuffer[i] = CGFloat(spectrumBuffer[i])
         }
-        lock.unlock()
+        os_unfair_lock_unlock(&spinLock)
 
-        DispatchQueue.main.async { self.amplitudes = newAmplitudes }
+        // Throttle UI update to 60 FPS to prevent MainActor overload
+        let nowMach = mach_absolute_time()
+        if machTimeToSeconds(nowMach - lastUIDispatchHostTime) >= (1.0 / 60.0) {
+            lastUIDispatchHostTime = nowMach
+            let publishedAmps = Array(newAmplitudesBuffer[0..<currentBandCount])
+            DispatchQueue.main.async { [weak self] in
+                self?.amplitudes = publishedAmps
+            }
+        }
     }
 }

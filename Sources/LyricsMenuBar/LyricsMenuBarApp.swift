@@ -6,6 +6,7 @@ import AVFoundation
 import AudioToolbox
 import Cocoa
 import CoreVideo
+import os
 
 @main
 struct SpoticatApp {
@@ -17,17 +18,12 @@ struct SpoticatApp {
     }
 }
 
+let appLogger = Logger(subsystem: "com.lyricsmenubar.app", category: "General")
+
 func logDebug(_ msg: String) {
-    let line = "\(Date()): \(msg)\n"
-    if let data = line.data(using: .utf8) {
-        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/lyrics_debug.log")) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: "/tmp/lyrics_debug.log"))
-        }
-    }
+    #if DEBUG
+    appLogger.debug("\(msg, privacy: .public)")
+    #endif
 }
 
 @MainActor
@@ -92,11 +88,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "audioFeaturesEnabled": true
         ])
         
-        // Force re-enable audio features in case user accidentally disabled it
-        UserDefaults.standard.set(true, forKey: "audioFeaturesEnabled")
-        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position Item-0")
-        UserDefaults.standard.removeObject(forKey: "NSStatusItem Preferred Position Item-1")
-        
         let contentView = ContentView(
             spotify: spotify,
             lyricsService: lyricsService,
@@ -128,20 +119,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = hostingView
         self.panel = panel
         
-        NotificationCenter.default.addObserver(forName: Notification.Name("ClosePopover"), object: nil, queue: .main) { [weak self] _ in
-            self?.panel.orderOut(nil)
-        }
-        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.spoticat.TogglePopover"), object: nil, queue: .main) { [weak self] _ in
-            self?.togglePopover(nil)
-        }
-        
-        NotificationCenter.default.addObserver(forName: Notification.Name("AudioFeaturesDisabled"), object: nil, queue: .main) { [weak self] _ in
-            self?.audioAnalyzer.stop()
-        }
-        
-        if UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
-            // runAudioDiagnostics() removed per user request
-        }
+        NotificationCenter.default.addObserver(self, selector: #selector(handleClosePopover), name: Notification.Name("ClosePopover"), object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(handleDistributedTogglePopover), name: NSNotification.Name("com.spoticat.TogglePopover"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleAudioFeaturesDisabled), name: Notification.Name("AudioFeaturesDisabled"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleAudioFeaturesEnabled), name: Notification.Name("AudioFeaturesEnabled"), object: nil)
         
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = self.statusItem.button {
@@ -155,6 +136,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Auto-fetch lyrics when track changes, because ContentView might not be visible yet
         spotify.$currentTrack
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] track in
                 guard let self = self else { return }
                 if let track = track {
@@ -207,18 +189,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    func applicationWillTerminate(_ notification: Notification) {
+        updateTimer?.invalidate()
+        updateTimer = nil
+        audioAnalyzer.stop()
+        HapticManager.shared.teardown()
+        spotify.cleanup()
+    }
+    
+    @objc private func handleClosePopover() {
+        panel?.orderOut(nil)
+    }
+
+    @objc private func handleDistributedTogglePopover() {
+        togglePopover(nil)
+    }
+
+    @objc private func handleAudioFeaturesDisabled() {
+        audioAnalyzer.stop()
+    }
+
+    @objc private func handleAudioFeaturesEnabled() {
+        if spotify.isPlaying {
+            audioAnalyzer.start()
+        }
+    }
+    
     func startMenuBarUpdater() {
         if let link = displayLink {
             CVDisplayLinkStop(link)
             self.displayLink = nil
         }
         updateTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.updateMenuBar()
-        }
+        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
         timer.tolerance = 0.002
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
+    }
+    
+    @objc private func timerTick() {
+        updateMenuBar()
+    }
+
+    private func getNotchSafeMaxWidth() -> CGFloat {
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
+        if #available(macOS 12.0, *), let rightArea = screen?.auxiliaryTopRightArea {
+            let maxSafeWidth = max(120.0, rightArea.width - 260.0)
+            return maxSafeWidth
+        }
+        return 600.0
     }
     
     func roundCorners(of image: NSImage, size: NSSize, radius: CGFloat) -> NSImage {
@@ -464,8 +483,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 lyricsMaxWidth = UserDefaults.standard.integer(forKey: "lyricsMaxWidth")
             }
             let maxW = CGFloat(lyricsMaxWidth)
+            let safeCap = getNotchSafeMaxWidth()
+            let effectiveMaxW = min(maxW, safeCap)
             let neededW = ceil(textSize.width) + 32.0
-            let canvasWidth: CGFloat = min(maxW, max(60.0, neededW))
+            let canvasWidth: CGFloat = min(effectiveMaxW, max(60.0, neededW))
             
             let scrollPadding: CGFloat = 16.0
             let fullTextWidth = textSize.width + glowPad * 2

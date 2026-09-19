@@ -57,13 +57,21 @@ final class HapticManager: @unchecked Sendable {
     private var lastFireWallTime: Double = 0  // wall time of last haptic to enforce refractory
 
     // ── MultitouchSupport (direct Force Touch trackpad) ───────────────
+    private var frameworkHandle: UnsafeMutableRawPointer?
     private var mtActuator: UnsafeMutableRawPointer?
     private typealias MTActuatorCreateFromDeviceIDType = @convention(c) (UInt64) -> UnsafeMutableRawPointer?
     private typealias MTActuatorOpenType               = @convention(c) (UnsafeMutableRawPointer) -> Int32
+    private typealias MTActuatorCloseType              = @convention(c) (UnsafeMutableRawPointer) -> Int32
     private typealias MTActuatorActuateType            = @convention(c) (UnsafeMutableRawPointer, Int32, UInt32, Float32, Float32) -> Int32
     private var mtActuateFn: MTActuatorActuateType?
+    private var mtCloseFn: MTActuatorCloseType?
 
     var isSupported: Bool { CHHapticEngine.capabilitiesForHardware().supportsHaptics }
+
+    var latencyOffset: Double {
+        get { UserDefaults.standard.double(forKey: "hapticLatencyOffset") }
+        set { UserDefaults.standard.set(newValue, forKey: "hapticLatencyOffset") }
+    }
 
     // MARK: - Init
 
@@ -72,10 +80,15 @@ final class HapticManager: @unchecked Sendable {
         prepareHapticEngine()
     }
 
+    deinit {
+        teardown()
+    }
+
     // MARK: - MultitouchSupport Setup
 
     private func setupMultitouchSupport() {
         guard let handle = dlopen("/System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/Current/MultitouchSupport", RTLD_NOW) else { return }
+        frameworkHandle = handle
         guard let symCreate  = dlsym(handle, "MTActuatorCreateFromDeviceID"),
               let symOpen    = dlsym(handle, "MTActuatorOpen"),
               let symActuate = dlsym(handle, "MTActuatorActuate") else { return }
@@ -83,6 +96,9 @@ final class HapticManager: @unchecked Sendable {
         let createFn = unsafeBitCast(symCreate, to: MTActuatorCreateFromDeviceIDType.self)
         let openFn   = unsafeBitCast(symOpen,   to: MTActuatorOpenType.self)
         mtActuateFn  = unsafeBitCast(symActuate, to: MTActuatorActuateType.self)
+        if let symClose = dlsym(handle, "MTActuatorClose") {
+            mtCloseFn = unsafeBitCast(symClose, to: MTActuatorCloseType.self)
+        }
 
         if let id = findMultitouchID(), let actuator = createFn(id), openFn(actuator) == 0 {
             mtActuator = actuator
@@ -117,10 +133,13 @@ final class HapticManager: @unchecked Sendable {
         do {
             let eng = try CHHapticEngine()
             eng.stoppedHandler = { [weak self] _ in
-                self?.queue.async { self?.engine = nil }
+                guard let self = self else { return }
+                self.queue.async { [weak self] in
+                    self?.engine = nil
+                }
             }
             eng.resetHandler = { [weak self] in
-                guard let self else { return }
+                guard let self = self else { return }
                 do { try self.engine?.start() } catch {}
             }
             try eng.start()
@@ -212,7 +231,7 @@ final class HapticManager: @unchecked Sendable {
         //               = bufferWallTime + midpointOffset - leadTime
         //
         let onsetOffset = Double(bufferFrameCount / 2) / sampleRate
-        let leadTime = (mtActuator != nil) ? kMTActuatorLeadTime : kCHHapticLeadTime
+        let leadTime = ((mtActuator != nil) ? kMTActuatorLeadTime : kCHHapticLeadTime) + latencyOffset
         let hapticFireWallTime = bufferWallTime + onsetOffset - leadTime
 
         let wallNow = Date().timeIntervalSince1970
@@ -324,9 +343,21 @@ final class HapticManager: @unchecked Sendable {
         } catch {}
     }
 
-    // MARK: - Stop
+    // MARK: - Stop & Teardown
 
     func stop() {
-        try? engine?.stop()
+        engine?.stop()
+    }
+
+    func teardown() {
+        stop()
+        if let actuator = mtActuator {
+            _ = mtCloseFn?(actuator)
+            mtActuator = nil
+        }
+        if let handle = frameworkHandle {
+            dlclose(handle)
+            frameworkHandle = nil
+        }
     }
 }

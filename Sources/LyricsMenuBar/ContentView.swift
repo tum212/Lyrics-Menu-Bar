@@ -139,6 +139,21 @@ struct ContentView: View {
 
             // Top Right Controls (Glass Buttons)
             HStack(spacing: 8) {
+                // System Audio Tap Status Indicator (Privacy transparency)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(audioAnalyzer.isRunning ? Color.green : Color.gray.opacity(0.4))
+                        .frame(width: 5, height: 5)
+                    Image(systemName: audioAnalyzer.isRunning ? "waveform" : "waveform.slash")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.white.opacity(audioAnalyzer.isRunning ? 0.85 : 0.4))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5))
+                .help(audioAnalyzer.isRunning ? "System Audio Visualizer: Active (Capturing output for waveform)" : "System Audio Visualizer: Inactive")
+
                 NativeSettingsMenu()
                     .frame(width: 26, height: 26)
                     .background(.ultraThinMaterial, in: Circle())
@@ -616,13 +631,14 @@ struct WordLyricItemView: View {
 // MARK: - Native NSMenu for Settings
 // Fixes SwiftUI Menu submenu flickering bug in NSPopover
 struct NativeSettingsMenu: NSViewRepresentable {
-    @AppStorage("showLyrics") private var showLyrics = true
-    @AppStorage("showAlbumArt") private var showAlbumArt = true
-    @AppStorage("musicSourceMode") private var musicSourceMode = "Auto"
-    @AppStorage("hapticIntensity") private var hapticIntensity = 0
-    @AppStorage("hapticActuatorType") private var hapticActuatorType = 0  // 0 = Auto
-    @AppStorage("waveformBars") private var waveformBars = 14
-    @AppStorage("lyricsMaxWidth") private var lyricsMaxWidth: Int = 200
+    @AppStorage("showLyrics") var showLyrics = true
+    @AppStorage("showAlbumArt") var showAlbumArt = true
+    @AppStorage("audioFeaturesEnabled") var audioFeaturesEnabled = true
+    @AppStorage("musicSourceMode") var musicSourceMode = "Auto"
+    @AppStorage("hapticIntensity") var hapticIntensity = 0
+    @AppStorage("hapticActuatorType") var hapticActuatorType = 0  // 0 = Auto
+    @AppStorage("waveformBars") var waveformBars = 14
+    @AppStorage("lyricsMaxWidth") var lyricsMaxWidth: Int = 200
     
     func makeNSView(context: Context) -> NSButton {
         let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
@@ -639,6 +655,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
         Coordinator(self)
     }
     
+    @MainActor
     class Coordinator: NSObject {
         var parent: NativeSettingsMenu
         
@@ -677,6 +694,11 @@ struct NativeSettingsMenu: NSViewRepresentable {
             albumItem.target = self
             albumItem.state = parent.showAlbumArt ? .on : .off
             menu.addItem(albumItem)
+
+            let audioItem = NSMenuItem(title: "Audio Visualizer (Tap)", action: #selector(toggleAudioFeatures), keyEquivalent: "")
+            audioItem.target = self
+            audioItem.state = parent.audioFeaturesEnabled ? .on : .off
+            menu.addItem(audioItem)
             
             let widthItem = NSMenuItem(title: "Lyrics Width", action: nil, keyEquivalent: "")
             let widthMenu = NSMenu(title: "Lyrics Width")
@@ -811,6 +833,15 @@ struct NativeSettingsMenu: NSViewRepresentable {
         
         @objc func toggleLyrics() { parent.showLyrics.toggle() }
         @objc func toggleAlbum() { parent.showAlbumArt.toggle() }
+        @objc func toggleAudioFeatures() {
+            parent.audioFeaturesEnabled.toggle()
+            UserDefaults.standard.set(parent.audioFeaturesEnabled, forKey: "audioFeaturesEnabled")
+            if parent.audioFeaturesEnabled {
+                NotificationCenter.default.post(name: Notification.Name("AudioFeaturesEnabled"), object: nil)
+            } else {
+                NotificationCenter.default.post(name: Notification.Name("AudioFeaturesDisabled"), object: nil)
+            }
+        }
         @objc func toggleLaunchAtLogin() { LaunchAtLoginManager.isEnabled.toggle() }
         @objc func setWidth(_ sender: NSMenuItem) { parent.lyricsMaxWidth = sender.tag }
         @objc func setHaptic(_ sender: NSMenuItem) { parent.hapticIntensity = sender.tag }

@@ -185,18 +185,61 @@ public enum LyricTimingCalculator {
     }
 }
 
-public final class LyricsService: ObservableObject, @unchecked Sendable {
+private final class LRUCache<Key: Hashable, Value>: @unchecked Sendable {
+    private let capacity: Int
+    private var cache: [Key: Value] = [:]
+    private var order: [Key] = []
+    
+    init(capacity: Int = 100) {
+        self.capacity = capacity
+    }
+    
+    subscript(key: Key) -> Value? {
+        get {
+            guard let val = cache[key] else { return nil }
+            if let idx = order.firstIndex(of: key) {
+                order.remove(at: idx)
+                order.append(key)
+            }
+            return val
+        }
+        set {
+            if let val = newValue {
+                if cache[key] != nil {
+                    if let idx = order.firstIndex(of: key) {
+                        order.remove(at: idx)
+                    }
+                } else if order.count >= capacity {
+                    let oldest = order.removeFirst()
+                    cache.removeValue(forKey: oldest)
+                }
+                cache[key] = val
+                order.append(key)
+            } else {
+                cache.removeValue(forKey: key)
+                if let idx = order.firstIndex(of: key) {
+                    order.remove(at: idx)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+public final class LyricsService: ObservableObject {
     @Published public var lyrics: [LyricLine] = []
     @Published public var isLoading: Bool = false
     @Published public var error: Error?
     
     private var lastQuery: String = ""
     private var currentRequestID: Int = 0
-    private var cache: [String: [LyricLine]] = [:]
+    private let cache = LRUCache<String, [LyricLine]>(capacity: 100)
     
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        return URLSession(configuration: config, delegate: InsecureSessionDelegate(), delegateQueue: nil)
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
     }()
     
     public init() {}
@@ -234,9 +277,8 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     }
     
     private func fetchChain(cleanTrack: String, originalTrack: String, artist: String, album: String, queryKey: String, requestID: Int) {
-        Task { @MainActor in
-            // Helper: check if this request is still valid before committing
-            func isValid() -> Bool { return self.currentRequestID == requestID }
+        Task { [weak self] in
+            guard let self = self else { return }
             
             // Phase 1: Race LRCLib sources concurrently (Instant!)
             let lrcResult: [LyricLine] = await withTaskGroup(of: (Int, [LyricLine]).self) { group in
@@ -262,7 +304,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
                 return []
             }
             
-            guard isValid() else { return }
+            guard self.currentRequestID == requestID else { return }
             
             if !lrcResult.isEmpty {
                 self.lyrics = lrcResult
@@ -285,7 +327,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
                 return []
             }
             
-            guard isValid() else { return }
+            guard self.currentRequestID == requestID else { return }
             self.lyrics = ovhResult
             self.cache[queryKey] = ovhResult
             self.isLoading = false
@@ -299,7 +341,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         let plainLyrics: String?
     }
     
-    private func isMatchingTrack(trackName: String?, artistName: String?, expectedTrack: String, expectedArtist: String) -> Bool {
+    nonisolated private func isMatchingTrack(trackName: String?, artistName: String?, expectedTrack: String, expectedArtist: String) -> Bool {
         guard let t = trackName?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines),
               let a = artistName?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) else {
             return false
@@ -328,14 +370,14 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     }
     
     // MARK: - Source 1 & 3: LRCLib Search API (returns synced > plain)
-    private func lrclibSearch(query: String, expectedTrack: String, expectedArtist: String) async -> [LyricLine] {
+    nonisolated private func lrclibSearch(query: String, expectedTrack: String, expectedArtist: String) async -> [LyricLine] {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "+&?=/")
         let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
         let urlStr = "https://lrclib.net/api/search?q=\(encoded)"
         guard let url = URL(string: urlStr) else { return [] }
         
-        var req = URLRequest(url: url, timeoutInterval: 20)
+        var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         
         do {
@@ -371,7 +413,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     }
     
     // MARK: - Source 2: LRCLib Get API (direct match endpoint)
-    private func lrclibGet(track: String, artist: String, album: String) async -> [LyricLine] {
+    nonisolated private func lrclibGet(track: String, artist: String, album: String) async -> [LyricLine] {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "+&?=/")
         let tEnc = track.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
@@ -380,7 +422,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         let urlStr = "https://lrclib.net/api/get?track_name=\(tEnc)&artist_name=\(aEnc)&album_name=\(alEnc)"
         guard let url = URL(string: urlStr) else { return [] }
         
-        var req = URLRequest(url: url, timeoutInterval: 20)
+        var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         
         do {
@@ -408,11 +450,12 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         return []
     }
     
-    private func runCurl(_ urlString: String) async throws -> String {
+    nonisolated private func runCurl(_ urlString: String) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            process.arguments = ["-k", "-s", "-m", "10",
+            // Security: removed -k (strictly validate TLS certificates)
+            process.arguments = ["-s", "-m", "10",
                 "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
                 urlString]
             
@@ -423,7 +466,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
                 try process.run()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile() // Read BEFORE waitUntilExit to prevent deadlock
                 process.waitUntilExit()
-                if let output = String(data: data, encoding: .utf8) {
+                if let output = self.decodeString(from: data) {
                     continuation.resume(returning: output)
                 } else {
                     continuation.resume(throwing: URLError(.cannotDecodeContentData))
@@ -434,8 +477,34 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         }
     }
     
+    nonisolated private func decodeString(from data: Data) -> String? {
+        var cleanData = data
+        // Check and strip UTF-8 BOM if present (0xEF, 0xBB, 0xBF)
+        if cleanData.count >= 3 && cleanData[0] == 0xEF && cleanData[1] == 0xBB && cleanData[2] == 0xBF {
+            cleanData = cleanData.subdata(in: 3..<cleanData.count)
+        }
+        if let str = String(data: cleanData, encoding: .utf8) {
+            return str.replacingOccurrences(of: "\u{FEFF}", with: "")
+        }
+        // Fallback to Thai (Windows-874 / TIS-620)
+        let thaiEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.dosThai.rawValue)))
+        if let str = String(data: cleanData, encoding: thaiEncoding) {
+            return str
+        }
+        let macThaiEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.macThai.rawValue)))
+        if let str = String(data: cleanData, encoding: macThaiEncoding) {
+            return str
+        }
+        // Windows-874 / TIS-620 (0x0504)
+        let winThaiEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0504)))
+        if let str = String(data: cleanData, encoding: winThaiEncoding) {
+            return str
+        }
+        return String(data: cleanData, encoding: .isoLatin1)
+    }
+    
     // MARK: - Source 4 & 5: lyrics.ovh (unsynced)
-    private func ovhFetch(track: String, artist: String) async -> [LyricLine] {
+    nonisolated private func ovhFetch(track: String, artist: String) async -> [LyricLine] {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "+&?=/")
         let aEnc = artist.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
@@ -443,13 +512,12 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         let urlStr = "https://api.lyrics.ovh/v1/\(aEnc)/\(tEnc)"
         guard let url = URL(string: urlStr) else { return [] }
         
-        var req = URLRequest(url: url, timeoutInterval: 20)
+        var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         
         do {
             let (data, response) = try await session.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                print("OVH Fetch failed with status: \((response as? HTTPURLResponse)?.statusCode ?? 0)")
                 return [] 
             }
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -469,33 +537,67 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
     }
     
     // MARK: - Parsers
-    private func parseLRC(_ lrc: String) -> [LyricLine] {
-        var result: [LyricLine] = []
-        let pattern = "\\[(\\d+):(\\d+(?:\\.\\d+)?)\\](.*)"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+    nonisolated private func parseLRC(_ lrc: String) -> [LyricLine] {
+        // 1. Strip UTF-8 BOM if present
+        let cleanLRC = lrc.replacingOccurrences(of: "\u{FEFF}", with: "")
         
-        for rawLine in lrc.components(separatedBy: .newlines) {
-            let ns = rawLine as NSString
-            let matches = regex.matches(in: rawLine, range: NSRange(location: 0, length: ns.length))
-            guard let lastMatch = matches.last else { continue }
+        // 2. Parse [offset: +/-ms] (e.g., [offset: 500] or [offset:-250])
+        var timeOffset: TimeInterval = 0.0
+        let offsetRegex = try? NSRegularExpression(pattern: "\\[offset:\\s*([+-]?\\d+)\\]", options: .caseInsensitive)
+        if let offsetMatch = offsetRegex?.firstMatch(in: cleanLRC, range: NSRange(cleanLRC.startIndex..., in: cleanLRC)),
+           let range = Range(offsetMatch.range(at: 1), in: cleanLRC),
+           let ms = Double(cleanLRC[range]) {
+            timeOffset = ms / 1000.0
+        }
+        
+        var result: [LyricLine] = []
+        let tagPattern = "\\[(\\d+):(\\d+(?:\\.\\d+)?)\\]"
+        guard let tagRegex = try? NSRegularExpression(pattern: tagPattern) else { return [] }
+        
+        for rawLine in cleanLRC.components(separatedBy: .newlines) {
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !trimmedLine.isEmpty else { continue }
             
-            var lineContent = ""
-            if let tr = Range(lastMatch.range(at: 3), in: rawLine) {
-                lineContent = String(rawLine[tr]).trimmingCharacters(in: .whitespaces)
+            // Skip metadata tags like [ar:Singer], [ti:Title], [al:Album], [offset:...]
+            if trimmedLine.hasPrefix("[") && !trimmedLine.hasPrefix("[0") && !trimmedLine.hasPrefix("[1") && !trimmedLine.hasPrefix("[2") && !trimmedLine.hasPrefix("[3") && !trimmedLine.hasPrefix("[4") && !trimmedLine.hasPrefix("[5") && !trimmedLine.hasPrefix("[6") && !trimmedLine.hasPrefix("[7") && !trimmedLine.hasPrefix("[8") && !trimmedLine.hasPrefix("[9") {
+                continue
+            }
+            
+            let nsLine = trimmedLine as NSString
+            let matches = tagRegex.matches(in: trimmedLine, range: NSRange(location: 0, length: nsLine.length))
+            guard !matches.isEmpty, let lastTag = matches.last else { continue }
+            
+            // Text is after the final timestamp tag
+            let textStartIndex = lastTag.range.location + lastTag.range.length
+            let lineContent: String
+            if textStartIndex < nsLine.length {
+                lineContent = nsLine.substring(from: textStartIndex).trimmingCharacters(in: .whitespaces)
+            } else {
+                lineContent = ""
             }
             
             let elrcData = parseELRCLine(content: lineContent)
             let cleanText = elrcData?.text ?? lineContent.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
             
+            // Support multiple timestamps in the same line: [00:12.00][00:15.50]Repeat Lyric
             for match in matches {
-                if let mr = Range(match.range(at: 1), in: rawLine),
-                   let sr = Range(match.range(at: 2), in: rawLine),
-                   let min = Double(rawLine[mr]),
-                   let sec = Double(rawLine[sr]) {
-                    let lineTime = min * 60.0 + sec
+                if let mr = Range(match.range(at: 1), in: trimmedLine),
+                   let sr = Range(match.range(at: 2), in: trimmedLine),
+                   let min = Double(trimmedLine[mr]),
+                   let sec = Double(trimmedLine[sr]) {
+                    let lineTime = max(0, min * 60.0 + sec + timeOffset)
                     if let words = elrcData?.words, !words.isEmpty {
-                        let lineEnd = words.last?.endTime ?? (lineTime + 3.0)
-                        result.append(LyricLine(time: lineTime, endTime: lineEnd, text: cleanText, words: words))
+                        let adjustedWords = words.map { w in
+                            LyricWord(
+                                id: w.id,
+                                text: w.text,
+                                startTime: max(0, w.startTime + timeOffset),
+                                endTime: max(0, w.endTime + timeOffset),
+                                index: w.index
+                            )
+                        }
+                        let lineEnd = adjustedWords.last?.endTime ?? (lineTime + 3.0)
+                        result.append(LyricLine(time: lineTime, endTime: lineEnd, text: cleanText, words: adjustedWords))
                     } else {
                         result.append(LyricLine(time: lineTime, text: cleanText))
                     }
@@ -507,7 +609,7 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         return LyricTimingCalculator.computeWordTimings(for: sorted)
     }
     
-    private func parseELRCLine(content: String) -> (text: String, words: [LyricWord])? {
+    nonisolated private func parseELRCLine(content: String) -> (text: String, words: [LyricWord])? {
         let pattern = "<(\\d+):(\\d+(?:\\.\\d+)?)>([^<]*)"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let ns = content as NSString
@@ -565,21 +667,10 @@ public final class LyricsService: ObservableObject, @unchecked Sendable {
         return words.isEmpty ? nil : (fullText.trimmingCharacters(in: .whitespaces), words)
     }
     
-    private func parsePlain(_ text: String) -> [LyricLine] {
+    nonisolated private func parsePlain(_ text: String) -> [LyricLine] {
         let lines = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         return lines.map { LyricLine(time: 0, text: $0) }
-    }
-}
-
-final class InsecureSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-           let trust = challenge.protectionSpace.serverTrust {
-            completionHandler(.useCredential, URLCredential(trust: trust))
-            return
-        }
-        completionHandler(.performDefaultHandling, nil)
     }
 }
