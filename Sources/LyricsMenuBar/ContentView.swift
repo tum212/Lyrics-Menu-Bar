@@ -42,6 +42,8 @@ struct ContentView: View {
     @AppStorage("waveformBars") private var waveformBars = 14
     @AppStorage("showAlbumArt") private var showAlbumArt = true
     @AppStorage("hapticEnabled") private var hapticEnabled = false
+    @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
+    @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = true
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -51,14 +53,9 @@ struct ContentView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(0.25),
-                                    Color.white.opacity(0.05)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
+                            specularEdgeEnabled
+                                ? (colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.12))
+                                : Color.clear,
                             lineWidth: 0.5
                         )
                 )
@@ -126,11 +123,12 @@ struct ContentView: View {
                     }
                 }
                 .frame(width: 130)
-                Spacer().frame(width: 4)
 
-                // MARK: Right Column - Continuous Lyrics Stream
-                TimelineView(.animation) { timeline in
-                    lyricsPanel(currentDate: timeline.date)
+                // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
+                GeometryReader { geometry in
+                    TimelineView(.animation) { timeline in
+                        lyricsPanel(currentDate: timeline.date, containerWidth: geometry.size.width)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
@@ -196,7 +194,7 @@ struct ContentView: View {
 
     // MARK: - Lyrics Panel with Apple Music style scroll & Click-to-Seek
     @ViewBuilder
-    private func lyricsPanel(currentDate: Date) -> some View {
+    private func lyricsPanel(currentDate: Date, containerWidth: CGFloat) -> some View {
         let info = getActiveLyricsInfo(currentDate: currentDate)
         let allLyrics = lyricsService.lyrics
 
@@ -223,6 +221,7 @@ struct ContentView: View {
                                 currentTime: info.currentTime,
                                 fallbackProgress: info.progress,
                                 isUnsynced: info.isUnsynced,
+                                containerWidth: containerWidth,
                                 onSeek: {
                                     let seekTime: TimeInterval
                                     if line.time > 0 {
@@ -335,20 +334,29 @@ struct ContentView: View {
 @MainActor
 final class LyricLineLayoutCache {
     static let shared = LyricLineLayoutCache()
-    private var wordsCache: [UUID: [[LyricWord]]] = [:]
-    private var linesCache: [UUID: [String]] = [:]
+    
+    struct CacheKey: Hashable {
+        let lineID: UUID
+        let width: Int
+        let fontSize: Int
+    }
+    
+    private var wordsCache: [CacheKey: [[LyricWord]]] = [:]
+    private var linesCache: [CacheKey: [String]] = [:]
     
     func wrappedWords(for line: LyricLine, width: CGFloat, font: NSFont) -> [[LyricWord]] {
-        if let cached = wordsCache[line.id] { return cached }
+        let key = CacheKey(lineID: line.id, width: Int(width), fontSize: Int(font.pointSize))
+        if let cached = wordsCache[key] { return cached }
         let result = computeWrappedWords(words: line.words, width: width, font: font)
-        wordsCache[line.id] = result
+        wordsCache[key] = result
         return result
     }
     
     func wrappedLines(for line: LyricLine, width: CGFloat, font: NSFont) -> [String] {
-        if let cached = linesCache[line.id] { return cached }
+        let key = CacheKey(lineID: line.id, width: Int(width), fontSize: Int(font.pointSize))
+        if let cached = linesCache[key] { return cached }
         let result = computeWrappedLines(text: line.text, width: width, font: font)
-        linesCache[line.id] = result
+        linesCache[key] = result
         return result
     }
     
@@ -408,6 +416,7 @@ final class LyricLineLayoutCache {
 
 // MARK: - Unified Lyric Line Row (Apple Music Karaoke + Single-Line + Click-to-Seek)
 struct LyricLineRowView: View {
+    @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
     let line: LyricLine
     let isActive: Bool
     let isPast: Bool
@@ -415,6 +424,7 @@ struct LyricLineRowView: View {
     let currentTime: TimeInterval
     let fallbackProgress: Double
     let isUnsynced: Bool
+    let containerWidth: CGFloat
     let onSeek: () -> Void
     
     @State private var isHovered = false
@@ -424,7 +434,6 @@ struct LyricLineRowView: View {
         let fontSize: CGFloat = isBgVocal ? 15 : 20
         let fontWeight: Font.Weight = isBgVocal ? .semibold : .bold
         let font = NSFont.systemFont(ofSize: fontSize, weight: isBgVocal ? .semibold : .bold)
-        let containerWidth: CGFloat = 260.0
         let effectiveHover = isHovered || isLyricsHovered
         
         Group {
@@ -444,8 +453,7 @@ struct LyricLineRowView: View {
                 .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
         )
         .contentShape(Rectangle())
-        .blur(radius: (isActive || effectiveHover) ? 0 : 2.5)
-        .opacity(isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.35 : 0.45)))
+        .opacity(lyricsFocusMode ? (isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40))) : (isActive ? 1.0 : 0.85))
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isActive)
@@ -576,6 +584,7 @@ struct LyricLineRowView: View {
 
 // MARK: - Single Word Lyric Item (Apple Music Continuous Glow Decay & Seamless Flow)
 struct WordLyricItemView: View {
+    @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
     let word: LyricWord
     let isActive: Bool
     let isPast: Bool
@@ -599,6 +608,7 @@ struct WordLyricItemView: View {
         let isActivelySinging = isActive && (currentTime >= wordStart && currentTime < wordEnd)
         
         let glow = computeGlow(hasStarted: hasStarted, isActivelySinging: isActivelySinging, wordEnd: wordEnd)
+        let emphasis: CGFloat = (isActivelySinging && lyricsFocusMode) ? CGFloat(1.0 + 0.025 * sin(Double(progress) * .pi)) : 1.0
         
         ZStack(alignment: .leading) {
             // Base layer: unlit typography with smooth opacity transition
@@ -636,8 +646,7 @@ struct WordLyricItemView: View {
                 .opacity(isActive ? (hasStarted ? 1.0 : 0.0) : 0.0)
                 .animation(.easeInOut(duration: 0.38), value: isActive)
         }
-        .scaleEffect(isActivelySinging ? 1.08 : 1.0, anchor: .bottomLeading)
-        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isActivelySinging)
+        .scaleEffect(emphasis, anchor: .bottomLeading)
     }
     
     private func computeGlow(hasStarted: Bool, isActivelySinging: Bool, wordEnd: TimeInterval) -> (opacity: Double, radius: CGFloat) {
@@ -665,6 +674,8 @@ struct NativeSettingsMenu: NSViewRepresentable {
     @AppStorage("showAlbumArt") var showAlbumArt = true
     @AppStorage("audioFeaturesEnabled") var audioFeaturesEnabled = true
     @AppStorage("musicSourceMode") var musicSourceMode = "Auto"
+    @AppStorage("lyricsFocusMode") var lyricsFocusMode = true
+    @AppStorage("specularEdgeEnabled") var specularEdgeEnabled = true
     @AppStorage("hapticIntensity") var hapticIntensity = 0
     @AppStorage("hapticActuatorType") var hapticActuatorType = 0  // 0 = Auto
     @AppStorage("waveformBars") var waveformBars = 14
@@ -696,7 +707,27 @@ struct NativeSettingsMenu: NSViewRepresentable {
         @objc func showMenu(_ sender: NSButton) {
             let menu = NSMenu(title: "Settings")
             
-            // ── Music Source Submenu ──────────────────────────────────────────
+            // ── 1. General Submenu ──────────────────────────────────────────
+            let generalItem = NSMenuItem(title: "General", action: nil, keyEquivalent: "")
+            let generalMenu = NSMenu(title: "General")
+            
+            let lyricsItem = NSMenuItem(title: "Lyrics in Menu Bar", action: #selector(toggleLyrics), keyEquivalent: "")
+            lyricsItem.target = self
+            lyricsItem.state = parent.showLyrics ? .on : .off
+            generalMenu.addItem(lyricsItem)
+            
+            let albumItem = NSMenuItem(title: "Album Cover", action: #selector(toggleAlbum), keyEquivalent: "")
+            albumItem.target = self
+            albumItem.state = parent.showAlbumArt ? .on : .off
+            generalMenu.addItem(albumItem)
+            
+            let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+            loginItem.target = self
+            loginItem.state = LaunchAtLoginManager.isEnabled ? .on : .off
+            generalMenu.addItem(loginItem)
+            
+            generalMenu.addItem(.separator())
+            
             let sourceItem = NSMenuItem(title: "Music Source", action: nil, keyEquivalent: "")
             let sourceMenu = NSMenu(title: "Music Source")
             let sources = [
@@ -712,27 +743,23 @@ struct NativeSettingsMenu: NSViewRepresentable {
                 sourceMenu.addItem(item)
             }
             sourceItem.submenu = sourceMenu
-            menu.addItem(sourceItem)
-            menu.addItem(.separator())
+            generalMenu.addItem(sourceItem)
             
-            let lyricsItem = NSMenuItem(title: "Lyrics in Menu Bar", action: #selector(toggleLyrics), keyEquivalent: "")
-            lyricsItem.target = self
-            lyricsItem.state = parent.showLyrics ? .on : .off
-            menu.addItem(lyricsItem)
+            generalItem.submenu = generalMenu
+            menu.addItem(generalItem)
             
-            let albumItem = NSMenuItem(title: "Album Cover", action: #selector(toggleAlbum), keyEquivalent: "")
-            albumItem.target = self
-            albumItem.state = parent.showAlbumArt ? .on : .off
-            menu.addItem(albumItem)
-
-            let audioItem = NSMenuItem(title: "Audio Visualizer (Tap)", action: #selector(toggleAudioFeatures), keyEquivalent: "")
-            audioItem.target = self
-            audioItem.state = parent.audioFeaturesEnabled ? .on : .off
-            menu.addItem(audioItem)
+            // ── 2. Lyrics & Animation Submenu ────────────────────────────────
+            let lyricsSectionItem = NSMenuItem(title: "Lyrics & Animation", action: nil, keyEquivalent: "")
+            let lyricsSectionMenu = NSMenu(title: "Lyrics & Animation")
+            
+            let focusItem = NSMenuItem(title: "Lyrics Focus Mode", action: #selector(toggleFocusMode), keyEquivalent: "")
+            focusItem.target = self
+            focusItem.state = parent.lyricsFocusMode ? .on : .off
+            lyricsSectionMenu.addItem(focusItem)
             
             let widthItem = NSMenuItem(title: "Lyrics Width", action: nil, keyEquivalent: "")
             let widthMenu = NSMenu(title: "Lyrics Width")
-            var widths = [0, 50, 100, 150, 200, 250, 300]
+            var widths = [0, 50, 100, 150, 200, 250, 260, 300]
             if !widths.contains(parent.lyricsMaxWidth) {
                 widths.append(parent.lyricsMaxWidth)
                 widths.sort()
@@ -750,27 +777,44 @@ struct NativeSettingsMenu: NSViewRepresentable {
             wCustomItem.target = self
             widthMenu.addItem(wCustomItem)
             widthItem.submenu = widthMenu
-            menu.addItem(widthItem)
+            lyricsSectionMenu.addItem(widthItem)
             
-            menu.addItem(.separator())
+            lyricsSectionItem.submenu = lyricsSectionMenu
+            menu.addItem(lyricsSectionItem)
             
+            // ── 3. Appearance & Glass Submenu ────────────────────────────────
+            let appearanceItem = NSMenuItem(title: "Appearance & Glass", action: nil, keyEquivalent: "")
+            let appearanceMenu = NSMenu(title: "Appearance & Glass")
+            
+            let specularItem = NSMenuItem(title: "Specular Edge Highlight", action: #selector(toggleSpecularEdge), keyEquivalent: "")
+            specularItem.target = self
+            specularItem.state = parent.specularEdgeEnabled ? .on : .off
+            appearanceMenu.addItem(specularItem)
+            
+            appearanceItem.submenu = appearanceMenu
+            menu.addItem(appearanceItem)
+            
+            // ── 4. Haptics Submenu ───────────────────────────────────────────
             let hapticsItem = NSMenuItem(title: "Haptics", action: nil, keyEquivalent: "")
             let hapticsMenu = NSMenu(title: "Haptics")
+            
+            let intensityItem = NSMenuItem(title: "Intensity", action: nil, keyEquivalent: "")
+            let intensityMenu = NSMenu(title: "Intensity")
             let hModes = ["Off", "Light", "Medium", "Firm"]
             for (i, mode) in hModes.enumerated() {
                 let item = NSMenuItem(title: mode, action: #selector(setHaptic(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = i
                 item.state = parent.hapticIntensity == i ? .on : .off
-                hapticsMenu.addItem(item)
+                intensityMenu.addItem(item)
             }
-
-            // ── Haptic Feel submenu: test MTActuator types ────────────────────
+            intensityItem.submenu = intensityMenu
+            hapticsMenu.addItem(intensityItem)
+            
+            // Haptic Feel submenu
             hapticsMenu.addItem(.separator())
             let feelItem = NSMenuItem(title: "Haptic Feel", action: nil, keyEquivalent: "")
             let feelMenu = NSMenu(title: "Haptic Feel")
-
-            // Type descriptions based on physics / reverse-engineering
             let types: [(tag: Int, label: String, desc: String)] = [
                 (0, "Auto",   "Auto (kick=6, beat=4)"),
                 (1, "Type 1", "1 — Very light tap"),
@@ -788,20 +832,26 @@ struct NativeSettingsMenu: NSViewRepresentable {
                 feelMenu.addItem(item)
             }
             feelMenu.addItem(.separator())
-            // Test button: fires each type sequentially so user can feel them
             let testItem = NSMenuItem(title: "▶ Test All Types (0.4s apart)", action: #selector(testAllHapticTypes), keyEquivalent: "")
             testItem.target = self
             feelMenu.addItem(testItem)
-
             feelItem.submenu = feelMenu
             hapticsMenu.addItem(feelItem)
-            // ─────────────────────────────────────────────────────────────────
-
+            
             hapticsItem.submenu = hapticsMenu
             menu.addItem(hapticsItem)
             
-            let waveItem = NSMenuItem(title: "Waveform", action: nil, keyEquivalent: "")
-            let waveMenu = NSMenu(title: "Waveform")
+            // ── 5. Audio Submenu ─────────────────────────────────────────────
+            let audioSectionItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
+            let audioSectionMenu = NSMenu(title: "Audio")
+            
+            let audioItem = NSMenuItem(title: "Audio Visualizer (Tap)", action: #selector(toggleAudioFeatures), keyEquivalent: "")
+            audioItem.target = self
+            audioItem.state = parent.audioFeaturesEnabled ? .on : .off
+            audioSectionMenu.addItem(audioItem)
+            
+            let waveItem = NSMenuItem(title: "Waveform Bars", action: nil, keyEquivalent: "")
+            let waveMenu = NSMenu(title: "Waveform Bars")
             var wModes = [0, 6, 10, 14, 24, 32, 48, 128]
             if !wModes.contains(parent.waveformBars) {
                 wModes.append(parent.waveformBars)
@@ -820,12 +870,10 @@ struct NativeSettingsMenu: NSViewRepresentable {
             waveCustomItem.target = self
             waveMenu.addItem(waveCustomItem)
             waveItem.submenu = waveMenu
-            menu.addItem(waveItem)
+            audioSectionMenu.addItem(waveItem)
             
-            let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-            loginItem.target = self
-            loginItem.state = LaunchAtLoginManager.isEnabled ? .on : .off
-            menu.addItem(loginItem)
+            audioSectionItem.submenu = audioSectionMenu
+            menu.addItem(audioSectionItem)
             
             menu.addItem(.separator())
             
@@ -861,6 +909,8 @@ struct NativeSettingsMenu: NSViewRepresentable {
             alert.runModal()
         }
         
+        @objc func toggleFocusMode() { parent.lyricsFocusMode.toggle() }
+        @objc func toggleSpecularEdge() { parent.specularEdgeEnabled.toggle() }
         @objc func toggleLyrics() { parent.showLyrics.toggle() }
         @objc func toggleAlbum() { parent.showAlbumArt.toggle() }
         @objc func toggleAudioFeatures() {

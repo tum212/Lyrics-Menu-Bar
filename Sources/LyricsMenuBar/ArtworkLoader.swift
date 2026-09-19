@@ -34,6 +34,11 @@ public final class ArtworkCache {
         cache.removeObject(forKey: key as NSString)
     }
     
+    public static func cacheKey(for track: MusicTrack) -> String {
+        let sanitized = ArtworkLoader.sanitizeArtworkURL(track.artworkURL)?.absoluteString ?? "raw"
+        return "\(track.source.rawValue)|\(track.id)|\(sanitized)"
+    }
+    
     public func clear() {
         cache.removeAllObjects()
     }

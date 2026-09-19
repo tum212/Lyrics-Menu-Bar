@@ -80,13 +80,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         
-        UserDefaults.standard.register(defaults: [
-            "waveformBars": 14,
-            "showAlbumArt": true,
-            "showLyrics": true,
-            "hapticEnabled": false,
-            "audioFeaturesEnabled": true
-        ])
+        AppDefaults.register()
         
         let contentView = ContentView(
             musicService: spotify,
@@ -117,6 +111,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hostingView.autoresizingMask = [.width, .height]
         
         panel.contentView = hostingView
+        panel.contentView?.wantsLayer = true
+        panel.contentView?.layer?.cornerRadius = 20
+        panel.contentView?.layer?.masksToBounds = true
         self.panel = panel
         
         NotificationCenter.default.addObserver(self, selector: #selector(handleClosePopover), name: Notification.Name("ClosePopover"), object: nil)
@@ -221,8 +218,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.displayLink = nil
         }
         updateTimer?.invalidate()
-        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
-        timer.tolerance = 0.002
+        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 30.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
+        timer.tolerance = 0.003
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
     }
@@ -815,12 +812,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 totalWidth += artWidth
             }
             totalWidth = max(24.0, totalWidth)
+            let quantizedWidth = ceil(totalWidth / 4.0) * 4.0
             
-            let combinedImage = NSImage(size: NSSize(width: totalWidth, height: 20))
+            let combinedImage = NSImage(size: NSSize(width: quantizedWidth, height: 20))
             combinedImage.lockFocus()
             
-            // 1. Draw lyrics
+            // 1. Draw contrast backing capsule and lyrics
             if let lyricsImg = lyricsImgToDraw {
+                let textContainerRect = NSRect(x: lyricsX, y: 0, width: lyricsWidth, height: 20)
+                let backingPath = NSBezierPath(roundedRect: textContainerRect, xRadius: 4, yRadius: 4)
+                NSColor(white: isDark ? 0.2 : 0.0, alpha: isDark ? 0.35 : 0.45).setFill()
+                backingPath.fill()
+                
                 lyricsImg.draw(at: NSPoint(x: lyricsX, y: 0), from: NSRect(origin: .zero, size: lyricsImg.size), operation: .sourceOver, fraction: 1.0)
             }
             
@@ -937,8 +940,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             combinedImage.unlockFocus()
             
-            let hasRealArt = showAlbumArt && (spotify.artworkImage != nil)
-            combinedImage.isTemplate = !hasRealArt
+            combinedImage.isTemplate = false
             button.image = combinedImage
             button.imagePosition = .imageOnly
             button.needsDisplay = true

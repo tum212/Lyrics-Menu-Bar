@@ -60,6 +60,12 @@ public final class MusicService: NSObject, ObservableObject {
     private var artworkGeneration: Int = 0
     private var artworkTask: Task<Void, Never>?
     
+    // Artwork retry & debounce state
+    private var artworkRetryCount: Int = 0
+    private var nextArtworkRetryDate: Date = .distantPast
+    private let retryIntervals: [TimeInterval] = [0.2, 0.5, 1.2, 2.0]
+    private var consecutiveStoppedPolls: Int = 0
+    
     private var lastMonotonicTime: TimeInterval = 0.0
     private var monotonicTrackId: String = ""
     
@@ -158,12 +164,21 @@ public final class MusicService: NSObject, ObservableObject {
         
         guard !name.isEmpty else {
             if stateStr == "stopped" && self.activeSource == .spotify {
-                self.currentTrack = nil
-                self.isPlaying = false
-                self.playbackPosition = 0
+                self.consecutiveStoppedPolls += 1
+                if self.consecutiveStoppedPolls > 1 {
+                    self.currentTrack = nil
+                    self.isPlaying = false
+                    self.playbackPosition = 0
+                    self.artworkTask?.cancel()
+                    self.artworkGeneration += 1
+                    self.artworkImage = nil
+                    self.artworkState = .idle
+                    self.artworkRevision += 1
+                }
             }
             return
         }
+        self.consecutiveStoppedPolls = 0
         
         // Preserve existing artwork if track id hasn't changed
         let existingArtwork = (self.currentTrack?.id == trackId) ? self.currentTrack?.artworkURL : nil
@@ -209,17 +224,21 @@ public final class MusicService: NSObject, ObservableObject {
         
         guard !name.isEmpty else {
             if (stateStr == "stopped" || stateStr.isEmpty) && self.activeSource == .appleMusic {
-                self.currentTrack = nil
-                self.isPlaying = false
-                self.playbackPosition = 0
-                self.artworkTask?.cancel()
-                self.artworkGeneration += 1
-                self.artworkImage = nil
-                self.artworkState = .idle
-                self.artworkRevision += 1
+                self.consecutiveStoppedPolls += 1
+                if self.consecutiveStoppedPolls > 1 {
+                    self.currentTrack = nil
+                    self.isPlaying = false
+                    self.playbackPosition = 0
+                    self.artworkTask?.cancel()
+                    self.artworkGeneration += 1
+                    self.artworkImage = nil
+                    self.artworkState = .idle
+                    self.artworkRevision += 1
+                }
             }
             return
         }
+        self.consecutiveStoppedPolls = 0
         
         let existingArtworkData = (self.currentTrack?.id == trackId) ? self.currentTrack?.artworkData : nil
         let track = MusicTrack(
@@ -288,19 +307,26 @@ public final class MusicService: NSObject, ObservableObject {
     
     private func applyPollResult(_ res: (track: MusicTrack?, isPlaying: Bool, position: Double, source: MusicSourceMode, isNotRunning: Bool)) {
         self.isPolling = false
-        if res.isNotRunning {
-            if self.activeSource == res.source {
-                self.currentTrack = nil
-                self.isPlaying = false
-                self.playbackPosition = 0.0
-                self.artworkTask?.cancel()
-                self.artworkGeneration += 1
-                self.artworkImage = nil
-                self.artworkState = .idle
-                self.artworkRevision += 1
+        if res.isNotRunning || res.track == nil {
+            self.consecutiveStoppedPolls += 1
+            if self.consecutiveStoppedPolls > 2 {
+                if self.activeSource == res.source || res.isNotRunning {
+                    self.currentTrack = nil
+                    self.isPlaying = false
+                    self.playbackPosition = 0.0
+                    self.artworkTask?.cancel()
+                    self.artworkGeneration += 1
+                    self.artworkImage = nil
+                    self.artworkState = .idle
+                    self.artworkRevision += 1
+                    self.artworkRetryCount = 0
+                    self.nextArtworkRetryDate = .distantPast
+                }
             }
             return
         }
+        
+        self.consecutiveStoppedPolls = 0
         if let track = res.track {
             self.updatePlaybackState(track: track, position: res.position, isPlaying: res.isPlaying, source: res.source, bundleID: res.source == .appleMusic ? "com.apple.Music" : "com.spotify.client")
         }
@@ -449,40 +475,56 @@ public final class MusicService: NSObject, ObservableObject {
         }
     }
     
-    nonisolated private static func fetchAppleMusicArtworkData() -> Data? {
+    nonisolated private static func fetchAppleMusicArtworkData(expectedID: String) -> (persistentID: String, data: Data?) {
+        let escapedID = expectedID.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
         tell application "Music"
             if it is running then
                 try
                     set aTrack to current track
-                    return data of artwork 1 of aTrack
+                    set curId to persistent ID of aTrack
+                    if "\(escapedID)" is "" or curId is equal to "\(escapedID)" then
+                        return {curId, data of artwork 1 of aTrack}
+                    else
+                        return {curId, ""}
+                    end if
                 on error
-                    return ""
+                    return {"", ""}
                 end try
             else
-                return ""
+                return {"", ""}
             end if
         end tell
         """
         if let appleScript = NSAppleScript(source: script) {
             var error: NSDictionary?
             let desc = appleScript.executeAndReturnError(&error)
-            let data = desc.data
-            if !data.isEmpty { return data }
+            if desc.numberOfItems >= 2 {
+                let curId = desc.atIndex(1)?.stringValue ?? ""
+                if let data = desc.atIndex(2)?.data, data.count > 64 {
+                    return (curId, data)
+                }
+                return (curId, nil)
+            } else if desc.data.count > 64 {
+                return (expectedID, desc.data)
+            }
         }
-        return nil
+        return ("", nil)
     }
     
-    // MARK: - Artwork Loading with Cancellation & Generation Token
+    // MARK: - Artwork Loading with Cancellation, Track ID Binding & Exponential Backoff
     
     private func loadArtwork(for track: MusicTrack) {
         let trackId = track.id
+        let cacheKey = ArtworkCache.cacheKey(for: track)
         
         // 1. If in-memory cache already has it, assign immediately
-        if let cached = ArtworkCache.shared.image(forKey: trackId) {
+        if let cached = ArtworkCache.shared.image(forKey: cacheKey) {
             self.artworkImage = cached
             self.artworkState = .loaded(trackId: trackId)
             self.artworkRevision += 1
+            self.artworkRetryCount = 0
+            self.nextArtworkRetryDate = .distantPast
             return
         }
         
@@ -497,23 +539,35 @@ public final class MusicService: NSObject, ObservableObject {
             guard let self = self else { return }
             
             if track.source == .appleMusic {
-                // Fetch data via detached AppleScript task (no NSImage across concurrency boundaries)
-                let data = await Task.detached(priority: .userInitiated) {
-                    Self.fetchAppleMusicArtworkData()
+                // Fetch data via detached AppleScript task with persistent ID validation
+                let result = await Task.detached(priority: .userInitiated) {
+                    Self.fetchAppleMusicArtworkData(expectedID: trackId)
                 }.value
                 
                 guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
                 
-                if let data = data, let image = NSImage(data: data) {
-                    ArtworkCache.shared.setImage(image, forKey: trackId)
+                // Discard if persistent ID mismatch (player already changed tracks)
+                if !result.persistentID.isEmpty && !trackId.isEmpty && result.persistentID != trackId {
+                    return
+                }
+                
+                if let data = result.data, let image = NSImage(data: data) {
+                    ArtworkCache.shared.setImage(image, forKey: cacheKey)
                     self.artworkImage = image
                     self.artworkState = .loaded(trackId: trackId)
                     self.artworkRevision += 1
+                    self.artworkRetryCount = 0
+                    self.nextArtworkRetryDate = .distantPast
                     if self.currentTrack?.id == trackId {
                         self.currentTrack?.artworkData = data
                     }
                 } else {
-                    self.artworkImage = nil
+                    // Exponential backoff retry
+                    if self.artworkRetryCount < self.retryIntervals.count {
+                        let delay = self.retryIntervals[self.artworkRetryCount]
+                        self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
+                        self.artworkRetryCount += 1
+                    }
                     self.artworkState = .failed(trackId: trackId, error: "No Apple Music artwork")
                     self.artworkRevision += 1
                 }
@@ -521,21 +575,27 @@ public final class MusicService: NSObject, ObservableObject {
                 // Spotify URL / URI
                 guard let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(track.artworkURL) else {
                     guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
-                    self.artworkImage = nil
                     self.artworkState = .idle
                     return
                 }
                 
-                let image = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: trackId)
+                let image = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: cacheKey)
                 
                 guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
                 
                 if let image = image {
+                    ArtworkCache.shared.setImage(image, forKey: cacheKey)
                     self.artworkImage = image
                     self.artworkState = .loaded(trackId: trackId)
                     self.artworkRevision += 1
+                    self.artworkRetryCount = 0
+                    self.nextArtworkRetryDate = .distantPast
                 } else {
-                    self.artworkImage = nil
+                    if self.artworkRetryCount < self.retryIntervals.count {
+                        let delay = self.retryIntervals[self.artworkRetryCount]
+                        self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
+                        self.artworkRetryCount += 1
+                    }
                     self.artworkState = .failed(trackId: trackId, error: "Failed to download Spotify artwork")
                     self.artworkRevision += 1
                 }
@@ -547,7 +607,7 @@ public final class MusicService: NSObject, ObservableObject {
     
     private func updatePlaybackState(track: MusicTrack, position: Double, isPlaying: Bool, source: MusicSourceMode, bundleID: String) {
         let isTrackChanged = (self.currentTrack?.id != track.id)
-        let isArtworkChanged = (self.currentTrack?.artworkURL != track.artworkURL || self.currentTrack?.artworkData != track.artworkData)
+        let isArtworkChanged = (self.currentTrack?.artworkURL != track.artworkURL)
         let isPlayStateChanged = (self.isPlaying != isPlaying)
         
         let now = Date()
@@ -574,9 +634,27 @@ public final class MusicService: NSObject, ObservableObject {
         if isPlayStateChanged {
             self.isPlaying = isPlaying
         }
-        if isTrackChanged || isArtworkChanged {
-            self.currentTrack = track
-            loadArtwork(for: track)
+        
+        // Preserve loaded artwork across polls when track ID is unchanged
+        var updatedTrack = track
+        if !isTrackChanged {
+            if updatedTrack.artworkData == nil {
+                updatedTrack.artworkData = self.currentTrack?.artworkData
+            }
+            if updatedTrack.artworkURL == nil {
+                updatedTrack.artworkURL = self.currentTrack?.artworkURL
+            }
+        }
+        self.currentTrack = updatedTrack
+        
+        let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
+        
+        if isTrackChanged {
+            self.artworkRetryCount = 0
+            self.nextArtworkRetryDate = .distantPast
+            loadArtwork(for: updatedTrack)
+        } else if isArtworkChanged || shouldRetryArtwork {
+            loadArtwork(for: updatedTrack)
         }
     }
     
