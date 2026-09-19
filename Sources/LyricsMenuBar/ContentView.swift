@@ -46,84 +46,67 @@ struct ContentView: View {
     @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = true
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            // Native Liquid Glass Specular Edge Highlight Overlay
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(
-                    specularEdgeEnabled
-                        ? (colorScheme == .dark ? Color.white.opacity(0.15) : Color.white.opacity(0.35))
-                        : Color.clear,
-                    lineWidth: 0.5
-                )
+        mainContent
+            .overlay(specularBorder)
+            .background(Color.clear)
+            .onChange(of: musicService.currentTrack?.id) { _ in
+                LyricLineLayoutCache.shared.clear()
+                if let track = musicService.currentTrack {
+                    lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
+                } else {
+                    lyricsService.lyrics = []
+                }
+                displayedIndex = 0
+            }
+            .onChange(of: lyricsService.lyrics.count) { _ in
+                LyricLineLayoutCache.shared.clear()
+            }
+            .onChange(of: musicService.isPlaying) { isPlaying in
+                handlePlayStateChange(isPlaying)
+            }
+            .onAppear {
+                handlePlayStateChange(musicService.isPlaying)
+            }
+            .onDisappear {
+                if waveformBars == 0 {
+                    audioAnalyzer.stop()
+                }
+            }
+    }
 
+    private func handlePlayStateChange(_ isPlaying: Bool) {
+        if isPlaying && waveformBars > 0 && UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
+            audioAnalyzer.start()
+        } else {
+            audioAnalyzer.stop()
+        }
+    }
+
+    private var specularBorder: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .strokeBorder(
+                specularEdgeEnabled
+                    ? (colorScheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.35))
+                    : Color.clear,
+                lineWidth: specularEdgeEnabled ? 0.5 : 0.0
+            )
+            .animation(.easeInOut(duration: 0.2), value: specularEdgeEnabled)
+    }
+
+    private var mainContent: some View {
+        ZStack(alignment: .topTrailing) {
             // Single unified content container - NO inner cards
             HStack(spacing: 20) {
-                // MARK: Left Column - Player Info (130pt)
-                VStack(spacing: 0) {
-                    // Album Art
-                    Group {
-                        if let image = musicService.activeArtworkImage {
-                            Image(nsImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } else {
-                            placeholderArt
-                        }
-                    }
-                    .frame(width: 116, height: 116)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 4)
-
-                    Spacer().frame(height: 10)
-
-                    // Track Info
-                    Text(musicService.currentTrack?.name ?? "No Music Playing")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: 130, alignment: .center)
-
-                    Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: 130, alignment: .center)
-
-                    Spacer().frame(height: 10)
-
-                    // Playback Controls
-                    HStack(spacing: 16) {
-                        Button(action: { musicService.previousTrack() }) {
-                            Image(systemName: "backward.fill")
-                                .font(.system(size: 16))
-                                .foregroundColor(.white)
-                        }
-                        .buttonStyle(PlainButtonStyle()).focusable(false)
-
-                        Button(action: { musicService.playPause() }) {
-                            Image(systemName: musicService.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 24))
-                                .foregroundColor(.white)
-                                .frame(width: 24)
-                        }
-                        .buttonStyle(PlainButtonStyle()).focusable(false)
-
-                        Button(action: { musicService.nextTrack() }) {
-                            Image(systemName: "forward.fill")
-                                .font(.system(size: 16))
-                                .foregroundColor(.white)
-                        }
-                        .buttonStyle(PlainButtonStyle()).focusable(false)
-                    }
-                }
-                .frame(width: 130)
+                playerLeftColumn
 
                 // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
                 GeometryReader { geometry in
-                    TimelineView(musicService.isPanelVisible ? .animation : .animation(paused: true)) { timeline in
-                        lyricsPanel(currentDate: timeline.date, containerWidth: geometry.size.width)
+                    if musicService.isPanelVisible {
+                        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
+                            lyricsPanel(currentDate: timeline.date, containerWidth: geometry.size.width)
+                        }
+                    } else {
+                        lyricsPanel(currentDate: .now, containerWidth: geometry.size.width)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -132,61 +115,98 @@ struct ContentView: View {
             .padding(.vertical, 16)
             .frame(width: 480, height: 240)
 
-            // Top Right Controls (Glass Buttons)
-            HStack(spacing: 8) {
-                NativeSettingsMenu()
+            topRightControls
+                .padding([.top, .trailing], 14)
+        }
+    }
+
+    // MARK: - Left Column - Player Info (130pt)
+    @ViewBuilder
+    private var playerLeftColumn: some View {
+        VStack(spacing: 0) {
+            // Album Art
+            Group {
+                if let image = musicService.activeArtworkImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    placeholderArt
+                }
+            }
+            .frame(width: 116, height: 116)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 4)
+
+            Spacer().frame(height: 10)
+
+            // Track Info
+            Text(musicService.currentTrack?.name ?? "No Music Playing")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 130, alignment: .center)
+
+            Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 130, alignment: .center)
+
+            Spacer().frame(height: 10)
+
+            // Playback Controls
+            HStack(spacing: 16) {
+                Button(action: { musicService.previousTrack() }) {
+                    Image(systemName: "backward.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                }
+                .buttonStyle(PlainButtonStyle()).focusable(false)
+
+                Button(action: { musicService.playPause() }) {
+                    Image(systemName: musicService.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white)
+                        .frame(width: 24)
+                }
+                .buttonStyle(PlainButtonStyle()).focusable(false)
+
+                Button(action: { musicService.nextTrack() }) {
+                    Image(systemName: "forward.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                }
+                .buttonStyle(PlainButtonStyle()).focusable(false)
+            }
+        }
+        .frame(width: 130)
+    }
+
+    // MARK: - Top Right Controls (Glass Buttons)
+    @ViewBuilder
+    private var topRightControls: some View {
+        HStack(spacing: 8) {
+            NativeSettingsMenu()
+                .frame(width: 26, height: 26)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
+                .menuIndicator(.hidden)
+                .fixedSize()
+
+            Button(action: { NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil) }) {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white.opacity(0.85))
                     .frame(width: 26, height: 26)
                     .background(.ultraThinMaterial, in: Circle())
                     .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-
-                Button(action: { NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil) }) {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.white.opacity(0.85))
-                        .frame(width: 26, height: 26)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
-                }
-                .buttonStyle(PlainButtonStyle())
-                .focusable(false)
             }
-            .padding([.top, .trailing], 14)
+            .buttonStyle(PlainButtonStyle())
+            .focusable(false)
         }
-        .background(Color.clear)
-        .onChange(of: musicService.currentTrack?.id) { [musicService] _ in
-            LyricLineLayoutCache.shared.clear()
-            if let track = musicService.currentTrack {
-                lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
-            } else {
-                lyricsService.lyrics = []
-            }
-            displayedIndex = 0
-        }
-        .onChange(of: lyricsService.lyrics.count) { _ in
-            LyricLineLayoutCache.shared.clear()
-        }
-        .onChange(of: musicService.isPlaying) { isPlaying in
-            if isPlaying && waveformBars > 0 && UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
-                audioAnalyzer.start()
-            } else {
-                audioAnalyzer.stop()
-            }
-        }
-        .onAppear {
-            if musicService.isPlaying && waveformBars > 0 && UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") {
-                audioAnalyzer.start()
-            } else {
-                audioAnalyzer.stop()
-            }
-        }
-        .onDisappear {
-            if waveformBars == 0 {
-                audioAnalyzer.stop()
-            }
-        }
-        .background(Color.clear)
     }
 
     // MARK: - Lyrics Panel with Apple Music style scroll & Click-to-Seek
@@ -215,6 +235,7 @@ struct ContentView: View {
                                 isActive: isActive,
                                 isPast: isPast,
                                 isLyricsHovered: isLyricsHovered,
+                                lyricsFocusMode: lyricsFocusMode,
                                 currentTime: info.currentTime,
                                 fallbackProgress: info.progress,
                                 isUnsynced: info.isUnsynced,
@@ -413,11 +434,11 @@ final class LyricLineLayoutCache {
 
 // MARK: - Unified Lyric Line Row (Apple Music Karaoke + Single-Line + Click-to-Seek)
 struct LyricLineRowView: View {
-    @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
     let line: LyricLine
     let isActive: Bool
     let isPast: Bool
     let isLyricsHovered: Bool
+    let lyricsFocusMode: Bool
     let currentTime: TimeInterval
     let fallbackProgress: Double
     let isUnsynced: Bool
@@ -436,10 +457,15 @@ struct LyricLineRowView: View {
         Group {
             if isUnsynced {
                 unsyncedView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
-            } else if !line.words.isEmpty {
-                wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
+            } else if isActive {
+                if !line.words.isEmpty {
+                    wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
+                } else {
+                    fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
+                }
             } else {
-                fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
+                // High-performance static view for inactive lines: Zero GeometryReaders, zero masks, zero gradients!
+                staticLineView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, effectiveHover: effectiveHover)
             }
         }
         .padding(.leading, isBgVocal ? 24 : 0)
@@ -450,7 +476,9 @@ struct LyricLineRowView: View {
                 .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
         )
         .contentShape(Rectangle())
+        .blur(radius: (lyricsFocusMode && !isActive && !effectiveHover) ? 2.5 : 0.0)
         .opacity(lyricsFocusMode ? (isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40))) : (isActive ? 1.0 : 0.85))
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: lyricsFocusMode)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isActive)
@@ -465,6 +493,22 @@ struct LyricLineRowView: View {
                 NSCursor.arrow.set()
             }
         }
+    }
+
+    @ViewBuilder
+    private func staticLineView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, effectiveHover: Bool) -> some View {
+        let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
+        let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(0..<lines.count, id: \.self) { i in
+                Text(lines[i])
+                    .font(.system(size: fontSize, weight: fontWeight))
+                    .italic(isBgVocal)
+                    .foregroundColor(.white.opacity(effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40)))
+                    .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
+            }
+        }
+        .frame(width: effectiveWidth, alignment: .leading)
     }
     
     @ViewBuilder
@@ -499,6 +543,7 @@ struct LyricLineRowView: View {
                             isActive: isActive,
                             isPast: isPast,
                             isHovered: isHovered,
+                            lyricsFocusMode: lyricsFocusMode,
                             currentTime: currentTime,
                             fontSize: fontSize,
                             fontWeight: fontWeight,
@@ -581,11 +626,11 @@ struct LyricLineRowView: View {
 
 // MARK: - Single Word Lyric Item (Apple Music Continuous Glow Decay & Seamless Flow)
 struct WordLyricItemView: View {
-    @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
     let word: LyricWord
     let isActive: Bool
     let isPast: Bool
     let isHovered: Bool
+    let lyricsFocusMode: Bool
     let currentTime: TimeInterval
     var fontSize: CGFloat = 20
     var fontWeight: Font.Weight = .bold
