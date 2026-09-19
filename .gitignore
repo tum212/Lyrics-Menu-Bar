@@ -10,9 +10,12 @@ xcuserdata/
 DerivedData/
 .swiftpm/
 
-# Packaging temp files
+# Packaging temp files & release binaries
 .dmg_staging*
 .temp_rw*
+*.dmg
+*.app
+*.zip
 
 # Development test scripts
 test_*
