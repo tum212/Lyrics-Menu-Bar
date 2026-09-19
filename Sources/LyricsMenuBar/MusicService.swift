@@ -56,6 +56,16 @@ public final class MusicService: NSObject, ObservableObject {
     @Published public private(set) var artworkImage: NSImage?
     @Published public private(set) var artworkState: ArtworkState = .idle
     @Published public private(set) var artworkRevision: Int = 0
+    @Published public var isPanelVisible: Bool = false
+    
+    public var activeArtworkImage: NSImage? {
+        guard let track = currentTrack,
+              case .loaded(let loadedId) = artworkState,
+              loadedId == track.id else {
+            return nil
+        }
+        return artworkImage
+    }
     
     private var artworkGeneration: Int = 0
     private var artworkTask: Task<Void, Never>?
@@ -520,6 +530,7 @@ public final class MusicService: NSObject, ObservableObject {
         
         // 1. If in-memory cache already has it, assign immediately
         if let cached = ArtworkCache.shared.image(forKey: cacheKey) {
+            guard self.currentTrack?.id == trackId else { return }
             self.artworkImage = cached
             self.artworkState = .loaded(trackId: trackId)
             self.artworkRevision += 1
@@ -532,7 +543,8 @@ public final class MusicService: NSObject, ObservableObject {
         artworkGeneration += 1
         let currentGen = artworkGeneration
         artworkTask?.cancel()
-        artworkState = .loading(trackId: trackId)
+        self.artworkImage = nil
+        self.artworkState = .loading(trackId: trackId)
         
         // 3. Load artwork asynchronously
         artworkTask = Task { @MainActor [weak self] in
@@ -544,15 +556,17 @@ public final class MusicService: NSObject, ObservableObject {
                     Self.fetchAppleMusicArtworkData(expectedID: trackId)
                 }.value
                 
-                guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+                guard !Task.isCancelled, self.artworkGeneration == currentGen, self.currentTrack?.id == trackId else { return }
                 
                 // Discard if persistent ID mismatch (player already changed tracks)
                 if !result.persistentID.isEmpty && !trackId.isEmpty && result.persistentID != trackId {
+                    self.artworkImage = nil
                     return
                 }
                 
                 if let data = result.data, let image = NSImage(data: data) {
                     ArtworkCache.shared.setImage(image, forKey: cacheKey)
+                    guard self.currentTrack?.id == trackId else { return }
                     self.artworkImage = image
                     self.artworkState = .loaded(trackId: trackId)
                     self.artworkRevision += 1
@@ -563,6 +577,7 @@ public final class MusicService: NSObject, ObservableObject {
                     }
                 } else {
                     // Exponential backoff retry
+                    self.artworkImage = nil
                     if self.artworkRetryCount < self.retryIntervals.count {
                         let delay = self.retryIntervals[self.artworkRetryCount]
                         self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
@@ -574,23 +589,26 @@ public final class MusicService: NSObject, ObservableObject {
             } else {
                 // Spotify URL / URI
                 guard let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(track.artworkURL) else {
-                    guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+                    guard !Task.isCancelled, self.artworkGeneration == currentGen, self.currentTrack?.id == trackId else { return }
+                    self.artworkImage = nil
                     self.artworkState = .idle
                     return
                 }
                 
                 let image = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: cacheKey)
                 
-                guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+                guard !Task.isCancelled, self.artworkGeneration == currentGen, self.currentTrack?.id == trackId else { return }
                 
                 if let image = image {
                     ArtworkCache.shared.setImage(image, forKey: cacheKey)
+                    guard self.currentTrack?.id == trackId else { return }
                     self.artworkImage = image
                     self.artworkState = .loaded(trackId: trackId)
                     self.artworkRevision += 1
                     self.artworkRetryCount = 0
                     self.nextArtworkRetryDate = .distantPast
                 } else {
+                    self.artworkImage = nil
                     if self.artworkRetryCount < self.retryIntervals.count {
                         let delay = self.retryIntervals[self.artworkRetryCount]
                         self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
@@ -650,6 +668,9 @@ public final class MusicService: NSObject, ObservableObject {
         let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
         
         if isTrackChanged {
+            self.artworkImage = nil
+            self.artworkState = .loading(trackId: updatedTrack.id)
+            self.artworkRevision += 1
             self.artworkRetryCount = 0
             self.nextArtworkRetryDate = .distantPast
             loadArtwork(for: updatedTrack)

@@ -47,17 +47,13 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            // Unified single-piece Optical Liquid Glass surface (Control Center Refraction)
-            VisualEffectBackground(material: .popover, blendingMode: .behindWindow, state: .active)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(
-                            specularEdgeEnabled
-                                ? (colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.12))
-                                : Color.clear,
-                            lineWidth: 0.5
-                        )
+            // Native Liquid Glass Specular Edge Highlight Overlay
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(
+                    specularEdgeEnabled
+                        ? (colorScheme == .dark ? Color.white.opacity(0.15) : Color.white.opacity(0.35))
+                        : Color.clear,
+                    lineWidth: 0.5
                 )
 
             // Single unified content container - NO inner cards
@@ -66,7 +62,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     // Album Art
                     Group {
-                        if let image = musicService.artworkImage {
+                        if let image = musicService.activeArtworkImage {
                             Image(nsImage: image)
                                 .resizable()
                                 .aspectRatio(contentMode: .fill)
@@ -126,7 +122,7 @@ struct ContentView: View {
 
                 // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
                 GeometryReader { geometry in
-                    TimelineView(.animation) { timeline in
+                    TimelineView(musicService.isPanelVisible ? .animation : .animation(paused: true)) { timeline in
                         lyricsPanel(currentDate: timeline.date, containerWidth: geometry.size.width)
                     }
                 }
@@ -158,6 +154,7 @@ struct ContentView: View {
             }
             .padding([.top, .trailing], 14)
         }
+        .background(Color.clear)
         .onChange(of: musicService.currentTrack?.id) { [musicService] _ in
             LyricLineLayoutCache.shared.clear()
             if let track = musicService.currentTrack {

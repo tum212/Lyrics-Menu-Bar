@@ -26,8 +26,63 @@ func logDebug(_ msg: String) {
     #endif
 }
 
+final class AtomicBool: @unchecked Sendable {
+    private var lock = os_unfair_lock()
+    private var value: Bool = false
+    
+    func testAndSet() -> Bool {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        if value { return false }
+        value = true
+        return true
+    }
+    
+    func reset() {
+        os_unfair_lock_lock(&lock)
+        value = false
+        os_unfair_lock_unlock(&lock)
+    }
+}
+
+struct LyricsRenderKey: Equatable {
+    let text: String
+    let canvasWidth: CGFloat
+    let isDark: Bool
+    let marqueeOffsetQuantized: Int
+    let wordLeadXQuantized: Int
+    let transitionProgressQuantized: Int
+    let isSparkling: Bool
+    let sparkleFrame: Int
+    let isInterlude: Bool
+    let interludeFrame: Int
+}
+
+struct MenuBarRenderKey: Equatable {
+    let trackId: String
+    let isPlaying: Bool
+    let isDark: Bool
+    let showLyrics: Bool
+    let showAlbumArt: Bool
+    let waveformBars: Int
+    let text: String
+    let artRevision: Int
+    let quantizedWidth: CGFloat
+    let lyricsX: CGFloat
+    let lyricsWidth: CGFloat
+    let marqueeOffsetQuantized: Int
+    let wordLeadXQuantized: Int
+    let transitionProgressQuantized: Int
+    let isSparkling: Bool
+    let sparkleFrame: Int
+    let isInterlude: Bool
+    let interludeFrame: Int
+    let vizWidth: CGFloat
+    let barHeightsQuantized: [Int]
+}
+
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panel: NSPanel!
     
     // Core Services
@@ -39,6 +94,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var updateTimer: Timer?
     var displayLink: CVDisplayLink?
+    private let isFramePending = AtomicBool()
+    private var lastMenuBarRenderKey: MenuBarRenderKey?
+    private var lastLyricsRenderKey: LyricsRenderKey?
+    private var cachedLyricsImage: NSImage?
+    private var isShowingIdleIcon: Bool = false
     private var cachedAlbumArtTrackId: String?
     private var cachedAlbumArtImage: NSImage?
     
@@ -101,19 +161,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hasShadow = true
         panel.level = .floating
 
-        // ── Liquid Glass Hosting View ────────────────
+        // ── Real AppKit Liquid Glass (NSVisualEffectView) ────────
+        let visualEffect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 480, height: 240))
+        visualEffect.material = .popover
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.state = .active
+        visualEffect.wantsLayer = true
+        visualEffect.layer?.cornerRadius = 20
+        visualEffect.layer?.masksToBounds = true
+
         let hostingView = NSHostingView(rootView: contentView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
         hostingView.wantsLayer = true
         hostingView.setValue(false, forKey: "opaque")
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
-        hostingView.frame = NSRect(x: 0, y: 0, width: 480, height: 240)
-        hostingView.autoresizingMask = [.width, .height]
-        
-        panel.contentView = hostingView
-        panel.contentView?.wantsLayer = true
-        panel.contentView?.layer?.cornerRadius = 20
-        panel.contentView?.layer?.masksToBounds = true
+
+        visualEffect.addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: visualEffect.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor)
+        ])
+
+        panel.contentView = visualEffect
+        panel.delegate = self
         self.panel = panel
         
         NotificationCenter.default.addObserver(self, selector: #selector(handleClosePopover), name: Notification.Name("ClosePopover"), object: nil)
@@ -140,11 +213,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
                 } else {
                     self.lyricsService.lyrics = []
+                    self.audioAnalyzer.stop()
+                }
+            }
+            .store(in: &cancellables)
+            
+        spotify.$isPlaying
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isPlaying in
+                guard let self = self else { return }
+                let waveformBars = UserDefaults.standard.integer(forKey: "waveformBars")
+                let featuresEnabled = UserDefaults.standard.bool(forKey: "audioFeaturesEnabled")
+                if isPlaying && waveformBars > 0 && featuresEnabled {
+                    self.audioAnalyzer.start()
+                } else {
+                    self.audioAnalyzer.stop()
                 }
             }
             .store(in: &cancellables)
         
-        // Start live updating the Menu Bar at 25fps (smooth & lightweight)
+        // Start live updating the Menu Bar at 60fps / CVDisplayLink
         startMenuBarUpdater()
     }
     
@@ -156,6 +244,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func togglePopover(_ sender: AnyObject?) {
         guard let panel = self.panel else { return }
         if panel.isVisible {
+            spotify.isPanelVisible = false
             panel.orderOut(nil)
         } else {
             let screen = statusItem?.button?.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
@@ -181,21 +270,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             panel.setFrame(NSRect(x: xPos, y: yPos, width: panelWidth, height: panelHeight), display: true)
             panel.invalidateShadow()
+            spotify.isPanelVisible = true
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        updateTimer?.invalidate()
-        updateTimer = nil
+        stopMenuBarUpdater()
         audioAnalyzer.stop()
         HapticManager.shared.teardown()
         spotify.cleanup()
     }
     
     @objc private func handleClosePopover() {
+        spotify.isPanelVisible = false
         panel?.orderOut(nil)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window == panel {
+            spotify.isPanelVisible = false
+            panel?.orderOut(nil)
+        }
     }
 
     @objc private func handleDistributedTogglePopover() {
@@ -213,15 +310,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func startMenuBarUpdater() {
+        stopMenuBarUpdater()
+        
+        var link: CVDisplayLink?
+        let result = CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        if result == kCVReturnSuccess, let displayLink = link {
+            self.displayLink = displayLink
+            
+            let callback: CVDisplayLinkOutputCallback = { (displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext) -> CVReturn in
+                guard let context = displayLinkContext else { return kCVReturnSuccess }
+                let appDelegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
+                
+                if appDelegate.isFramePending.testAndSet() {
+                    DispatchQueue.main.async { [weak appDelegate] in
+                        guard let self = appDelegate else { return }
+                        self.isFramePending.reset()
+                        self.updateMenuBar()
+                    }
+                }
+                return kCVReturnSuccess
+            }
+            
+            CVDisplayLinkSetOutputCallback(displayLink, callback, Unmanaged.passUnretained(self).toOpaque())
+            CVDisplayLinkStart(displayLink)
+        } else {
+            let timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
+            timer.tolerance = 0.002
+            RunLoop.main.add(timer, forMode: .common)
+            updateTimer = timer
+        }
+    }
+    
+    func stopMenuBarUpdater() {
         if let link = displayLink {
             CVDisplayLinkStop(link)
             self.displayLink = nil
         }
         updateTimer?.invalidate()
-        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 30.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
-        timer.tolerance = 0.003
-        RunLoop.main.add(timer, forMode: .common)
-        updateTimer = timer
+        updateTimer = nil
     }
     
     @objc private func timerTick() {
@@ -285,35 +411,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         if let track = spotify.currentTrack {
+            isShowingIdleIcon = false
             guard let button = self.statusItem?.button else { return }
             let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let primaryTextColor = isDark ? NSColor.white : NSColor(white: 0.1, alpha: 1.0)
             
-            // Fast path: paused + no sparkle + no animation in progress → skip heavy redraw
             let sparkleTime = now.timeIntervalSince(trackChangedTime)
             let isSparkling = lyricsService.isLoading || sparkleTime < 5.5
-            if !spotify.isPlaying && !isSparkling && forceRedrawLyrics == false && !prefsChanged {
-                // Still need to show static text but skip 60fps NSImage recreation
-                // Only update if lyrics line changed
-                let staticText: String
-                let allLyrics = lyricsService.lyrics
-                if allLyrics.isEmpty {
-                    staticText = "\(track.name) - \(track.artist) • \(track.album)"
-                } else {
-                    let time = spotify.currentTime
-                    if let firstTime = allLyrics.first?.time, firstTime > 0 && time < firstTime {
-                        staticText = "\(track.name) - \(track.artist)"
-                    } else {
-                        var idx = 0
-                        for (i, line) in allLyrics.enumerated() { if line.time <= time { idx = i } else { break } }
-                        staticText = allLyrics[idx].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "♪" : allLyrics[idx].text
-                    }
-                }
-                if staticText == lastRenderedLyricsText { return }  // ← skip if identical
-                forceRedrawLyrics = true  // force one redraw for the new static text
-            } else {
-                forceRedrawLyrics = false
-            }
             
             if lastTrackIdForSparkle != track.id {
                 lastTrackIdForSparkle = track.id
@@ -581,16 +685,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             var lyricsImgToDraw: NSImage? = nil
             if showLyrics && canvasWidth > 2 {
-                let trackName = track.name
-                let lyricsImage = NSImage(size: NSSize(width: canvasWidth, height: 20))
-                lyricsImage.lockFocus()
-                if let ctx = NSGraphicsContext.current?.cgContext {
-                    ctx.setAllowsFontSubpixelPositioning(true)
-                    ctx.setShouldSubpixelPositionFonts(true)
-                    ctx.setAllowsFontSubpixelQuantization(true)
-                    ctx.setShouldSubpixelQuantizeFonts(false)
-                }
-                NSGraphicsContext.current?.imageInterpolation = .high
+                let isInterlude = currentLineText.contains("✦")
+                let currentLyricsKey = LyricsRenderKey(
+                    text: currentLineText,
+                    canvasWidth: canvasWidth,
+                    isDark: isDark,
+                    marqueeOffsetQuantized: Int(marqueeOffset * 2.0),
+                    wordLeadXQuantized: Int((wordLeadX ?? -100.0) * 2.0),
+                    transitionProgressQuantized: Int(transitionProgress * 100.0),
+                    isSparkling: isSparkling,
+                    sparkleFrame: isSparkling ? Int(sparkleTime * 30.0) : 0,
+                    isInterlude: isInterlude,
+                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 30.0) : 0
+                )
+                
+                if currentLyricsKey == lastLyricsRenderKey, let cached = cachedLyricsImage {
+                    lyricsImgToDraw = cached
+                } else {
+                    let trackName = track.name
+                    let lyricsImage = NSImage(size: NSSize(width: canvasWidth, height: 20))
+                    lyricsImage.lockFocus()
+                    if let ctx = NSGraphicsContext.current?.cgContext {
+                        ctx.setAllowsFontSubpixelPositioning(true)
+                        ctx.setShouldSubpixelPositionFonts(true)
+                        ctx.setAllowsFontSubpixelQuantization(true)
+                        ctx.setShouldSubpixelQuantizeFonts(false)
+                    }
+                    NSGraphicsContext.current?.imageInterpolation = .high
                 
                 let t = transitionProgress
                 let easedT = 1.0 - pow(1.0 - t, 3.0)
@@ -757,202 +878,249 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 
                 lyricsImage.unlockFocus()
+                cachedLyricsImage = lyricsImage
+                lastLyricsRenderKey = currentLyricsKey
                 lyricsImgToDraw = lyricsImage
                 lastRenderedLyricsText = currentLineText
             }
-            
-            // --- 2. ART & WAVEFORM UPDATING ---
-            let artKey = "\(track.id)_\(spotify.artworkRevision)"
-            if cachedAlbumArtTrackId != artKey {
-                cachedAlbumArtTrackId = artKey
-                
-                if let directImage = spotify.artworkImage {
-                    let roundedImage = self.roundCorners(of: directImage, size: NSSize(width: 20, height: 20), radius: 4)
-                    let theme = ColorExtractor.extractWaveformTheme(from: directImage)
-                    self.cachedAlbumArtImage = roundedImage
-                    self.cachedWaveformTheme = theme
-                } else {
-                    let fallback = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: nil)
-                    fallback?.isTemplate = true
-                    self.cachedAlbumArtImage = fallback
-                    self.cachedWaveformTheme = .fallback
-                }
-            }
-            
-            var waveformBars = 14
-            if UserDefaults.standard.object(forKey: "waveformBars") != nil {
-                waveformBars = min(128, max(0, UserDefaults.standard.integer(forKey: "waveformBars")))
-            }
-            let barCount = waveformBars
-            let barW: CGFloat = 2.0
-            let barSp: CGFloat = 1.5
-            let vizWidth: CGFloat = (barCount > 0 && spotify.isPlaying) ? CGFloat(barCount) * (barW + barSp) : 0
-            let artWidth: CGFloat = (showAlbumArt && cachedAlbumArtImage != nil) ? 20.0 : 0
-            let lyricsWidth: CGFloat = (showLyrics && lyricsImgToDraw != nil) ? canvasWidth : 0
-            
-            let gap: CGFloat = 8.0
-            
-            var totalWidth: CGFloat = 0
-            var lyricsX: CGFloat = 0
-            var vizX: CGFloat = 0
-            var artX: CGFloat = 0
-            
-            if lyricsWidth > 0 {
-                lyricsX = totalWidth
-                totalWidth += lyricsWidth
-            }
-            if vizWidth > 0 {
-                if totalWidth > 0 { totalWidth += gap }
-                vizX = totalWidth
-                totalWidth += vizWidth
-            }
-            if artWidth > 0 {
-                if totalWidth > 0 { totalWidth += gap }
-                artX = totalWidth
-                totalWidth += artWidth
-            }
-            totalWidth = max(24.0, totalWidth)
-            let quantizedWidth = ceil(totalWidth / 4.0) * 4.0
-            
-            let combinedImage = NSImage(size: NSSize(width: quantizedWidth, height: 20))
-            combinedImage.lockFocus()
-            
-            // 1. Draw contrast backing capsule and lyrics
-            if let lyricsImg = lyricsImgToDraw {
-                let textContainerRect = NSRect(x: lyricsX, y: 0, width: lyricsWidth, height: 20)
-                let backingPath = NSBezierPath(roundedRect: textContainerRect, xRadius: 4, yRadius: 4)
-                NSColor(white: isDark ? 0.2 : 0.0, alpha: isDark ? 0.35 : 0.45).setFill()
-                backingPath.fill()
-                
-                lyricsImg.draw(at: NSPoint(x: lyricsX, y: 0), from: NSRect(origin: .zero, size: lyricsImg.size), operation: .sourceOver, fraction: 1.0)
-            }
-            
-            // 2. Draw Waveform (Apple-Style Authentic FFT Equalizer with Bass-Ceiling Surge)
-            if vizWidth > 0 {
-                let startX = vizX
-                let clipPath = NSBezierPath()
-                
-                let rawAmps = audioAnalyzer.amplitudes
-                let count = barCount
-                let hasLiveAudio = audioAnalyzer.isRunning && rawAmps.contains { $0 > 0.02 }
-                
-                // Initialize barHeights array if needed
-                if barHeights.count != count {
-                    barHeights = Array(repeating: 2.5, count: count)
-                }
-                
-                let minHeight: CGFloat = 2.5
-                let maxHeight: CGFloat = 17.5 // True ceiling: punches up inside 20pt container with 1.25pt padding
-                
-                // Authentic physical bass energy from lower FFT bands (Bands 0-2: Sub-bass 60Hz-250Hz)
-                var bassEnergy: CGFloat = 0.0
-                if hasLiveAudio && rawAmps.count >= 3 {
-                    bassEnergy = (rawAmps[0] * 0.45 + rawAmps[1] * 0.35 + rawAmps[2] * 0.20)
-                }
-                
-                // On loud bass transients (beat drops, 808 kicks), surge ALL bars to the ceiling simultaneously
-                let bassSurge: CGFloat
-                if bassEnergy > 0.58 {
-                    let surgeNorm = min(1.0, (bassEnergy - 0.58) / 0.28)
-                    bassSurge = pow(surgeNorm, 1.20)
-                } else {
-                    bassSurge = 0.0
-                }
-                
-                let timePhase = now.timeIntervalSince1970 * 4.0
-                
-                for i in 0..<count {
-                    let rawAmp: CGFloat
-                    if hasLiveAudio && !rawAmps.isEmpty {
-                        let step = Double(rawAmps.count) / Double(count)
-                        let srcIdx = min(rawAmps.count - 1, max(0, Int(Double(i) * step)))
-                        rawAmp = CGFloat(rawAmps[srcIdx])
-                    } else {
-                        rawAmp = 0.0
-                    }
-                    
-                    let energy: CGFloat
-                    if !spotify.isPlaying {
-                        energy = 0.02
-                    } else if hasLiveAudio {
-                        // Dynamic acoustic band response:
-                        // Non-linear power expansion so transients punch out clearly
-                        let bandAmp = pow(rawAmp, 0.85)
-                        // Heavy bass transient surge lifts ALL bars to the ceiling
-                        let combined = max(bandAmp, bassSurge * 0.98 + bandAmp * 0.20)
-                        energy = min(1.0, max(0.04, combined))
-                    } else {
-                        // Gentle breathing wave ONLY when idle / no live audio
-                        let barPhase = Double(i) * 0.55
-                        let wave = (sin(timePhase * 1.2 + barPhase) * cos(timePhase * 0.5 + Double(i) * 0.25) + 1.0) * 0.5
-                        energy = min(0.65, max(0.10, CGFloat(wave) * 0.40))
-                    }
-                    
-                    let targetH = minHeight + energy * (maxHeight - minHeight)
-                    let currentH = barHeights[i]
-                    
-                    // Apple Asymmetric Ballistics:
-                    // Attack (Rising): Snappy punch (~25ms rise)
-                    // Decay (Falling): Smooth gravity dissipation (~180ms fall)
-                    let speed: CGFloat
-                    if targetH > currentH {
-                        speed = CGFloat(1.0 - exp(-38.0 * deltaTime))
-                    } else {
-                        speed = CGFloat(1.0 - exp(-14.0 * deltaTime))
-                    }
-                    
-                    let newH = currentH + (targetH - currentH) * speed
-                    barHeights[i] = newH
-                    
-                    let y = (20.0 - newH) / 2.0
-                    let barRect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: y, width: barW, height: newH)
-                    clipPath.append(NSBezierPath(roundedRect: barRect, xRadius: barW / 2.0, yRadius: barW / 2.0))
-                }
-                
-                // 1. Apple Music subtle bloom behind bars
-                let theme = cachedWaveformTheme
-                NSGraphicsContext.current?.saveGraphicsState()
-                let outerGlow = NSShadow()
-                outerGlow.shadowColor = theme.glowColor.withAlphaComponent(0.35)
-                outerGlow.shadowOffset = .zero
-                outerGlow.shadowBlurRadius = 3.0
-                outerGlow.set()
-                theme.glowColor.withAlphaComponent(0.15).setFill()
-                clipPath.fill()
-                NSGraphicsContext.current?.restoreGraphicsState()
-                
-                // 2. Vector gradient fill with TRUE-TONE album colors (no washed-out white wash)
-                NSGraphicsContext.current?.saveGraphicsState()
-                clipPath.addClip()
-                let waveRect = NSRect(x: startX, y: (20.0 - maxHeight) / 2.0, width: vizWidth, height: maxHeight)
-                if let gradient = NSGradient(colors: [theme.topColor, theme.bottomColor]) {
-                    gradient.draw(in: waveRect, angle: 90)
-                } else {
-                    theme.topColor.setFill()
-                    clipPath.fill()
-                }
-                NSGraphicsContext.current?.restoreGraphicsState()
-            }
-            
-            // 3. Draw album art
-            if let art = cachedAlbumArtImage, showAlbumArt {
-                art.draw(at: NSPoint(x: artX, y: 0), from: NSRect(origin: .zero, size: art.size), operation: .copy, fraction: 1.0)
-            }
-            combinedImage.unlockFocus()
-            
-            combinedImage.isTemplate = false
-            button.image = combinedImage
-            button.imagePosition = .imageOnly
-            button.needsDisplay = true
-            
         } else {
-            // No track playing
+            cachedLyricsImage = nil
+            lastLyricsRenderKey = nil
+        }
+        
+        // --- 2. ART & WAVEFORM UPDATING ---
+        let artKey = "\(track.id)_\(spotify.artworkRevision)"
+        if cachedAlbumArtTrackId != artKey {
+            cachedAlbumArtTrackId = artKey
+            
+            if let directImage = spotify.activeArtworkImage {
+                let roundedImage = self.roundCorners(of: directImage, size: NSSize(width: 20, height: 20), radius: 4)
+                let theme = ColorExtractor.extractWaveformTheme(from: directImage)
+                self.cachedAlbumArtImage = roundedImage
+                self.cachedWaveformTheme = theme
+            } else {
+                let fallback = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: nil)
+                fallback?.isTemplate = true
+                self.cachedAlbumArtImage = fallback
+                self.cachedWaveformTheme = .fallback
+            }
+        }
+        
+        var waveformBars = 14
+        if UserDefaults.standard.object(forKey: "waveformBars") != nil {
+            waveformBars = min(128, max(0, UserDefaults.standard.integer(forKey: "waveformBars")))
+        }
+        let barCount = waveformBars
+        let barW: CGFloat = 2.0
+        let barSp: CGFloat = 1.5
+        let vizWidth: CGFloat = (barCount > 0 && spotify.isPlaying) ? CGFloat(barCount) * (barW + barSp) : 0
+        let artWidth: CGFloat = (showAlbumArt && cachedAlbumArtImage != nil) ? 20.0 : 0
+        let lyricsWidth: CGFloat = (showLyrics && lyricsImgToDraw != nil) ? canvasWidth : 0
+        
+        let gap: CGFloat = 8.0
+        
+        var totalWidth: CGFloat = 0
+        var lyricsX: CGFloat = 0
+        var vizX: CGFloat = 0
+        var artX: CGFloat = 0
+        
+        if lyricsWidth > 0 {
+            lyricsX = totalWidth
+            totalWidth += lyricsWidth
+        }
+        if vizWidth > 0 {
+            if totalWidth > 0 { totalWidth += gap }
+            vizX = totalWidth
+            totalWidth += vizWidth
+        }
+        if artWidth > 0 {
+            if totalWidth > 0 { totalWidth += gap }
+            artX = totalWidth
+            totalWidth += artWidth
+        }
+        totalWidth = max(24.0, totalWidth)
+        let quantizedWidth = ceil(totalWidth / 4.0) * 4.0
+        
+        // Calculate waveform physics & ballistics
+        if vizWidth > 0 {
+            let rawAmps = audioAnalyzer.amplitudes
+            let count = barCount
+            let hasLiveAudio = audioAnalyzer.isRunning && rawAmps.contains { $0 > 0.02 }
+            
+            // Initialize barHeights array if needed
+            if barHeights.count != count {
+                barHeights = Array(repeating: 2.5, count: count)
+            }
+            
+            let minHeight: CGFloat = 2.5
+            let maxHeight: CGFloat = 17.5 // True ceiling: punches up inside 20pt container with 1.25pt padding
+            
+            // Authentic physical bass energy from lower FFT bands (Bands 0-2: Sub-bass 60Hz-250Hz)
+            var bassEnergy: CGFloat = 0.0
+            if hasLiveAudio && rawAmps.count >= 3 {
+                bassEnergy = (rawAmps[0] * 0.45 + rawAmps[1] * 0.35 + rawAmps[2] * 0.20)
+            }
+            
+            // On loud bass transients (beat drops, 808 kicks), surge ALL bars to the ceiling simultaneously
+            let bassSurge: CGFloat
+            if bassEnergy > 0.58 {
+                let surgeNorm = min(1.0, (bassEnergy - 0.58) / 0.28)
+                bassSurge = pow(surgeNorm, 1.20)
+            } else {
+                bassSurge = 0.0
+            }
+            
+            let timePhase = now.timeIntervalSince1970 * 4.0
+            
+            for i in 0..<count {
+                let rawAmp: CGFloat
+                if hasLiveAudio && !rawAmps.isEmpty {
+                    let step = Double(rawAmps.count) / Double(count)
+                    let srcIdx = min(rawAmps.count - 1, max(0, Int(Double(i) * step)))
+                    rawAmp = CGFloat(rawAmps[srcIdx])
+                } else {
+                    rawAmp = 0.0
+                }
+                
+                let energy: CGFloat
+                if !spotify.isPlaying {
+                    energy = 0.02
+                } else if hasLiveAudio {
+                    let bandAmp = pow(rawAmp, 0.85)
+                    let combined = max(bandAmp, bassSurge * 0.98 + bandAmp * 0.20)
+                    energy = min(1.0, max(0.04, combined))
+                } else {
+                    let barPhase = Double(i) * 0.55
+                    let wave = (sin(timePhase * 1.2 + barPhase) * cos(timePhase * 0.5 + Double(i) * 0.25) + 1.0) * 0.5
+                    energy = min(0.65, max(0.10, CGFloat(wave) * 0.40))
+                }
+                
+                let targetH = minHeight + energy * (maxHeight - minHeight)
+                let currentH = barHeights[i]
+                
+                let speed: CGFloat
+                if targetH > currentH {
+                    speed = CGFloat(1.0 - exp(-38.0 * deltaTime))
+                } else {
+                    speed = CGFloat(1.0 - exp(-14.0 * deltaTime))
+                }
+                
+                let newH = currentH + (targetH - currentH) * speed
+                barHeights[i] = newH
+            }
+        } else if !barHeights.isEmpty {
+            barHeights.removeAll()
+        }
+        
+        let isInterlude = currentLineText.contains("✦")
+        let currentKey = MenuBarRenderKey(
+            trackId: track.id,
+            isPlaying: spotify.isPlaying,
+            isDark: isDark,
+            showLyrics: showLyrics,
+            showAlbumArt: showAlbumArt,
+            waveformBars: barCount,
+            text: currentLineText,
+            artRevision: spotify.artworkRevision,
+            quantizedWidth: quantizedWidth,
+            lyricsX: lyricsX,
+            lyricsWidth: lyricsWidth,
+            marqueeOffsetQuantized: Int(marqueeOffset * 2.0),
+            wordLeadXQuantized: Int((wordLeadX ?? -100.0) * 2.0),
+            transitionProgressQuantized: Int(transitionProgress * 100.0),
+            isSparkling: isSparkling,
+            sparkleFrame: isSparkling ? Int(sparkleTime * 30.0) : 0,
+            isInterlude: isInterlude,
+            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 30.0) : 0,
+            vizWidth: vizWidth,
+            barHeightsQuantized: barHeights.map { Int($0 * 2.0) }
+        )
+
+        if currentKey == lastMenuBarRenderKey && !prefsChanged && !forceRedrawLyrics {
+            return
+        }
+        lastMenuBarRenderKey = currentKey
+        forceRedrawLyrics = false
+        
+        let combinedImage = NSImage(size: NSSize(width: quantizedWidth, height: 20))
+        combinedImage.lockFocus()
+        
+        // 1. Draw contrast backing capsule and lyrics
+        if let lyricsImg = lyricsImgToDraw {
+            let textContainerRect = NSRect(x: lyricsX, y: 0, width: lyricsWidth, height: 20)
+            let backingPath = NSBezierPath(roundedRect: textContainerRect, xRadius: 4, yRadius: 4)
+            NSColor(white: isDark ? 0.2 : 0.0, alpha: isDark ? 0.35 : 0.45).setFill()
+            backingPath.fill()
+            
+            lyricsImg.draw(at: NSPoint(x: lyricsX, y: 0), from: NSRect(origin: .zero, size: lyricsImg.size), operation: .sourceOver, fraction: 1.0)
+        }
+        
+        // 2. Draw Waveform (Apple-Style Authentic FFT Equalizer with Bass-Ceiling Surge)
+        if vizWidth > 0 {
+            let startX = vizX
+            let clipPath = NSBezierPath()
+            let maxHeight: CGFloat = 17.5
+            
+            for i in 0..<barCount {
+                let newH = i < barHeights.count ? barHeights[i] : 2.5
+                let y = (20.0 - newH) / 2.0
+                let barRect = NSRect(x: startX + CGFloat(i) * (barW + barSp), y: y, width: barW, height: newH)
+                clipPath.append(NSBezierPath(roundedRect: barRect, xRadius: barW / 2.0, yRadius: barW / 2.0))
+            }
+            
+            // 1. Apple Music subtle bloom behind bars
+            let theme = cachedWaveformTheme
+            NSGraphicsContext.current?.saveGraphicsState()
+            let outerGlow = NSShadow()
+            outerGlow.shadowColor = theme.glowColor.withAlphaComponent(0.35)
+            outerGlow.shadowOffset = .zero
+            outerGlow.shadowBlurRadius = 3.0
+            outerGlow.set()
+            theme.glowColor.withAlphaComponent(0.15).setFill()
+            clipPath.fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
+            
+            // 2. Vector gradient fill with TRUE-TONE album colors (no washed-out white wash)
+            NSGraphicsContext.current?.saveGraphicsState()
+            clipPath.addClip()
+            let waveRect = NSRect(x: startX, y: (20.0 - maxHeight) / 2.0, width: vizWidth, height: maxHeight)
+            if let gradient = NSGradient(colors: [theme.topColor, theme.bottomColor]) {
+                gradient.draw(in: waveRect, angle: 90)
+            } else {
+                theme.topColor.setFill()
+                clipPath.fill()
+            }
+            NSGraphicsContext.current?.restoreGraphicsState()
+        }
+        
+        // 3. Draw album art
+        if let art = cachedAlbumArtImage, showAlbumArt {
+            art.draw(at: NSPoint(x: artX, y: 0), from: NSRect(origin: .zero, size: art.size), operation: .copy, fraction: 1.0)
+        }
+        combinedImage.unlockFocus()
+        
+        combinedImage.isTemplate = false
+        button.image = combinedImage
+        button.imagePosition = .imageOnly
+        button.needsDisplay = true
+        
+    } else {
+        // No track playing
+        if !isShowingIdleIcon {
             if let button = self.statusItem?.button {
                 let img = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: "Lyrics Menu Bar")
                 img?.isTemplate = true
                 button.image = img
                 button.imagePosition = .imageOnly
             }
+            isShowingIdleIcon = true
+            lastMenuBarRenderKey = nil
+            lastLyricsRenderKey = nil
+            cachedLyricsImage = nil
+            cachedAlbumArtTrackId = nil
+            cachedAlbumArtImage = nil
         }
+        return
+    }
     }
 }
