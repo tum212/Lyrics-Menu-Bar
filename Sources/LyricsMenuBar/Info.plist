@@ -23,11 +23,11 @@
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Lyrics Menu Bar requires audio access to visualize live sound as a waveform</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Lyrics Menu Bar ต้องการสิทธิ์ควบคุม Spotify และ Apple Music เพื่อแสดงชื่อเพลง เนื้อร้อง และควบคุม playback บน Menu Bar</string>
+	<string>Lyrics Menu Bar requires permission to control Spotify and Apple Music to display track info, synchronized lyrics, and playback controls in the menu bar.</string>
 	<key>NSAppleScriptEnabled</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>
-	<string>15.0</string>
+	<string>14.2</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Puwadon. Released under the MIT License.</string>
 </dict>
