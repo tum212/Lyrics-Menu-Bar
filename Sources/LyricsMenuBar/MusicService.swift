@@ -651,6 +651,11 @@ public final class MusicService: NSObject, ObservableObject {
         }
         if isPlayStateChanged {
             self.isPlaying = isPlaying
+            if isPlaying {
+                if self.timer == nil { self.startPolling() }
+            } else {
+                self.stopPolling()
+            }
         }
         
         // Preserve loaded artwork across polls when track ID is unchanged

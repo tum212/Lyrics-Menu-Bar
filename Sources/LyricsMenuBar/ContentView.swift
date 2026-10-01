@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Native Optical Liquid Glass (Control Center Material)
+// MARK: - Native Optical Glass Backdrop
 struct VisualEffectBackground: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .popover
     var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
@@ -112,13 +112,7 @@ struct ContentView: View {
 
                 // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
                 GeometryReader { geometry in
-                    if musicService.isPanelVisible {
-                        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
-                            lyricsPanel(currentDate: timeline.date, containerWidth: geometry.size.width)
-                        }
-                    } else {
-                        lyricsPanel(currentDate: .now, containerWidth: geometry.size.width)
-                    }
+                    lyricsPanel(containerWidth: geometry.size.width)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
@@ -155,6 +149,7 @@ struct ContentView: View {
             Text(musicService.currentTrack?.name ?? "No Music Playing")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
+                .shadow(color: Color.black.opacity(0.45), radius: 2, x: 0, y: 1)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: 130, alignment: .center)
@@ -162,6 +157,7 @@ struct ContentView: View {
             Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.white.opacity(0.7))
+                .shadow(color: Color.black.opacity(0.40), radius: 2, x: 0, y: 1)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: 130, alignment: .center)
@@ -222,8 +218,7 @@ struct ContentView: View {
 
     // MARK: - Lyrics Panel with Apple Music style scroll & Click-to-Seek
     @ViewBuilder
-    private func lyricsPanel(currentDate: Date, containerWidth: CGFloat) -> some View {
-        let info = getActiveLyricsInfo(currentDate: currentDate)
+    private func lyricsPanel(containerWidth: CGFloat) -> some View {
         let allLyrics = lyricsService.lyrics
 
         if allLyrics.isEmpty {
@@ -232,70 +227,25 @@ struct ContentView: View {
                 .foregroundColor(.white.opacity(0.65))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         } else {
-            let activeIdx = allLyrics.firstIndex(where: { $0.id == info.activeId }) ?? 0
-
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(allLyrics.enumerated()), id: \.element.id) { idx, line in
-                            let isActive = line.id == info.activeId
-                            let isPast = idx < activeIdx
-
-                            LyricLineRowView(
-                                line: line,
-                                isActive: isActive,
-                                isPast: isPast,
-                                isLyricsHovered: isLyricsHovered,
-                                lyricsFocusMode: lyricsFocusMode,
-                                currentTime: info.currentTime,
-                                fallbackProgress: info.progress,
-                                isUnsynced: info.isUnsynced,
-                                containerWidth: containerWidth,
-                                onSeek: {
-                                    let seekTime: TimeInterval
-                                    if line.time > 0 {
-                                        seekTime = line.time
-                                    } else {
-                                        let duration = spotify.currentTrack?.duration ?? 180.0
-                                        seekTime = (Double(idx) / Double(max(1, allLyrics.count))) * duration
-                                    }
-                                    spotify.seek(to: seekTime)
-                                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-                                }
-                            )
-                            .id(line.id)
-                        }
+            let isUnsynced = allLyrics.count > 1 && (allLyrics.last?.time ?? 0) == 0
+            LyricsStreamView(
+                allLyrics: allLyrics,
+                containerWidth: containerWidth,
+                musicService: musicService,
+                lyricsService: lyricsService,
+                lyricsFocusMode: lyricsFocusMode,
+                isUnsynced: isUnsynced,
+                onSeek: { idx, line in
+                    let seekTime: TimeInterval
+                    if line.time > 0 {
+                        seekTime = line.time
+                    } else {
+                        let duration = spotify.currentTrack?.duration ?? 180.0
+                        seekTime = (Double(idx) / Double(max(1, allLyrics.count))) * duration
                     }
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 4)
+                    spotify.seek(to: seekTime)
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                 }
-                .onHover { hovering in
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        isLyricsHovered = hovering
-                    }
-                }
-                // Apple Music style: scroll current line smoothly to ~35% from top
-                .onChange(of: info.activeId) { [proxy] newId in
-                    if let id = newId {
-                        withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) {
-                            proxy.scrollTo(id, anchor: UnitPoint(x: 0, y: 0.35))
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Fade mask top & bottom for Apple Music feel
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0),
-                        .init(color: .black, location: 0.08),
-                        .init(color: .black, location: 0.85),
-                        .init(color: .clear, location: 1)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
             )
         }
     }
@@ -318,7 +268,7 @@ struct ContentView: View {
         )
     }
 
-    private func getActiveLyricsInfo(currentDate: Date) -> (lines: [LyricLine], progress: Double, activeId: UUID?, activeLine: LyricLine?, currentTime: TimeInterval, isUnsynced: Bool) {
+    private func getActiveLyricsInfo() -> (lines: [LyricLine], progress: Double, activeId: UUID?, activeLine: LyricLine?, currentTime: TimeInterval, isUnsynced: Bool) {
         let time = spotify.currentTime
 
         let allLyrics = lyricsService.lyrics
@@ -356,6 +306,106 @@ struct ContentView: View {
             }
             return (allLyrics, progress, activeLine.id, activeLine, time, false)
         }
+    }
+}
+
+// MARK: - 60 FPS High-Precision Apple Physics Lyrics Stream
+struct LyricsStreamView: View {
+    let allLyrics: [LyricLine]
+    let containerWidth: CGFloat
+    @ObservedObject var musicService: MusicService
+    @ObservedObject var lyricsService: LyricsService
+    let lyricsFocusMode: Bool
+    let isUnsynced: Bool
+    let onSeek: (Int, LyricLine) -> Void
+    
+    @State private var activeLineId: UUID? = nil
+    @State private var isLyricsHovered: Bool = false
+    
+    // High-precision 60 FPS clock for instantaneous, jitter-free lyric line tracking
+    private let clock = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+    
+    var body: some View {
+        let activeIdx = allLyrics.firstIndex(where: { $0.id == activeLineId }) ?? 0
+        
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(allLyrics.enumerated()), id: \.element.id) { idx, line in
+                        let isActive = line.id == activeLineId
+                        let isPast = idx < activeIdx
+                        
+                        LyricLineRowView(
+                            line: line,
+                            isActive: isActive,
+                            isPast: isPast,
+                            isLyricsHovered: isLyricsHovered,
+                            lyricsFocusMode: lyricsFocusMode,
+                            musicService: musicService,
+                            fallbackProgress: 0.0,
+                            isUnsynced: isUnsynced,
+                            containerWidth: containerWidth,
+                            onSeek: { onSeek(idx, line) }
+                        )
+                        .id(line.id)
+                    }
+                }
+                .padding(.vertical, 14)
+                .padding(.horizontal, 4)
+            }
+            .onHover { hovering in
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    isLyricsHovered = hovering
+                }
+            }
+            .onReceive(clock) { _ in
+                guard musicService.isPlaying else { return }
+                let time = musicService.currentTime
+                
+                var targetId: UUID? = nil
+                if isUnsynced {
+                    let duration = musicService.currentTrack?.duration ?? 100.0
+                    let progress = max(0, min(1, time / duration))
+                    var currentIndex = Int(progress * Double(allLyrics.count))
+                    if currentIndex >= allLyrics.count { currentIndex = allLyrics.count - 1 }
+                    targetId = allLyrics[currentIndex].id
+                } else {
+                    if let firstTime = allLyrics.first?.time, time >= firstTime {
+                        for line in allLyrics {
+                            if line.time <= time { targetId = line.id } else { break }
+                        }
+                    }
+                }
+                
+                if targetId != activeLineId {
+                    // Apple Music pure physics spring: response 0.65, dampingFraction 0.86
+                    withAnimation(.spring(response: 0.65, dampingFraction: 0.86)) {
+                        activeLineId = targetId
+                    }
+                    if let newId = targetId {
+                        withAnimation(.spring(response: 0.65, dampingFraction: 0.86)) {
+                            proxy.scrollTo(newId, anchor: UnitPoint(x: 0, y: 0.38))
+                        }
+                    }
+                }
+            }
+            .onChange(of: musicService.currentTrack?.id) { _ in
+                activeLineId = nil
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .mask(
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.08),
+                    .init(color: .black, location: 0.85),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 }
 
@@ -450,7 +500,7 @@ struct LyricLineRowView: View {
     let isPast: Bool
     let isLyricsHovered: Bool
     let lyricsFocusMode: Bool
-    let currentTime: TimeInterval
+    @ObservedObject var musicService: MusicService
     let fallbackProgress: Double
     let isUnsynced: Bool
     let containerWidth: CGFloat
@@ -470,9 +520,13 @@ struct LyricLineRowView: View {
                 unsyncedView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
             } else if isActive {
                 if !line.words.isEmpty {
-                    wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
+                    TimelineView(.animation(paused: !musicService.isPlaying)) { context in
+                        wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                    }
                 } else {
-                    fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
+                    TimelineView(.animation(paused: !musicService.isPlaying)) { context in
+                        fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                    }
                 }
             } else {
                 // High-performance static view for inactive lines: Zero GeometryReaders, zero masks, zero gradients!
@@ -492,7 +546,7 @@ struct LyricLineRowView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: lyricsFocusMode)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isActive)
+        .animation(.spring(response: 0.65, dampingFraction: 0.86), value: isActive)
         .onTapGesture {
             onSeek()
         }
@@ -516,6 +570,7 @@ struct LyricLineRowView: View {
                     .font(.system(size: fontSize, weight: fontWeight))
                     .italic(isBgVocal)
                     .foregroundColor(.white.opacity(effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40)))
+                    .shadow(color: Color.black.opacity(0.35), radius: 2, x: 0, y: 1)
                     .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
             }
         }
@@ -541,10 +596,10 @@ struct LyricLineRowView: View {
     }
     
     @ViewBuilder
-    private func wordKaraokeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool) -> some View {
+    private func wordKaraokeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
         let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
         let wrappedLines = LyricLineLayoutCache.shared.wrappedWords(for: line, width: effectiveWidth, font: font)
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach(0..<wrappedLines.count, id: \.self) { lineIdx in
                 let rowWords = wrappedLines[lineIdx]
                 HStack(spacing: 5) {
@@ -562,16 +617,20 @@ struct LyricLineRowView: View {
                         )
                     }
                 }
+                .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
             }
         }
         .frame(width: effectiveWidth, alignment: .leading)
     }
     
     @ViewBuilder
-    private func fallbackWipeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool) -> some View {
+    private func fallbackWipeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
         let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
         let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
         let totalChars = max(1, lines.reduce(0) { $0 + $1.count })
+        
+        let activeDuration = max(0.1, line.endTime - line.time)
+        let localProgress = max(0.0, min(1.0, (currentTime - line.time) / activeDuration))
         
         var charAccumulator = 0
         let lineTiming: [(ls: Double, le: Double)] = lines.map { l in
@@ -588,7 +647,7 @@ struct LyricLineRowView: View {
                 let ls = lineTiming[i].ls
                 let le = lineTiming[i].le
                 
-                let rawLp = (fallbackProgress - ls) / max(0.001, (le - ls))
+                let rawLp = (localProgress - ls) / max(0.001, (le - ls))
                 let lp = max(0, min(1, rawLp))
                 
                 let fadeWidth: CGFloat = 24
@@ -967,7 +1026,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
         @objc func showAbout() {
             let alert = NSAlert()
             alert.messageText = "Lyrics Menu Bar 1.2.0"
-            alert.informativeText = "Native Liquid Glass UI for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
+            alert.informativeText = "Native Glass HUD for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()

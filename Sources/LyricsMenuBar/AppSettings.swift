@@ -10,7 +10,6 @@ public enum AppSettingKey {
     public static let showLyrics = "showLyrics"
     public static let showAlbumArt = "showAlbumArt"
     public static let audioFeaturesEnabled = "audioFeaturesEnabled"
-    public static let specularEdgeEnabled = "specularEdgeEnabled"
     
     // Music Source
     public static let musicSourceMode = "musicSourceMode"
@@ -38,7 +37,6 @@ public enum AppDefaults {
             AppSettingKey.showLyrics: true,
             AppSettingKey.showAlbumArt: true,
             AppSettingKey.audioFeaturesEnabled: true,
-            AppSettingKey.specularEdgeEnabled: true,
             AppSettingKey.musicSourceMode: "Auto",
             AppSettingKey.waveformBars: 14,
             AppSettingKey.hapticEnabled: false,

@@ -150,47 +150,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
         panel.level = .floating
 
-        // 2. Setup Native Liquid Glass Material Layer (AppKit GPU Compositing)
-        let visualEffect = NSVisualEffectView()
-        visualEffect.material = .hudWindow
-        visualEffect.blendingMode = .behindWindow
-        visualEffect.state = .active
-        visualEffect.wantsLayer = true
-        visualEffect.layer?.cornerRadius = 20
-        visualEffect.layer?.masksToBounds = false
-
-        let mask = NSImage(size: NSSize(width: 480, height: 240), flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 20, yRadius: 20).fill()
-            return true
-        }
-        visualEffect.maskImage = mask
-
-        // 3. Setup HostingView & Pin to VisualEffectView
+        // Setup Native GPU Glass Backdrop
+        let glassView = HUDGlassView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 480, height: 240))
+        glassView.autoresizingMask = [.width, .height]
+        
         let hostingView = NSHostingView(rootView: contentView)
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        hostingView.frame = glassView.bounds
+        hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
 
-        visualEffect.addSubview(hostingView)
-        NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: visualEffect.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor)
-        ])
-
-        panel.contentView = visualEffect
+        glassView.addSubview(hostingView)
+        panel.contentView = glassView
         panel.delegate = self
         self.panel = panel
         
@@ -317,10 +300,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func startMenuBarUpdater() {
         stopMenuBarUpdater()
         
-        // 30 FPS menu bar timer on .common RunLoop
-        // Eliminates WindowServer 40% CPU usage and Mach IPC bitmap serialization flood
-        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 30.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
-        timer.tolerance = 0.004
+        // 60 FPS menu bar timer on .common RunLoop (Silky smooth 60 FPS)
+        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
+        timer.tolerance = 0.001
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
     }
@@ -678,9 +660,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     wordLeadXQuantized: Int((wordLeadX ?? -100.0) * 2.0),
                     transitionProgressQuantized: Int(transitionProgress * 100.0),
                     isSparkling: isSparkling,
-                    sparkleFrame: isSparkling ? Int(sparkleTime * 30.0) : 0,
+                    sparkleFrame: isSparkling ? Int(sparkleTime * 60.0) : 0,
                     isInterlude: isInterlude,
-                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 30.0) : 0
+                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 60.0) : 0
                 )
                 
                 if currentLyricsKey == lastLyricsRenderKey, let cached = cachedLyricsImage {
@@ -1013,9 +995,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             wordLeadXQuantized: Int((wordLeadX ?? -100.0) * 2.0),
             transitionProgressQuantized: Int(transitionProgress * 100.0),
             isSparkling: isSparkling,
-            sparkleFrame: isSparkling ? Int(sparkleTime * 30.0) : 0,
+            sparkleFrame: isSparkling ? Int(sparkleTime * 60.0) : 0,
             isInterlude: isInterlude,
-            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 30.0) : 0,
+            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 60.0) : 0,
             vizWidth: vizWidth,
             barHeightsQuantized: barHeights.map { Int($0 * 2.0) }
         )
