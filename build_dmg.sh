@@ -30,20 +30,21 @@ build_dmg() {
     # ----- 1. BUILD -------------------------------------------------------
     cd "$SCRIPT_DIR"
     DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-        swift build -c release \
-        -Xswiftc "-target" -Xswiftc "arm64-apple-macos${MIN_OS}" \
-        -Xlinker "-macos_version_min" -Xlinker "${MIN_OS}" \
+        swift build -c release --arch arm64 --arch x86_64 \
         2>&1 | grep -v "^warning:" || true
-    # Try without target flags if above fails (older Xcode)
-    if [ ! -f "$SCRIPT_DIR/.build/release/LyricsMenuBar" ]; then
-        DEVELOPER_DIR="/Applications/Xcode 00.17.43.app/Contents/Developer" swift build -c release || true
+
+    BINARY_PATH=""
+    if [ -f "$SCRIPT_DIR/.build/apple/Products/Release/LyricsMenuBar" ]; then
+        BINARY_PATH="$SCRIPT_DIR/.build/apple/Products/Release/LyricsMenuBar"
+    elif [ -f "$SCRIPT_DIR/.build/release/LyricsMenuBar" ]; then
+        BINARY_PATH="$SCRIPT_DIR/.build/release/LyricsMenuBar"
     fi
 
     echo "   Build complete ✓"
 
     # ----- 2. ASSEMBLE APP BUNDLE -----------------------------------------
     echo "=== Packaging app bundle ==="
-    cp .build/release/LyricsMenuBar "Lyrics Menu Bar.app/Contents/MacOS/LyricsMenuBar"
+    cp "$BINARY_PATH" "Lyrics Menu Bar.app/Contents/MacOS/LyricsMenuBar"
     cp icon.icns "Lyrics Menu Bar.app/Contents/Resources/AppIcon.icns" 2>/dev/null || true
     cp Sources/LyricsMenuBar/Info.plist "Lyrics Menu Bar.app/Contents/Info.plist"
 
@@ -140,14 +141,14 @@ APPLESCRIPT
 }
 
 # ---- dispatch ----
-build_dmg "Mac" "14.0"
+build_dmg "Mac" "14.2"
 
 echo ""
-echo "═══════════════════════════════════════"
-echo "📦 DMG files ready to distribute:"
+echo "======================================="
+echo "DMG files ready to distribute:"
 ls -lh "$SCRIPT_DIR"/*.dmg 2>/dev/null | awk '{print "   "$NF, "("$5")"}'
 echo ""
-echo "🔓 Gatekeeper tips for recipients:"
-echo "   • Right-click app → Open  (bypass once)"
-echo "   • Or: xattr -cr /Applications/SpoticatMenuBar.app"
-echo "═══════════════════════════════════════"
+echo "Gatekeeper tips for recipients:"
+echo "   - Right-click app -> Open (bypass once)"
+echo "   - Or: xattr -cr '/Applications/Lyrics Menu Bar.app'"
+echo "======================================="
