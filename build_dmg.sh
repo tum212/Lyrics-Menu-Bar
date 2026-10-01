@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# build_dmg.sh — Build SpoticatMenuBar and package into a
+# build_dmg.sh - Build SpoticatMenuBar and package into a
 #                polished DMG with background art + Gatekeeper bypass
 #
 # Usage:

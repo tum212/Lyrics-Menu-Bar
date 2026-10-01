@@ -940,12 +940,12 @@ struct NativeSettingsMenu: NSViewRepresentable {
             let feelMenu = NSMenu(title: "Haptic Feel")
             let types: [(tag: Int, label: String, desc: String)] = [
                 (0, "Auto",   "Auto (kick=6, beat=4)"),
-                (1, "Type 1", "1 — Very light tap"),
-                (2, "Type 2", "2 — Light-medium click"),
-                (3, "Type 3", "3 — Standard click"),
-                (4, "Type 4", "4 — Sharp crisp ★ Pacinian"),
-                (5, "Type 5", "5 — Medium-heavy"),
-                (6, "Type 6", "6 — Deep sub-bass thump")
+                (1, "Type 1", "1 - Very light tap"),
+                (2, "Type 2", "2 - Light-medium click"),
+                (3, "Type 3", "3 - Standard click"),
+                (4, "Type 4", "4 - Sharp crisp (Pacinian)"),
+                (5, "Type 5", "5 - Medium-heavy"),
+                (6, "Type 6", "6 - Deep sub-bass thump")
             ]
             for t in types {
                 let item = NSMenuItem(title: t.desc, action: #selector(setHapticType(_:)), keyEquivalent: "")
