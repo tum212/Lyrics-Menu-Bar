@@ -1,8 +1,8 @@
 {
   "version": "1.3.1",
-  "build": 51,
+  "build": 52,
   "release_date": "2026-10-02",
-  "release_notes": "Fix Cover Flow desync on Previous button (>3s rewinds without sliding deck), eliminate artwork mismatch by preventing queue artwork pollution, and eliminate blinking with zero-latency cached artwork.",
+  "release_notes": "Official Apple Cover Flow preset from ashishgogula/coverflow: 67-degree rotation, 54pt center gap, 18pt stack spacing (no reflection), continuous multi-card deck, and parallel RAM pre-caching for zero lag.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {

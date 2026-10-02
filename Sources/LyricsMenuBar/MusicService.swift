@@ -817,12 +817,14 @@ public final class MusicService: NSObject, ObservableObject {
                     if queued.count >= 8 { break }
                 }
                 
-                // Pre-cache the upcoming card image directly into RAM so it is instant
-                if let firstUpcoming = queued.first, let artURL = firstUpcoming.artworkURL,
-                   let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(artURL) {
-                    let key = ArtworkCache.cacheKey(for: firstUpcoming)
-                    if ArtworkCache.shared.image(forKey: key) == nil {
-                        _ = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: key)
+                // Pre-cache upcoming card images directly into RAM so it is instant
+                for upcoming in queued.prefix(3) {
+                    if let artURL = upcoming.artworkURL,
+                       let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(artURL) {
+                        let key = ArtworkCache.cacheKey(for: upcoming)
+                        if ArtworkCache.shared.image(forKey: key) == nil {
+                            _ = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: key)
+                        }
                     }
                 }
                 
