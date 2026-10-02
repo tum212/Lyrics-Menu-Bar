@@ -47,7 +47,7 @@ struct AlbumPeekCard: View {
             guard let t = track else { return }
             if t.artworkData != nil { return }
             let key = ArtworkCache.cacheKey(for: t)
-            if let cached = ArtworkCache.shared.image(forKey: key) {
+            if let cached = ArtworkCache.shared.image(forKey: key) ?? ArtworkCache.shared.image(forKey: t.id) {
                 loadedImage = cached
                 return
             }

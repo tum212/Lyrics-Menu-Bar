@@ -126,21 +126,46 @@ struct ContentView: View {
     private func syncDeckIfIdle() {
         guard !isTransitioning else { return }
         deckCenterTrack = musicService.currentTrack
-        deckCenterImage = musicService.activeArtworkImage
+        if let current = musicService.currentTrack {
+            let key = ArtworkCache.cacheKey(for: current)
+            deckCenterImage = musicService.activeArtworkImage
+                ?? ArtworkCache.shared.image(forKey: current.id)
+                ?? ArtworkCache.shared.image(forKey: key)
+                ?? current.artworkData.flatMap { NSImage(data: $0) }
+        } else {
+            deckCenterImage = nil
+        }
         
         deckLeftTrack = musicService.sessionHistory.last
         if let lt = deckLeftTrack {
-            deckLeftImage = ArtworkCache.shared.image(forKey: lt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: lt))
+            let key = ArtworkCache.cacheKey(for: lt)
+            deckLeftImage = ArtworkCache.shared.image(forKey: lt.id) ?? ArtworkCache.shared.image(forKey: key) ?? lt.artworkData.flatMap { NSImage(data: $0) }
         } else {
             deckLeftImage = nil
         }
         
         deckRightTrack = musicService.upcomingQueue.first
         if let rt = deckRightTrack {
-            deckRightImage = ArtworkCache.shared.image(forKey: rt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: rt))
+            let key = ArtworkCache.cacheKey(for: rt)
+            deckRightImage = ArtworkCache.shared.image(forKey: rt.id) ?? ArtworkCache.shared.image(forKey: key) ?? rt.artworkData.flatMap { NSImage(data: $0) }
         } else {
             deckRightImage = nil
         }
+    }
+
+    private var centerCardImage: NSImage? {
+        if let direct = deckCenterImage { return direct }
+        if let direct = musicService.activeArtworkImage { return direct }
+        if let track = deckCenterTrack ?? musicService.currentTrack {
+            let key = ArtworkCache.cacheKey(for: track)
+            if let cached = ArtworkCache.shared.image(forKey: key) ?? ArtworkCache.shared.image(forKey: track.id) {
+                return cached
+            }
+            if let data = track.artworkData, let img = NSImage(data: data) {
+                return img
+            }
+        }
+        return nil
     }
 
     private func skipToNext() {
@@ -160,39 +185,46 @@ struct ContentView: View {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
-            // Commit transition atomically:
-            deckLeftTrack = deckCenterTrack
-            deckLeftImage = deckCenterImage
-            
-            deckCenterTrack = deckRightTrack
-            deckCenterImage = deckRightImage
-            
-            deckRightTrack = musicService.upcomingQueue.first
-            if let rt = deckRightTrack {
-                deckRightImage = ArtworkCache.shared.image(forKey: rt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: rt))
-            } else {
-                deckRightImage = nil
-            }
-            
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 carouselSlide = 0.0
                 isTransitioning = false
+                
+                if let current = musicService.currentTrack, current.id != deckCenterTrack?.id {
+                    syncDeckIfIdle()
+                } else {
+                    deckLeftTrack = deckCenterTrack
+                    deckLeftImage = deckCenterImage
+                    if let rt = deckRightTrack {
+                        deckCenterTrack = rt
+                        deckCenterImage = deckRightImage
+                    }
+                    deckRightTrack = musicService.upcomingQueue.first
+                    if let rt = deckRightTrack {
+                        let key = ArtworkCache.cacheKey(for: rt)
+                        deckRightImage = ArtworkCache.shared.image(forKey: rt.id) ?? ArtworkCache.shared.image(forKey: key) ?? rt.artworkData.flatMap { NSImage(data: $0) }
+                    } else {
+                        deckRightImage = nil
+                    }
+                }
             }
-            syncDeckIfIdle()
         }
         schedulePeekRetraction()
     }
 
-    private func skipToPrevious() {
+    private func skipToPrevious(force: Bool = false) {
         guard !isTransitioning else { return }
         isTransitioning = true
         isActionTriggered = true
         
         syncDeckIfIdle()
         
-        musicService.previousTrack()
+        if force {
+            musicService.forcePreviousTrack()
+        } else {
+            musicService.previousTrack()
+        }
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
 
         // Slow, fluid, luxurious Apple spring curve (0.65s)
@@ -201,27 +233,30 @@ struct ContentView: View {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
-            // Commit transition atomically:
-            deckRightTrack = deckCenterTrack
-            deckRightImage = deckCenterImage
-            
-            deckCenterTrack = deckLeftTrack
-            deckCenterImage = deckLeftImage
-            
-            deckLeftTrack = musicService.sessionHistory.last
-            if let lt = deckLeftTrack {
-                deckLeftImage = ArtworkCache.shared.image(forKey: lt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: lt))
-            } else {
-                deckLeftImage = nil
-            }
-            
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 carouselSlide = 0.0
                 isTransitioning = false
+                
+                if let current = musicService.currentTrack, current.id != deckCenterTrack?.id {
+                    syncDeckIfIdle()
+                } else {
+                    deckRightTrack = deckCenterTrack
+                    deckRightImage = deckCenterImage
+                    if let lt = deckLeftTrack {
+                        deckCenterTrack = lt
+                        deckCenterImage = deckLeftImage
+                    }
+                    deckLeftTrack = musicService.sessionHistory.last
+                    if let lt = deckLeftTrack {
+                        let key = ArtworkCache.cacheKey(for: lt)
+                        deckLeftImage = ArtworkCache.shared.image(forKey: lt.id) ?? ArtworkCache.shared.image(forKey: key) ?? lt.artworkData.flatMap { NSImage(data: $0) }
+                    } else {
+                        deckLeftImage = nil
+                    }
+                }
             }
-            syncDeckIfIdle()
         }
         schedulePeekRetraction()
     }
@@ -318,7 +353,7 @@ struct ContentView: View {
                 .zIndex(max(1.0, 10.0 - abs(leftPos) * 8.0))
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    skipToPrevious()
+                    skipToPrevious(force: true)
                 }
 
                 // Card +1: Next Track
@@ -348,7 +383,7 @@ struct ContentView: View {
                 // Card 0: Current Playing Track
                 let centerPos = 0.0 + carouselSlide
                 Group {
-                    if let image = deckCenterImage ?? musicService.activeArtworkImage {
+                    if let image = centerCardImage {
                         Image(nsImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -419,7 +454,13 @@ struct ContentView: View {
             // Tactile Apple Music Playback Controls (Hover Glass Ring + Spring Depth)
             HStack(spacing: 8) {
                 AppleMusicControlButton(systemName: "backward.fill", size: 15, frameSize: 32) {
-                    skipToPrevious()
+                    if musicService.playbackPosition > 3.0 {
+                        musicService.previousTrack()
+                        schedulePeekRetraction()
+                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                    } else {
+                        skipToPrevious(force: false)
+                    }
                 }
 
                 AppleMusicControlButton(

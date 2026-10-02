@@ -1,8 +1,8 @@
 {
   "version": "1.3.1",
-  "build": 50,
+  "build": 51,
   "release_date": "2026-10-02",
-  "release_notes": "Senior Apple animation physics: natural settling duration for Genie effect, slower 0.75s squircle pop & morph, and visual snapshot deck for fluid continuous Cover Flow.",
+  "release_notes": "Fix Cover Flow desync on Previous button (>3s rewinds without sliding deck), eliminate artwork mismatch by preventing queue artwork pollution, and eliminate blinking with zero-latency cached artwork.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {

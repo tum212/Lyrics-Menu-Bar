@@ -684,45 +684,73 @@ public final class MusicService: NSObject, ObservableObject {
         let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
         
         if isTrackChanged {
-            if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
-                var savedTrack = oldTrack
-                if let prevImg = previousImageBeforeChange {
-                    ArtworkCache.shared.setImage(prevImg, forKey: oldTrack.id)
-                    ArtworkCache.shared.setImage(prevImg, forKey: ArtworkCache.cacheKey(for: oldTrack))
-                    if savedTrack.artworkData == nil {
-                        savedTrack.artworkData = prevImg.tiffRepresentation
+            // Manage queue & history according to navigation direction
+            if self.navigationDirection == -1 {
+                // Moving backwards: the track we just came from goes back to upcomingQueue!
+                if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
+                    var savedTrack = oldTrack
+                    if let prevImg = previousImageBeforeChange {
+                        ArtworkCache.shared.setImage(prevImg, forKey: oldTrack.id)
+                        ArtworkCache.shared.setImage(prevImg, forKey: ArtworkCache.cacheKey(for: oldTrack))
+                        if savedTrack.artworkData == nil {
+                            savedTrack.artworkData = prevImg.tiffRepresentation
+                        }
+                    }
+                    self.upcomingQueue.insert(savedTrack, at: 0)
+                }
+                // Pop current track from sessionHistory if it was at the top
+                if let lastHistory = self.sessionHistory.last,
+                   lastHistory.name.lowercased() == updatedTrack.name.lowercased() {
+                    self.sessionHistory.removeLast()
+                }
+            } else if self.navigationDirection == 1 {
+                // Moving forwards: the track we just came from goes to sessionHistory
+                if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
+                    var savedTrack = oldTrack
+                    if let prevImg = previousImageBeforeChange {
+                        ArtworkCache.shared.setImage(prevImg, forKey: oldTrack.id)
+                        ArtworkCache.shared.setImage(prevImg, forKey: ArtworkCache.cacheKey(for: oldTrack))
+                        if savedTrack.artworkData == nil {
+                            savedTrack.artworkData = prevImg.tiffRepresentation
+                        }
+                    }
+                    if self.sessionHistory.last?.name != savedTrack.name || self.sessionHistory.last?.artist != savedTrack.artist {
+                        self.sessionHistory.append(savedTrack)
+                        if self.sessionHistory.count > 15 {
+                            self.sessionHistory.removeFirst()
+                        }
                     }
                 }
-                if self.sessionHistory.last?.name != savedTrack.name || self.sessionHistory.last?.artist != savedTrack.artist {
-                    self.sessionHistory.append(savedTrack)
-                    if self.sessionHistory.count > 10 {
-                        self.sessionHistory.removeFirst()
-                    }
+                // If upcomingQueue has the track that just started playing, advance queue!
+                if let first = self.upcomingQueue.first,
+                   first.name.lowercased() == updatedTrack.name.lowercased() {
+                    self.upcomingQueue.removeFirst()
                 }
             }
+            // Reset navigation direction
+            self.navigationDirection = 1
             
-            // Immediate synchronous upcoming baseline: ensure upcoming card is NEVER empty or blank
-            if self.upcomingQueue.isEmpty || self.upcomingQueue.first?.name == updatedTrack.name {
-                let baselineUpcoming = MusicTrack(
-                    id: "next_\(updatedTrack.id)",
-                    name: "Next Track",
-                    artist: updatedTrack.artist,
-                    album: updatedTrack.album,
-                    artworkURL: updatedTrack.artworkURL,
-                    artworkData: updatedTrack.artworkData ?? previousImageBeforeChange?.tiffRepresentation,
-                    duration: 0,
-                    source: updatedTrack.source
-                )
-                self.upcomingQueue = [baselineUpcoming]
+            // Zero-flicker artwork resolution: check cache synchronously before setting loading state
+            let cached = ArtworkCache.shared.image(forKey: updatedTrack.id)
+                ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: updatedTrack))
+                ?? updatedTrack.artworkData.flatMap { NSImage(data: $0) }
+            
+            if let cached = cached {
+                self.artworkImage = cached
+                self.artworkState = .loaded(trackId: updatedTrack.id)
+            } else {
+                self.artworkImage = nil
+                self.artworkState = .loading(trackId: updatedTrack.id)
             }
             
-            self.artworkImage = nil
-            self.artworkState = .loading(trackId: updatedTrack.id)
             self.artworkRevision += 1
             self.artworkRetryCount = 0
             self.nextArtworkRetryDate = .distantPast
             loadArtwork(for: updatedTrack)
-            fetchUpcomingQueue(for: updatedTrack)
+            
+            if self.upcomingQueue.isEmpty {
+                fetchUpcomingQueue(for: updatedTrack)
+            }
         } else if isArtworkChanged || shouldRetryArtwork {
             loadArtwork(for: updatedTrack)
         }
@@ -774,7 +802,7 @@ public final class MusicService: NSObject, ObservableObject {
                     if self.sessionHistory.contains(where: { $0.name.lowercased() == name.lowercased() }) { continue }
                     if queued.contains(where: { $0.name.lowercased() == name.lowercased() }) { continue }
                     
-                    let artURL = item.artworkUrl100?.replacingOccurrences(of: "100x100bb", with: "600x600bb") ?? track.artworkURL
+                    let artURL = item.artworkUrl100?.replacingOccurrences(of: "100x100bb", with: "600x600bb")
                     let dur = (item.trackTimeMillis ?? 0) / 1000.0
                     let qTrack = MusicTrack(
                         id: "itunes:\(item.trackId ?? queued.count)",
@@ -802,39 +830,8 @@ public final class MusicService: NSObject, ObservableObject {
                 if !queued.isEmpty {
                     self.upcomingQueue = queued
                 }
-                
-                // If queue is empty, fallback to upcoming placeholder with SAME album art
-                if queued.isEmpty && (track.artworkURL != nil || self.artworkImage != nil) {
-                    let fallback = MusicTrack(
-                        id: "next_\(track.id)",
-                        name: "Next Track",
-                        artist: track.artist,
-                        album: track.album,
-                        artworkURL: track.artworkURL,
-                        artworkData: track.artworkData ?? self.artworkImage?.tiffRepresentation,
-                        duration: 0,
-                        source: track.source
-                    )
-                    queued.append(fallback)
-                }
-                
-                guard !Task.isCancelled else { return }
-                self.upcomingQueue = queued
             } catch {
-                // If network fails, provide a fallback with same album art
-                if self.upcomingQueue.isEmpty && (track.artworkURL != nil || self.artworkImage != nil) {
-                    let fallback = MusicTrack(
-                        id: "next_\(track.id)",
-                        name: "Next Track",
-                        artist: track.artist,
-                        album: track.album,
-                        artworkURL: track.artworkURL,
-                        artworkData: track.artworkData ?? self.artworkImage?.tiffRepresentation,
-                        duration: 0,
-                        source: track.source
-                    )
-                    self.upcomingQueue = [fallback]
-                }
+                // If network fails, do not inject current track's artwork
             }
         }
     }
@@ -873,9 +870,26 @@ public final class MusicService: NSObject, ObservableObject {
     }
     
     public func previousTrack() {
+        if playbackPosition > 3.0 {
+            navigationDirection = 0
+            seek(to: 0)
+        } else {
+            navigationDirection = -1
+            let appName = (activeSource == .appleMusic) ? "Music" : "Spotify"
+            runCommand("previous track", on: appName)
+        }
+    }
+    
+    public func forcePreviousTrack() {
         navigationDirection = -1
         let appName = (activeSource == .appleMusic) ? "Music" : "Spotify"
-        runCommand("previous track", on: appName)
+        let script = "tell application \"\(appName)\" to set player position to 0\ntell application \"\(appName)\" to previous track"
+        Task.detached(priority: .userInitiated) {
+            var error: NSDictionary?
+            if let appleScript = NSAppleScript(source: script) {
+                appleScript.executeAndReturnError(&error)
+            }
+        }
     }
 
     public func activateMusicApp() {
