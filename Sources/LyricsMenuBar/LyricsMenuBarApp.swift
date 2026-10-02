@@ -84,6 +84,8 @@ struct MenuBarRenderKey: Equatable {
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panel: NSPanel!
+    var glassView: HUDGlassView!
+    var isGenieAnimating: Bool = false
     
     // Core Services
     var spotify = SpotifyService()
@@ -101,6 +103,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isShowingIdleIcon: Bool = false
     private var cachedAlbumArtTrackId: String?
     private var cachedAlbumArtImage: NSImage?
+    private var previousAlbumArtImage: NSImage?
+    private var coverFlowStartTime: CFTimeInterval = 0
+    private var coverFlowDirection: CGFloat = 1.0
+    private var currentMenuBarArtScale: CGFloat = 1.0
     
     private var lastShowWaveform = true
     private var lastShowAlbumArt = true
@@ -164,6 +170,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Setup Native GPU Glass Backdrop
         let glassView = HUDGlassView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 480, height: 240))
         glassView.autoresizingMask = [.width, .height]
+        self.glassView = glassView
         
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.frame = glassView.bounds
@@ -229,38 +236,141 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
     
+    private func computeButtonGeometry() -> (screenFrame: NSRect, xPos: CGFloat, yPos: CGFloat, anchorX: CGFloat) {
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
+        let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let panelWidth: CGFloat = 480
+        let panelHeight: CGFloat = 240
+        
+        var xPos: CGFloat
+        var yPos: CGFloat
+        var buttonMidX: CGFloat = screenFrame.maxX - 100
+        
+        if let button = statusItem?.button, let buttonWindow = button.window, buttonWindow.frame.origin.y > 0 {
+            let buttonRect = buttonWindow.convertToScreen(button.frame)
+            buttonMidX = buttonRect.midX
+            xPos = buttonMidX - (panelWidth / 2)
+            yPos = buttonRect.minY - panelHeight - 8
+        } else {
+            xPos = screenFrame.maxX - panelWidth - 20
+            yPos = screenFrame.maxY - panelHeight - 8
+        }
+        
+        // Clamp within screen boundaries
+        xPos = max(screenFrame.minX + 10, min(xPos, screenFrame.maxX - panelWidth - 10))
+        yPos = max(screenFrame.minY + 10, min(yPos, screenFrame.maxY - panelHeight - 8))
+        
+        let rawAnchorX = (buttonMidX - xPos) / panelWidth
+        let anchorX = max(0.06, min(0.94, rawAnchorX))
+        
+        return (screenFrame, xPos, yPos, anchorX)
+    }
+
+    private func animateGenieOpen() {
+        guard let panel = self.panel, let glassView = self.glassView, let layer = glassView.layer else { return }
+        isGenieAnimating = true
+        
+        let geom = computeButtonGeometry()
+        panel.setFrame(NSRect(x: geom.xPos, y: geom.yPos, width: 480, height: 240), display: true)
+        panel.invalidateShadow()
+        
+        // 1. Setup Layer Geometry for Top Anchor Point directly beneath Menu Bar Item
+        let anchor = CGPoint(x: geom.anchorX, y: 1.0)
+        layer.anchorPoint = anchor
+        layer.position = CGPoint(x: 480 * geom.anchorX, y: 240 * 1.0)
+        
+        // 2. Initial Collapsed 3D Funnel Transform
+        var collapsed = CATransform3DIdentity
+        collapsed.m34 = -1.0 / 600.0 // Perspective projection
+        collapsed = CATransform3DTranslate(collapsed, 0, 15, 0)
+        collapsed = CATransform3DScale(collapsed, 0.05, 0.02, 1.0)
+        collapsed = CATransform3DRotate(collapsed, CGFloat(12.0 * .pi / 180.0), 1, 0, 0)
+        
+        layer.transform = collapsed
+        layer.opacity = 0.0
+        
+        spotify.isPanelVisible = true
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        
+        // 3. Apple Spring Physics for snappy opening
+        let springAnim = CASpringAnimation(keyPath: "transform")
+        springAnim.mass = 1.0
+        springAnim.stiffness = 280.0
+        springAnim.damping = 24.0
+        springAnim.fromValue = NSValue(caTransform3D: collapsed)
+        springAnim.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        springAnim.duration = 0.32
+        
+        let fadeAnim = CABasicAnimation(keyPath: "opacity")
+        fadeAnim.fromValue = 0.0
+        fadeAnim.toValue = 1.0
+        fadeAnim.duration = 0.18
+        
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            layer.transform = CATransform3DIdentity
+            layer.opacity = 1.0
+            self?.isGenieAnimating = false
+        }
+        layer.add(springAnim, forKey: "genieOpenTransform")
+        layer.add(fadeAnim, forKey: "genieOpenOpacity")
+        layer.transform = CATransform3DIdentity
+        layer.opacity = 1.0
+        CATransaction.commit()
+    }
+
+    private func animateGenieClose() {
+        guard self.panel != nil, let glassView = self.glassView, let layer = glassView.layer else { return }
+        isGenieAnimating = true
+        
+        let geom = computeButtonGeometry()
+        let anchor = CGPoint(x: geom.anchorX, y: 1.0)
+        layer.anchorPoint = anchor
+        layer.position = CGPoint(x: 480 * geom.anchorX, y: 240 * 1.0)
+        
+        var collapsed = CATransform3DIdentity
+        collapsed.m34 = -1.0 / 600.0
+        collapsed = CATransform3DTranslate(collapsed, 0, 15, 0)
+        collapsed = CATransform3DScale(collapsed, 0.05, 0.02, 1.0)
+        collapsed = CATransform3DRotate(collapsed, CGFloat(12.0 * .pi / 180.0), 1, 0, 0)
+        
+        let transformAnim = CABasicAnimation(keyPath: "transform")
+        transformAnim.fromValue = NSValue(caTransform3D: CATransform3DIdentity)
+        transformAnim.toValue = NSValue(caTransform3D: collapsed)
+        transformAnim.duration = 0.22
+        transformAnim.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        
+        let fadeAnim = CABasicAnimation(keyPath: "opacity")
+        fadeAnim.fromValue = 1.0
+        fadeAnim.toValue = 0.0
+        fadeAnim.duration = 0.20
+        fadeAnim.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self = self else { return }
+            self.spotify.isPanelVisible = false
+            self.panel.orderOut(nil)
+            layer.transform = CATransform3DIdentity
+            layer.opacity = 1.0
+            self.isGenieAnimating = false
+        }
+        layer.add(transformAnim, forKey: "genieCloseTransform")
+        layer.add(fadeAnim, forKey: "genieCloseOpacity")
+        layer.transform = collapsed
+        layer.opacity = 0.0
+        CATransaction.commit()
+    }
+    
     @objc func togglePopover(_ sender: AnyObject?) {
         guard let panel = self.panel else { return }
+        if isGenieAnimating { return }
+        
         if panel.isVisible {
-            spotify.isPanelVisible = false
-            panel.orderOut(nil)
+            animateGenieClose()
         } else {
-            let screen = statusItem?.button?.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
-            let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-            let panelWidth: CGFloat = 480
-            let panelHeight: CGFloat = 240
-            
-            var xPos: CGFloat
-            var yPos: CGFloat
-            
-            if let button = statusItem?.button, let buttonWindow = button.window, buttonWindow.frame.origin.y > 0 {
-                let buttonRect = buttonWindow.convertToScreen(button.frame)
-                xPos = buttonRect.midX - (panelWidth / 2)
-                yPos = buttonRect.minY - panelHeight - 8
-            } else {
-                xPos = screenFrame.maxX - panelWidth - 20
-                yPos = screenFrame.maxY - panelHeight - 8
-            }
-            
-            // Clamp within screen boundaries
-            xPos = max(screenFrame.minX + 10, min(xPos, screenFrame.maxX - panelWidth - 10))
-            yPos = max(screenFrame.minY + 10, min(yPos, screenFrame.maxY - panelHeight - 8))
-            
-            panel.setFrame(NSRect(x: xPos, y: yPos, width: panelWidth, height: panelHeight), display: true)
-            panel.invalidateShadow()
-            spotify.isPanelVisible = true
-            panel.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            animateGenieOpen()
         }
     }
     
@@ -272,14 +382,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     @objc private func handleClosePopover() {
-        spotify.isPanelVisible = false
-        panel?.orderOut(nil)
+        if panel?.isVisible == true && !isGenieAnimating {
+            animateGenieClose()
+        }
     }
 
     func windowDidResignKey(_ notification: Notification) {
         if let window = notification.object as? NSWindow, window == panel {
-            spotify.isPanelVisible = false
-            panel?.orderOut(nil)
+            if panel?.isVisible == true && !isGenieAnimating {
+                animateGenieClose()
+            }
         }
     }
 
@@ -857,6 +969,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // --- 2. ART & WAVEFORM UPDATING ---
         let artKey = "\(track.id)_\(spotify.artworkRevision)"
         if cachedAlbumArtTrackId != artKey {
+            if cachedAlbumArtImage != nil {
+                previousAlbumArtImage = cachedAlbumArtImage
+                coverFlowStartTime = CACurrentMediaTime()
+                coverFlowDirection = CGFloat(spotify.navigationDirection)
+            }
             cachedAlbumArtTrackId = artKey
             
             if let directImage = spotify.activeArtworkImage {
@@ -1054,9 +1171,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSGraphicsContext.current?.restoreGraphicsState()
         }
         
-        // 3. Draw album art
-        if let art = cachedAlbumArtImage, showAlbumArt {
-            art.draw(at: NSPoint(x: artX, y: 0), from: NSRect(origin: .zero, size: art.size), operation: .copy, fraction: 1.0)
+        // 3. Draw album art with Cover Flow 3D & Pause Compression
+        if showAlbumArt, let currentArt = cachedAlbumArtImage {
+            // Smoothly interpolate pause compression (scale 1.0 when playing, 0.85 when paused)
+            let targetScale: CGFloat = spotify.isPlaying ? 1.0 : 0.85
+            currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.20
+            
+            let artW: CGFloat = 20.0 * currentMenuBarArtScale
+            let artH: CGFloat = 20.0 * currentMenuBarArtScale
+            let yOffset: CGFloat = (20.0 - artH) / 2.0
+            let xOffset: CGFloat = (20.0 - artW) / 2.0
+            
+            let now = CACurrentMediaTime()
+            let elapsed = now - coverFlowStartTime
+            let isCoverFlowing = (elapsed < 0.35) && (previousAlbumArtImage != nil)
+            
+            if isCoverFlowing, let prevArt = previousAlbumArtImage {
+                let t = CGFloat(elapsed / 0.35)
+                // Apple smoothstep curve
+                let smoothT = t * t * (3.0 - 2.0 * t)
+                
+                // Outgoing cover: slides away, squishes horizontally, fades
+                let outW = artW * (1.0 - smoothT)
+                let outX = artX + xOffset - (coverFlowDirection * 5.0 * smoothT)
+                let outAlpha = max(0.0, 1.0 - smoothT)
+                if outW > 0.5 {
+                    prevArt.draw(in: NSRect(x: outX, y: yOffset, width: outW, height: artH),
+                                 from: NSRect(origin: .zero, size: prevArt.size),
+                                 operation: .sourceOver,
+                                 fraction: outAlpha)
+                }
+                
+                // Incoming cover: slides in, expands horizontally from 3D edge, gains alpha
+                let inW = artW * smoothT
+                let inX = artX + xOffset + (coverFlowDirection * 5.0 * (1.0 - smoothT)) + (artW - inW) * 0.5
+                let inAlpha = min(1.0, smoothT)
+                currentArt.draw(in: NSRect(x: inX, y: yOffset, width: inW, height: artH),
+                                from: NSRect(origin: .zero, size: currentArt.size),
+                                operation: .sourceOver,
+                                fraction: inAlpha)
+            } else {
+                currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
+                                from: NSRect(origin: .zero, size: currentArt.size),
+                                operation: .sourceOver,
+                                fraction: 1.0)
+            }
         }
         combinedImage.unlockFocus()
         

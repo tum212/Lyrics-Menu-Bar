@@ -1,9 +1,9 @@
 {
-  "version": "1.2.1",
-  "build": 44,
+  "version": "1.3.0",
+  "build": 45,
   "release_date": "2026-10-02",
-  "release_notes": "Fix album cover art display reliability across Spotify and Apple Music with iTunes Search fallback.",
-  "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.2.1/LyricsMenuBar-1.2.1.dmg",
+  "release_notes": "macOS Genie window transition, iPod 3D Cover Flow artwork animations with pause shrinkage, tactile Apple Music playback controls, and click-to-activate music player.",
+  "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.0/LyricsMenuBar-1.3.0.dmg",
   "mandatory": false,
   "lyrics_endpoints": {
     "lrclib_search": "https://lrclib.net/api/search",

@@ -57,6 +57,7 @@ public final class MusicService: NSObject, ObservableObject {
     @Published public private(set) var artworkState: ArtworkState = .idle
     @Published public private(set) var artworkRevision: Int = 0
     @Published public var isPanelVisible: Bool = false
+    @Published public private(set) var navigationDirection: Int = 1 // +1 = next, -1 = previous
     
     public var activeArtworkImage: NSImage? {
         guard let track = currentTrack else { return nil }
@@ -698,13 +699,25 @@ public final class MusicService: NSObject, ObservableObject {
     }
     
     public func nextTrack() {
+        navigationDirection = 1
         let appName = (activeSource == .appleMusic) ? "Music" : "Spotify"
         runCommand("next track", on: appName)
     }
     
     public func previousTrack() {
+        navigationDirection = -1
         let appName = (activeSource == .appleMusic) ? "Music" : "Spotify"
         runCommand("previous track", on: appName)
+    }
+
+    public func activateMusicApp() {
+        let appName = (activeSource == .appleMusic) ? "Music" : "Spotify"
+        let bundleId = (activeSource == .appleMusic) ? "com.apple.Music" : "com.spotify.client"
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            runCommand("activate", on: appName)
+        }
     }
     
     public func seek(to time: TimeInterval) {

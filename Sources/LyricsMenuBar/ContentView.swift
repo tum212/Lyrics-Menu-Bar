@@ -149,64 +149,88 @@ struct ContentView: View {
     @ViewBuilder
     private var playerLeftColumn: some View {
         VStack(spacing: 0) {
-            // Album Art
-            Group {
-                if let image = musicService.activeArtworkImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } else {
-                    placeholderArt
+            // Album Art with iPod 3D Cover Flow & Apple Music Pause Compression
+            ZStack {
+                Group {
+                    if let image = musicService.activeArtworkImage {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        placeholderArt
+                    }
                 }
+                .frame(width: 116, height: 116)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .id(musicService.currentTrack?.id ?? "none")
+                .transition(.coverFlow(direction: musicService.navigationDirection))
             }
             .frame(width: 116, height: 116)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: Color.black.opacity(0.35), radius: 8, x: 0, y: 4)
+            // Pause scale compression with Apple spring physics
+            .scaleEffect(musicService.isPlaying ? 1.0 : 0.88)
+            .animation(.spring(response: 0.38, dampingFraction: 0.68), value: musicService.isPlaying)
+            .shadow(
+                color: Color.black.opacity(musicService.isPlaying ? 0.38 : 0.20),
+                radius: musicService.isPlaying ? 8 : 4,
+                x: 0,
+                y: musicService.isPlaying ? 4 : 2
+            )
 
             Spacer().frame(height: 10)
 
-            // Track Info
-            Text(musicService.currentTrack?.name ?? "No Music Playing")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .shadow(color: Color.black.opacity(0.45), radius: 2, x: 0, y: 1)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 130, alignment: .center)
-
-            Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.7))
-                .shadow(color: Color.black.opacity(0.40), radius: 2, x: 0, y: 1)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 130, alignment: .center)
-
-            Spacer().frame(height: 10)
-
-            // Playback Controls
-            HStack(spacing: 16) {
-                Button(action: { musicService.previousTrack() }) {
-                    Image(systemName: "backward.fill")
-                        .font(.system(size: 16))
+            // Clickable Track Info (Click to activate Spotify / Apple Music)
+            Button(action: {
+                musicService.activateMusicApp()
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+            }) {
+                VStack(spacing: 2) {
+                    Text(musicService.currentTrack?.name ?? "No Music Playing")
+                        .font(.system(size: 13, weight: .bold))
                         .foregroundColor(.white)
-                }
-                .buttonStyle(PlainButtonStyle()).focusable(false)
+                        .shadow(color: Color.black.opacity(0.45), radius: 2, x: 0, y: 1)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 130, alignment: .center)
 
-                Button(action: { musicService.playPause() }) {
-                    Image(systemName: musicService.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 24))
-                        .foregroundColor(.white)
-                        .frame(width: 24)
+                    Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                        .shadow(color: Color.black.opacity(0.40), radius: 2, x: 0, y: 1)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 130, alignment: .center)
                 }
-                .buttonStyle(PlainButtonStyle()).focusable(false)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .onHover { isHovered in
+                if isHovered && musicService.currentTrack != nil {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .help("Click to open in \(musicService.activeSource == .appleMusic ? "Apple Music" : "Spotify")")
 
-                Button(action: { musicService.nextTrack() }) {
-                    Image(systemName: "forward.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.white)
+            Spacer().frame(height: 8)
+
+            // Tactile Apple Music Playback Controls (Hover Glass Ring + Spring Depth)
+            HStack(spacing: 8) {
+                AppleMusicControlButton(systemName: "backward.fill", size: 15, frameSize: 32) {
+                    musicService.previousTrack()
                 }
-                .buttonStyle(PlainButtonStyle()).focusable(false)
+
+                AppleMusicControlButton(
+                    systemName: musicService.isPlaying ? "pause.fill" : "play.fill",
+                    size: 20,
+                    frameSize: 40
+                ) {
+                    musicService.playPause()
+                }
+
+                AppleMusicControlButton(systemName: "forward.fill", size: 15, frameSize: 32) {
+                    musicService.nextTrack()
+                }
             }
         }
         .frame(width: 130)
@@ -1463,4 +1487,90 @@ struct UpdateModalView: View {
         .shadow(color: Color.black.opacity(0.45), radius: 24, x: 0, y: 12)
     }
 }
+
+// MARK: - iPod Cover Flow 3D Transition
+struct CoverFlowTransform: ViewModifier {
+    let angle: Double
+    let xOffset: CGFloat
+    let scale: CGFloat
+    let opacity: Double
+
+    func body(content: Content) -> some View {
+        content
+            .rotation3DEffect(
+                .degrees(angle),
+                axis: (x: 0, y: 1, z: 0),
+                anchor: .center,
+                perspective: 0.45
+            )
+            .offset(x: xOffset)
+            .scaleEffect(scale)
+            .opacity(opacity)
+    }
+}
+
+extension AnyTransition {
+    static func coverFlow(direction: Int) -> AnyTransition {
+        let dir = CGFloat(direction >= 0 ? 1 : -1)
+        return .asymmetric(
+            insertion: .modifier(
+                active: CoverFlowTransform(angle: 45 * dir, xOffset: 35 * dir, scale: 0.84, opacity: 0.0),
+                identity: CoverFlowTransform(angle: 0, xOffset: 0, scale: 1.0, opacity: 1.0)
+            ),
+            removal: .modifier(
+                active: CoverFlowTransform(angle: -45 * dir, xOffset: -35 * dir, scale: 0.84, opacity: 0.0),
+                identity: CoverFlowTransform(angle: 0, xOffset: 0, scale: 1.0, opacity: 1.0)
+            )
+        )
+    }
+}
+
+// MARK: - Apple Music Tactile Control Button
+struct AppleMusicControlButton: View {
+    let systemName: String
+    let size: CGFloat
+    var frameSize: CGFloat = 34
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @State private var isPressed = false
+
+    var body: some View {
+        Button(action: {
+            action()
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }) {
+            ZStack {
+                // Translucent Apple Music style hover ring
+                Circle()
+                    .fill(Color.white.opacity(isHovered ? 0.15 : 0.0))
+                    .frame(width: frameSize, height: frameSize)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.white.opacity(isHovered ? 0.20 : 0.0), lineWidth: 0.5)
+                    )
+
+                Image(systemName: systemName)
+                    .font(.system(size: size, weight: .semibold))
+                    .foregroundColor(.white.opacity(isHovered ? 1.0 : 0.88))
+                    .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
+            }
+            .scaleEffect(isPressed ? 0.86 : (isHovered ? 1.06 : 1.0))
+            .animation(.spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
+            .animation(.easeInOut(duration: 0.16), value: isHovered)
+            .contentShape(Circle())
+        }
+        .buttonStyle(PlainButtonStyle())
+        .focusable(false)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+}
+
 
