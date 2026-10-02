@@ -59,10 +59,11 @@ public final class MusicService: NSObject, ObservableObject {
     @Published public var isPanelVisible: Bool = false
     
     public var activeArtworkImage: NSImage? {
-        guard let track = currentTrack,
-              case .loaded(let loadedId) = artworkState,
-              loadedId == track.id else {
-            return nil
+        guard let track = currentTrack else { return nil }
+        if case .loaded(let loadedId) = artworkState {
+            if loadedId == track.id || loadedId == "\(track.name)-\(track.artist)" {
+                return artworkImage
+            }
         }
         return artworkImage
     }
@@ -190,8 +191,8 @@ public final class MusicService: NSObject, ObservableObject {
         }
         self.consecutiveStoppedPolls = 0
         
-        // Preserve existing artwork if track id hasn't changed
-        let existingArtwork = (self.currentTrack?.id == trackId) ? self.currentTrack?.artworkURL : nil
+        // Preserve existing artwork if track name and artist match
+        let existingArtwork = (self.currentTrack?.name == name && self.currentTrack?.artist == artist) ? self.currentTrack?.artworkURL : nil
         let track = MusicTrack(
             id: trackId.isEmpty ? "\(name)-\(artist)" : trackId,
             name: name,
@@ -204,6 +205,26 @@ public final class MusicService: NSObject, ObservableObject {
         )
         
         self.updatePlaybackState(track: track, position: position, isPlaying: newIsPlaying, source: .spotify, bundleID: "com.spotify.client")
+
+        // Fast async fetch of Spotify artwork URL if not already present
+        if existingArtwork == nil {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let script = "tell application \"Spotify\" to get artwork url of current track"
+                if let appleScript = NSAppleScript(source: script) {
+                    var err: NSDictionary?
+                    let output = appleScript.executeAndReturnError(&err)
+                    if let urlStr = output.stringValue, !urlStr.isEmpty {
+                        await MainActor.run { [weak self] in
+                            guard let self = self, let cur = self.currentTrack, cur.name == name else { return }
+                            if self.currentTrack?.artworkURL == nil || self.artworkImage == nil {
+                                self.currentTrack?.artworkURL = urlStr
+                                self.loadArtwork(for: self.currentTrack!)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     
     @objc private func handleAppleMusicNotification(_ notif: Notification) {
@@ -250,7 +271,7 @@ public final class MusicService: NSObject, ObservableObject {
         }
         self.consecutiveStoppedPolls = 0
         
-        let existingArtworkData = (self.currentTrack?.id == trackId) ? self.currentTrack?.artworkData : nil
+        let existingArtworkData = (self.currentTrack?.name == name && self.currentTrack?.artist == artist) ? self.currentTrack?.artworkData : nil
         let track = MusicTrack(
             id: trackId,
             name: name,
@@ -494,7 +515,11 @@ public final class MusicService: NSObject, ObservableObject {
                     set aTrack to current track
                     set curId to persistent ID of aTrack
                     if "\(escapedID)" is "" or curId is equal to "\(escapedID)" then
-                        return {curId, data of artwork 1 of aTrack}
+                        try
+                            return {curId, raw data of artwork 1 of aTrack}
+                        on error
+                            return {curId, data of artwork 1 of aTrack}
+                        end try
                     else
                         return {curId, ""}
                     end if
@@ -530,7 +555,6 @@ public final class MusicService: NSObject, ObservableObject {
         
         // 1. If in-memory cache already has it, assign immediately
         if let cached = ArtworkCache.shared.image(forKey: cacheKey) {
-            guard self.currentTrack?.id == trackId else { return }
             self.artworkImage = cached
             self.artworkState = .loaded(trackId: trackId)
             self.artworkRevision += 1
@@ -543,12 +567,18 @@ public final class MusicService: NSObject, ObservableObject {
         artworkGeneration += 1
         let currentGen = artworkGeneration
         artworkTask?.cancel()
-        self.artworkImage = nil
+        
+        // Don't wipe out the existing image if it's the same song
+        if self.currentTrack?.name != track.name {
+            self.artworkImage = nil
+        }
         self.artworkState = .loading(trackId: trackId)
         
         // 3. Load artwork asynchronously
         artworkTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
+            
+            var loadedImage: NSImage? = nil
             
             if track.source == .appleMusic {
                 // Fetch data via detached AppleScript task with persistent ID validation
@@ -556,67 +586,42 @@ public final class MusicService: NSObject, ObservableObject {
                     Self.fetchAppleMusicArtworkData(expectedID: trackId)
                 }.value
                 
-                guard !Task.isCancelled, self.artworkGeneration == currentGen, self.currentTrack?.id == trackId else { return }
-                
-                // Discard if persistent ID mismatch (player already changed tracks)
-                if !result.persistentID.isEmpty && !trackId.isEmpty && result.persistentID != trackId {
-                    self.artworkImage = nil
-                    return
-                }
-                
                 if let data = result.data, let image = NSImage(data: data) {
-                    ArtworkCache.shared.setImage(image, forKey: cacheKey)
-                    guard self.currentTrack?.id == trackId else { return }
-                    self.artworkImage = image
-                    self.artworkState = .loaded(trackId: trackId)
-                    self.artworkRevision += 1
-                    self.artworkRetryCount = 0
-                    self.nextArtworkRetryDate = .distantPast
+                    loadedImage = image
                     if self.currentTrack?.id == trackId {
                         self.currentTrack?.artworkData = data
                     }
-                } else {
-                    // Exponential backoff retry
-                    self.artworkImage = nil
-                    if self.artworkRetryCount < self.retryIntervals.count {
-                        let delay = self.retryIntervals[self.artworkRetryCount]
-                        self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
-                        self.artworkRetryCount += 1
-                    }
-                    self.artworkState = .failed(trackId: trackId, error: "No Apple Music artwork")
-                    self.artworkRevision += 1
                 }
             } else {
                 // Spotify URL / URI
-                guard let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(track.artworkURL) else {
-                    guard !Task.isCancelled, self.artworkGeneration == currentGen, self.currentTrack?.id == trackId else { return }
-                    self.artworkImage = nil
-                    self.artworkState = .idle
-                    return
+                if let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(track.artworkURL) {
+                    loadedImage = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: cacheKey)
                 }
-                
-                let image = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: cacheKey)
-                
-                guard !Task.isCancelled, self.artworkGeneration == currentGen, self.currentTrack?.id == trackId else { return }
-                
-                if let image = image {
-                    ArtworkCache.shared.setImage(image, forKey: cacheKey)
-                    guard self.currentTrack?.id == trackId else { return }
-                    self.artworkImage = image
-                    self.artworkState = .loaded(trackId: trackId)
-                    self.artworkRevision += 1
-                    self.artworkRetryCount = 0
-                    self.nextArtworkRetryDate = .distantPast
-                } else {
-                    self.artworkImage = nil
-                    if self.artworkRetryCount < self.retryIntervals.count {
-                        let delay = self.retryIntervals[self.artworkRetryCount]
-                        self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
-                        self.artworkRetryCount += 1
-                    }
-                    self.artworkState = .failed(trackId: trackId, error: "Failed to download Spotify artwork")
-                    self.artworkRevision += 1
+            }
+            
+            // Fallback: If primary source didn't yield an image, search iTunes Search API
+            if loadedImage == nil && !track.name.isEmpty {
+                loadedImage = await ArtworkLoader.fetchArtworkFromITunes(trackName: track.name, artistName: track.artist, cacheKey: cacheKey)
+            }
+            
+            guard !Task.isCancelled, self.artworkGeneration == currentGen else { return }
+            guard let current = self.currentTrack, current.name == track.name else { return }
+            
+            if let image = loadedImage {
+                ArtworkCache.shared.setImage(image, forKey: cacheKey)
+                self.artworkImage = image
+                self.artworkState = .loaded(trackId: trackId)
+                self.artworkRevision += 1
+                self.artworkRetryCount = 0
+                self.nextArtworkRetryDate = .distantPast
+            } else {
+                if self.artworkRetryCount < self.retryIntervals.count {
+                    let delay = self.retryIntervals[self.artworkRetryCount]
+                    self.nextArtworkRetryDate = Date().addingTimeInterval(delay)
+                    self.artworkRetryCount += 1
                 }
+                self.artworkState = .failed(trackId: trackId, error: "Artwork not found")
+                self.artworkRevision += 1
             }
         }
     }

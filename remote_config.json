@@ -1,9 +1,9 @@
 {
-  "version": "1.2.0",
-  "build": 43,
+  "version": "1.2.1",
+  "build": 44,
   "release_date": "2026-10-02",
-  "release_notes": "Native Glass HUD, 60 FPS syllable lyrics, Dynamic Island audio waveform, and Force Touch trackpad haptics.",
-  "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.2.0/LyricsMenuBar-1.2.0.dmg",
+  "release_notes": "Fix album cover art display reliability across Spotify and Apple Music with iTunes Search fallback.",
+  "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.2.1/LyricsMenuBar-1.2.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {
     "lrclib_search": "https://lrclib.net/api/search",

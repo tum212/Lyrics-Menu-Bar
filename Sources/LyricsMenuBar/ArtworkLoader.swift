@@ -17,8 +17,8 @@ public final class ArtworkCache {
     private let cache = NSCache<NSString, NSImage>()
     
     private init() {
-        cache.countLimit = 150
-        cache.totalCostLimit = 50 * 1024 * 1024 // 50MB
+        cache.countLimit = 200
+        cache.totalCostLimit = 60 * 1024 * 1024 // 60MB
     }
     
     public func image(forKey key: String) -> NSImage? {
@@ -35,8 +35,9 @@ public final class ArtworkCache {
     }
     
     public static func cacheKey(for track: MusicTrack) -> String {
-        let sanitized = ArtworkLoader.sanitizeArtworkURL(track.artworkURL)?.absoluteString ?? "raw"
-        return "\(track.source.rawValue)|\(track.id)|\(sanitized)"
+        let nameKey = track.name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let artistKey = track.artist.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(track.source.rawValue)|\(nameKey)|\(artistKey)"
     }
     
     public func clear() {
@@ -80,7 +81,9 @@ public enum ArtworkLoader {
         }
         
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            var req = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 8)
+            req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+            let (data, response) = try await URLSession.shared.data(for: req)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                 return nil
             }
@@ -92,5 +95,43 @@ public enum ArtworkLoader {
         } catch {
             return nil
         }
+    }
+    
+    /// Fallback fetcher: Searches Apple Music / iTunes Search API for high-resolution cover art (600x600)
+    public static func fetchArtworkFromITunes(trackName: String, artistName: String, cacheKey: String) async -> NSImage? {
+        if let cached = ArtworkCache.shared.image(forKey: cacheKey) {
+            return cached
+        }
+        
+        let cleanedTrack = trackName
+            .replacingOccurrences(of: "(feat.*)", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "- Remaster.*", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let queryTerm = "\(artistName) \(cleanedTrack)"
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        
+        guard let url = URL(string: "https://itunes.apple.com/search?term=\(queryTerm)&entity=song&limit=1") else {
+            return nil
+        }
+        
+        do {
+            var req = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 6)
+            req.setValue("LyricsMenuBar/1.2", forHTTPHeaderField: "User-Agent")
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let results = json["results"] as? [[String: Any]],
+               let first = results.first,
+               let art100 = first["artworkUrl100"] as? String {
+                let highResArt = art100.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+                if let artUrl = URL(string: highResArt) {
+                    return await fetchImage(from: artUrl, cacheKey: cacheKey)
+                }
+            }
+        } catch {
+            return nil
+        }
+        return nil
     }
 }
