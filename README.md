@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-macOS%2014.2%2B-blue?style=flat-square&logo=apple" alt="Platform">
   <img src="https://img.shields.io/badge/Swift-5.10-orange?style=flat-square&logo=swift" alt="Swift">
-  <img src="https://img.shields.io/badge/Release-v1.3.0-emerald?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Release-v1.3.1-emerald?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/Architecture-Apple%20Silicon%20%2F%20Intel-purple?style=flat-square" alt="Arch">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
@@ -132,7 +132,7 @@
 ## Installation
 
 ### Pre-built DMG
-1. Download `LyricsMenuBar-1.3.0.dmg` from [Releases](https://github.com/tum212/Lyrics-Menu-Bar/releases).
+1. Download `LyricsMenuBar-1.3.1.dmg` from [Releases](https://github.com/tum212/Lyrics-Menu-Bar/releases).
 2. Drag **Lyrics Menu Bar** into your `/Applications` folder.
 3. Grant **Automation** permissions when prompted on first run.
 

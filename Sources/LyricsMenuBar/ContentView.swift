@@ -36,6 +36,7 @@ struct ContentView: View {
     // Track which lyric index is active for scroll animation
     @State private var displayedIndex: Int = 0
     @State private var isLyricsHovered: Bool = false
+    @State private var isCoverFlowMode: Bool = false
     
     // User preferences
     @AppStorage("showLyrics") private var showLyrics = true
@@ -126,55 +127,78 @@ struct ContentView: View {
 
     private var mainContent: some View {
         ZStack(alignment: .topTrailing) {
-            // Single unified content container - NO inner cards
-            HStack(spacing: 20) {
-                playerLeftColumn
+            if isCoverFlowMode {
+                CoverFlowView(musicService: musicService, isCoverFlowMode: $isCoverFlowMode)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            } else {
+                // Single unified content container - NO inner cards
+                HStack(spacing: 20) {
+                    playerLeftColumn
 
-                // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
-                GeometryReader { geometry in
-                    lyricsPanel(containerWidth: geometry.size.width)
+                    // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
+                    GeometryReader { geometry in
+                        lyricsPanel(containerWidth: geometry.size.width)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+                .frame(width: 480, height: 240)
+                .transition(.opacity.combined(with: .scale(scale: 1.02)))
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-            .frame(width: 480, height: 240)
 
             topRightControls
                 .padding([.top, .trailing], 14)
         }
+        .animation(.spring(response: 0.38, dampingFraction: 0.80), value: isCoverFlowMode)
     }
 
     // MARK: - Left Column - Player Info (130pt)
     @ViewBuilder
     private var playerLeftColumn: some View {
         VStack(spacing: 0) {
-            // Album Art with iPod 3D Cover Flow & Apple Music Pause Compression
-            ZStack {
-                Group {
-                    if let image = musicService.activeArtworkImage {
-                        Image(nsImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } else {
-                        placeholderArt
+            // Album Art with iPod 3D Cover Flow & Apple Music Pause Compression (Click to toggle full Cover Flow)
+            Button(action: {
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                    isCoverFlowMode.toggle()
+                }
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+            }) {
+                ZStack {
+                    Group {
+                        if let image = musicService.activeArtworkImage {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            placeholderArt
+                        }
                     }
+                    .frame(width: 116, height: 116)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .id(musicService.currentTrack?.id ?? "none")
+                    .transition(.coverFlow(direction: musicService.navigationDirection))
                 }
                 .frame(width: 116, height: 116)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .id(musicService.currentTrack?.id ?? "none")
-                .transition(.coverFlow(direction: musicService.navigationDirection))
+                // Pause scale compression with Apple spring physics
+                .scaleEffect(musicService.isPlaying ? 1.0 : 0.88)
+                .animation(.spring(response: 0.38, dampingFraction: 0.68), value: musicService.isPlaying)
+                .shadow(
+                    color: Color.black.opacity(musicService.isPlaying ? 0.38 : 0.20),
+                    radius: musicService.isPlaying ? 8 : 4,
+                    x: 0,
+                    y: musicService.isPlaying ? 4 : 2
+                )
             }
-            .frame(width: 116, height: 116)
-            // Pause scale compression with Apple spring physics
-            .scaleEffect(musicService.isPlaying ? 1.0 : 0.88)
-            .animation(.spring(response: 0.38, dampingFraction: 0.68), value: musicService.isPlaying)
-            .shadow(
-                color: Color.black.opacity(musicService.isPlaying ? 0.38 : 0.20),
-                radius: musicService.isPlaying ? 8 : 4,
-                x: 0,
-                y: musicService.isPlaying ? 4 : 2
-            )
+            .buttonStyle(PlainButtonStyle())
+            .help("Click to expand 3D Cover Flow")
+            .onHover { isHovered in
+                if isHovered {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
 
             Spacer().frame(height: 10)
 
@@ -240,6 +264,23 @@ struct ContentView: View {
     @ViewBuilder
     private var topRightControls: some View {
         HStack(spacing: 8) {
+            Button(action: {
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
+                    isCoverFlowMode.toggle()
+                }
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+            }) {
+                Image(systemName: isCoverFlowMode ? "quote.bubble.fill" : "rectangle.stack.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white.opacity(0.85))
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
+            }
+            .buttonStyle(PlainButtonStyle())
+            .focusable(false)
+            .help(isCoverFlowMode ? "Show Lyrics" : "Show 3D Cover Flow")
+
             ZStack(alignment: .topTrailing) {
                 NativeSettingsMenu()
                     .frame(width: 26, height: 26)

@@ -104,9 +104,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cachedAlbumArtTrackId: String?
     private var cachedAlbumArtImage: NSImage?
     private var previousAlbumArtImage: NSImage?
-    private var coverFlowStartTime: CFTimeInterval = 0
-    private var coverFlowDirection: CGFloat = 1.0
+    private var dynamicIslandPopStartTime: CFTimeInterval = 0
     private var currentMenuBarArtScale: CGFloat = 1.0
+    private var currentMenuBarArtOpacity: CGFloat = 1.0
     
     private var lastShowWaveform = true
     private var lastShowAlbumArt = true
@@ -971,8 +971,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if cachedAlbumArtTrackId != artKey {
             if cachedAlbumArtImage != nil {
                 previousAlbumArtImage = cachedAlbumArtImage
-                coverFlowStartTime = CACurrentMediaTime()
-                coverFlowDirection = CGFloat(spotify.navigationDirection)
+                dynamicIslandPopStartTime = CACurrentMediaTime()
             }
             cachedAlbumArtTrackId = artKey
             
@@ -1171,42 +1170,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSGraphicsContext.current?.restoreGraphicsState()
         }
         
-        // 3. Draw album art with Cover Flow 3D & Pause Compression
+        // 3. Draw album art with iPhone Dynamic Island Spring Pop & Breathe Morph
         if showAlbumArt, let currentArt = cachedAlbumArtImage {
-            // Smoothly interpolate pause compression (scale 1.0 when playing, 0.85 when paused)
-            let targetScale: CGFloat = spotify.isPlaying ? 1.0 : 0.85
-            currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.20
+            // Morph scale & opacity smoothly between playing (1.0) and paused (0.80)
+            let targetScale: CGFloat = spotify.isPlaying ? 1.0 : 0.80
+            let targetOpacity: CGFloat = spotify.isPlaying ? 1.0 : 0.72
+            currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.22
+            currentMenuBarArtOpacity += (targetOpacity - currentMenuBarArtOpacity) * 0.22
             
-            let artW: CGFloat = 20.0 * currentMenuBarArtScale
-            let artH: CGFloat = 20.0 * currentMenuBarArtScale
+            let now = CACurrentMediaTime()
+            let elapsed = now - dynamicIslandPopStartTime
+            let isPopping = (elapsed < 0.45) && (previousAlbumArtImage != nil)
+            
+            // Dynamic Island damped spring: starts ~0.55, bounces to ~1.15, settles to 1.0
+            var popScale: CGFloat = 1.0
+            if isPopping {
+                let t = CGFloat(elapsed / 0.45)
+                let decay = exp(-6.0 * t)
+                let oscillation = cos(14.0 * t)
+                popScale = 1.0 - (decay * oscillation * 0.45)
+            }
+            
+            let effectiveScale = currentMenuBarArtScale * popScale
+            let artW: CGFloat = 20.0 * effectiveScale
+            let artH: CGFloat = 20.0 * effectiveScale
             let yOffset: CGFloat = (20.0 - artH) / 2.0
             let xOffset: CGFloat = (20.0 - artW) / 2.0
             
-            let now = CACurrentMediaTime()
-            let elapsed = now - coverFlowStartTime
-            let isCoverFlowing = (elapsed < 0.35) && (previousAlbumArtImage != nil)
-            
-            if isCoverFlowing, let prevArt = previousAlbumArtImage {
-                let t = CGFloat(elapsed / 0.35)
-                // Apple smoothstep curve
-                let smoothT = t * t * (3.0 - 2.0 * t)
+            if isPopping, let prevArt = previousAlbumArtImage {
+                let t = CGFloat(elapsed / 0.45)
+                let outAlpha = max(0.0, 1.0 - t * 2.2) * currentMenuBarArtOpacity
+                let inAlpha = min(1.0, t * 1.8) * currentMenuBarArtOpacity
                 
-                // Outgoing cover: slides away, squishes horizontally, fades
-                let outW = artW * (1.0 - smoothT)
-                let outX = artX + xOffset - (coverFlowDirection * 5.0 * smoothT)
-                let outAlpha = max(0.0, 1.0 - smoothT)
-                if outW > 0.5 {
-                    prevArt.draw(in: NSRect(x: outX, y: yOffset, width: outW, height: artH),
+                if outAlpha > 0.01 {
+                    prevArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
                                  from: NSRect(origin: .zero, size: prevArt.size),
                                  operation: .sourceOver,
                                  fraction: outAlpha)
                 }
-                
-                // Incoming cover: slides in, expands horizontally from 3D edge, gains alpha
-                let inW = artW * smoothT
-                let inX = artX + xOffset + (coverFlowDirection * 5.0 * (1.0 - smoothT)) + (artW - inW) * 0.5
-                let inAlpha = min(1.0, smoothT)
-                currentArt.draw(in: NSRect(x: inX, y: yOffset, width: inW, height: artH),
+                currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
                                 from: NSRect(origin: .zero, size: currentArt.size),
                                 operation: .sourceOver,
                                 fraction: inAlpha)
@@ -1214,7 +1216,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
                                 from: NSRect(origin: .zero, size: currentArt.size),
                                 operation: .sourceOver,
-                                fraction: 1.0)
+                                fraction: currentMenuBarArtOpacity)
             }
         }
         combinedImage.unlockFocus()

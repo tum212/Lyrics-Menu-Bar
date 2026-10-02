@@ -19,7 +19,7 @@ build_dmg() {
     local LABEL="$1"          # e.g. "Sonoma" or "Monterey"
     local MIN_OS="$2"         # e.g. "13.0" or "12.0"
     local SWIFT_FLAGS="$3"    # extra flags
-    local DMG_NAME="LyricsMenuBar-1.3.0.dmg"
+    local DMG_NAME="LyricsMenuBar-1.3.1.dmg"
     local DMG_STAGING="$SCRIPT_DIR/.dmg_staging_${LABEL}"
 
     echo ""

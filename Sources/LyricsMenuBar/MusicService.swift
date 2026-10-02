@@ -58,6 +58,8 @@ public final class MusicService: NSObject, ObservableObject {
     @Published public private(set) var artworkRevision: Int = 0
     @Published public var isPanelVisible: Bool = false
     @Published public private(set) var navigationDirection: Int = 1 // +1 = next, -1 = previous
+    @Published public private(set) var sessionHistory: [MusicTrack] = []
+    @Published public private(set) var upcomingQueue: [MusicTrack] = []
     
     public var activeArtworkImage: NSImage? {
         guard let track = currentTrack else { return nil }
@@ -71,6 +73,7 @@ public final class MusicService: NSObject, ObservableObject {
     
     private var artworkGeneration: Int = 0
     private var artworkTask: Task<Void, Never>?
+    private var queueTask: Task<Void, Never>?
     
     // Artwork retry & debounce state
     private var artworkRetryCount: Int = 0
@@ -679,18 +682,109 @@ public final class MusicService: NSObject, ObservableObject {
         let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
         
         if isTrackChanged {
+            if let oldTrack = self.currentTrack, !oldTrack.name.isEmpty {
+                if self.sessionHistory.last?.name != oldTrack.name || self.sessionHistory.last?.artist != oldTrack.artist {
+                    self.sessionHistory.append(oldTrack)
+                    if self.sessionHistory.count > 10 {
+                        self.sessionHistory.removeFirst()
+                    }
+                }
+            }
             self.artworkImage = nil
             self.artworkState = .loading(trackId: updatedTrack.id)
             self.artworkRevision += 1
             self.artworkRetryCount = 0
             self.nextArtworkRetryDate = .distantPast
             loadArtwork(for: updatedTrack)
+            fetchUpcomingQueue(for: updatedTrack)
         } else if isArtworkChanged || shouldRetryArtwork {
             loadArtwork(for: updatedTrack)
         }
     }
     
+    // MARK: - Upcoming Queue Retrieval
+    
+    private func fetchUpcomingQueue(for track: MusicTrack) {
+        queueTask?.cancel()
+        guard !track.artist.isEmpty else { return }
+        
+        queueTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            
+            let queryTerm = (!track.album.isEmpty && track.album != track.name) ? "\(track.artist) \(track.album)" : track.artist
+            guard let encoded = queryTerm.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "https://itunes.apple.com/search?term=\(encoded)&entity=song&limit=15") else { return }
+            
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let httpRes = response as? HTTPURLResponse, httpRes.statusCode == 200 else { return }
+                guard !Task.isCancelled else { return }
+                
+                struct ITunesSearchResponse: Decodable {
+                    let results: [ITunesTrackResult]
+                }
+                struct ITunesTrackResult: Decodable {
+                    let trackId: Int?
+                    let trackName: String?
+                    let artistName: String?
+                    let collectionName: String?
+                    let artworkUrl100: String?
+                    let trackTimeMillis: Double?
+                }
+                
+                let decoded = try JSONDecoder().decode(ITunesSearchResponse.self, from: data)
+                var queued: [MusicTrack] = []
+                
+                for item in decoded.results {
+                    guard let name = item.trackName, !name.isEmpty,
+                          let artist = item.artistName else { continue }
+                    if name.lowercased() == track.name.lowercased() { continue }
+                    if self.sessionHistory.contains(where: { $0.name.lowercased() == name.lowercased() }) { continue }
+                    if queued.contains(where: { $0.name.lowercased() == name.lowercased() }) { continue }
+                    
+                    let artURL = item.artworkUrl100?.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+                    let dur = (item.trackTimeMillis ?? 0) / 1000.0
+                    let qTrack = MusicTrack(
+                        id: "itunes:\(item.trackId ?? queued.count)",
+                        name: name,
+                        artist: artist,
+                        album: item.collectionName ?? track.album,
+                        artworkURL: artURL,
+                        duration: dur,
+                        source: track.source
+                    )
+                    queued.append(qTrack)
+                    if queued.count >= 8 { break }
+                }
+                
+                guard !Task.isCancelled else { return }
+                self.upcomingQueue = queued
+            } catch {
+                // Keep existing or leave empty on error
+            }
+        }
+    }
+    
     // MARK: - Playback Controls
+    
+    public func playTrack(_ track: MusicTrack) {
+        if activeSource == .spotify {
+            if track.id.starts(with: "spotify:track:") {
+                runCommand("play track \"\(track.id)\"", on: "Spotify")
+            } else {
+                nextTrack()
+            }
+        } else {
+            let safeName = track.name.replacingOccurrences(of: "\"", with: "\\\"")
+            let script = "tell application \"Music\" to play (first track whose name is \"\(safeName)\")"
+            Task.detached(priority: .userInitiated) {
+                if let appleScript = NSAppleScript(source: script) {
+                    var error: NSDictionary?
+                    appleScript.executeAndReturnError(&error)
+                }
+            }
+        }
+    }
     
     public func playPause() {
         let appName = (activeSource == .appleMusic) ? "Music" : "Spotify"

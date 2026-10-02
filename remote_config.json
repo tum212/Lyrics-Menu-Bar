@@ -1,9 +1,9 @@
 {
-  "version": "1.3.0",
-  "build": 45,
+  "version": "1.3.1",
+  "build": 46,
   "release_date": "2026-10-02",
-  "release_notes": "macOS Genie window transition, iPod 3D Cover Flow artwork animations with pause shrinkage, tactile Apple Music playback controls, and click-to-activate music player.",
-  "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.0/LyricsMenuBar-1.3.0.dmg",
+  "release_notes": "iPhone Dynamic Island squircle animation in menu bar, full-screen 3D iPod Classic Cover Flow in HUD with live queue/history browsing and mirror reflections.",
+  "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {
     "lrclib_search": "https://lrclib.net/api/search",
