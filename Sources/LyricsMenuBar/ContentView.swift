@@ -53,14 +53,22 @@ struct ContentView: View {
                 .background(Color.clear)
             
             if updateManager.showUpdateModal {
-                Color.black.opacity(0.4)
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                Color.black.opacity(0.25)
+                    .background(.ultraThinMaterial.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                    .onTapGesture {
+                        if case .downloading = updateManager.state {
+                            // keep open during download
+                        } else {
+                            updateManager.cancelDownload()
+                        }
+                    }
                 
                 UpdateModalView()
-                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: updateManager.showUpdateModal)
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: updateManager.showUpdateModal)
         .onChange(of: musicService.currentTrack?.id) { _ in
                 LyricLineLayoutCache.shared.clear()
                 if let track = musicService.currentTrack {
@@ -1168,91 +1176,218 @@ struct NativeSettingsMenu: NSViewRepresentable {
     }
 }
 
-// MARK: - Update Modal View
+// MARK: - Native macOS Update Modal View
 struct UpdateModalView: View {
     @ObservedObject var updateManager = UpdateManager.shared
 
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                    .font(.system(size: 26))
-                    .foregroundStyle(.white.opacity(0.9))
+    private var appIcon: NSImage {
+        if let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
+           let img = NSImage(contentsOfFile: iconPath) {
+            return img
+        }
+        if let img = NSImage(named: "AppIcon") { return img }
+        if let img = NSImage(named: NSImage.applicationIconName) { return img }
+        return NSApp.applicationIconImage ?? NSImage()
+    }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    if case .updateAvailable(let version, _, _) = updateManager.state {
-                        Text("Lyrics Menu Bar v\(version)")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white)
-                    } else if case .downloading(let progress) = updateManager.state {
-                        Text("Downloading update (\(Int(progress * 100))%)...")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white)
-                    } else if case .installing = updateManager.state {
-                        Text("Installing & relaunching...")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white)
-                    } else if case .failed = updateManager.state {
-                        Text("Update failed")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.red)
-                    } else {
-                        Text("Update Available")
-                            .font(.system(size: 13, weight: .bold))
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // ── Header: App Icon + Title + Version + Dismiss Button ──
+            HStack(alignment: .top, spacing: 12) {
+                // App Icon with subtle depth & badge
+                ZStack(alignment: .bottomTrailing) {
+                    Image(nsImage: appIcon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.20), lineWidth: 0.75)
+                        )
+                        .shadow(color: Color.black.opacity(0.35), radius: 5, x: 0, y: 2)
+
+                    // Small indicator badge
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(red: 0.1, green: 0.55, blue: 1.0), Color(red: 0.0, green: 0.38, blue: 0.88)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .frame(width: 16, height: 16)
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.4), lineWidth: 0.5))
+                            .shadow(color: Color.blue.opacity(0.4), radius: 3, x: 0, y: 1)
+
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 8, weight: .bold))
                             .foregroundColor(.white)
                     }
-
-                    Text("Current version: v\(updateManager.currentVersion)")
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.6))
+                    .offset(x: 3, y: 3)
                 }
 
-                Spacer()
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text("Software Update")
+                            .font(.system(size: 13.5, weight: .bold))
+                            .foregroundColor(.white)
 
+                        if case .updateAvailable(let version, _, _) = updateManager.state {
+                            Text("v\(version)")
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .foregroundColor(Color(red: 0.4, green: 0.8, blue: 1.0))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(Color(red: 0.1, green: 0.5, blue: 1.0).opacity(0.2))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule().strokeBorder(Color(red: 0.2, green: 0.6, blue: 1.0).opacity(0.35), lineWidth: 0.5)
+                                )
+                        }
+                    }
+
+                    if case .updateAvailable(let version, _, _) = updateManager.state {
+                        Text("Lyrics Menu Bar \(version) is available (Current: v\(updateManager.currentVersion))")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.70))
+                    } else if case .downloading = updateManager.state {
+                        Text("Downloading package from GitHub Releases...")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.70))
+                    } else if case .installing = updateManager.state {
+                        Text("Verifying package and relaunching application...")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.70))
+                    } else if case .failed(let err) = updateManager.state {
+                        Text(err)
+                            .font(.system(size: 11))
+                            .foregroundColor(Color.red.opacity(0.9))
+                            .lineLimit(1)
+                    } else {
+                        Text("Current version: v\(updateManager.currentVersion)")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.70))
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                // Native macOS circular close button
                 Button(action: {
                     updateManager.cancelDownload()
                 }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 15))
-                        .foregroundColor(.white.opacity(0.5))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(.white.opacity(0.6))
+                        .frame(width: 20, height: 20)
+                        .background(Color.white.opacity(0.08), in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
                 }
                 .buttonStyle(.plain)
+                .help("Close")
             }
 
+            // ── Body: Release Notes / Progress ──
             if case .updateAvailable(_, let notes, _) = updateManager.state {
-                ScrollView {
-                    Text(notes)
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.85))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(6)
+                VStack(alignment: .leading, spacing: 4) {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(notes)
+                            .font(.system(size: 11, weight: .regular))
+                            .lineSpacing(3)
+                            .foregroundColor(.white.opacity(0.85))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                    }
+                    .frame(maxHeight: 64)
+                    .background(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                    )
                 }
-                .frame(maxHeight: 55)
-                .background(Color.black.opacity(0.25))
-                .cornerRadius(6)
+            } else if case .downloading(let progress) = updateManager.state {
+                VStack(spacing: 6) {
+                    HStack {
+                        Text("Downloading update")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.75))
+                        Spacer()
+                        Text("\(Int(progress * 100))%")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white)
+                    }
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.white.opacity(0.12))
+                                .frame(height: 6)
+
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 0.1, green: 0.6, blue: 1.0),
+                                            Color(red: 0.35, green: 0.85, blue: 1.0)
+                                        ],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: max(6, geo.size.width * CGFloat(progress)), height: 6)
+                                .shadow(color: Color.blue.opacity(0.5), radius: 3, x: 0, y: 0)
+                        }
+                    }
+                    .frame(height: 6)
+                    .padding(.vertical, 2)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.black.opacity(0.25))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                )
+            } else if case .installing = updateManager.state {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .frame(width: 16, height: 16)
+                    Text("Restarting app in a moment...")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 12)
             }
 
-            if case .downloading(let progress) = updateManager.state {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-                    .tint(.white)
-                    .padding(.vertical, 4)
-            }
-
-            if case .failed(let err) = updateManager.state {
-                Text(err)
-                    .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.8))
-                    .lineLimit(2)
-            }
-
-            HStack(spacing: 12) {
-                Button("Later") {
+            // ── Footer: Action Buttons ──
+            HStack(spacing: 10) {
+                Button(action: {
                     updateManager.cancelDownload()
+                }) {
+                    Text(updateManager.state == .installing ? "Dismiss" : "Later")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(.white.opacity(0.8))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+                        )
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.white.opacity(0.7))
-                .font(.system(size: 11))
 
                 Spacer()
 
@@ -1260,37 +1395,72 @@ struct UpdateModalView: View {
                     Button(action: {
                         updateManager.startDownloadAndInstall()
                     }) {
-                        Text("Update Now")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .background(Color.white)
-                            .cornerRadius(10)
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Update Now")
+                                .font(.system(size: 11.5, weight: .semibold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.08, green: 0.52, blue: 1.0),
+                                    Color(red: 0.04, green: 0.40, blue: 0.92)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [Color.white.opacity(0.40), Color.white.opacity(0.10)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 0.5
+                                )
+                        )
+                        .shadow(color: Color.blue.opacity(0.40), radius: 6, x: 0, y: 2)
                     }
                     .buttonStyle(.plain)
-                } else if case .downloading = updateManager.state {
-                    Text("Downloading...")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
-                } else if case .installing = updateManager.state {
-                    Text("Restarting...")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
                 }
             }
         }
         .padding(14)
-        .frame(width: 360)
+        .frame(width: 410)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(white: 0.12).opacity(0.95))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.2), lineWidth: 0.75)
-                )
+            ZStack {
+                // Frosted Ultra-thin material
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+
+                // Controlled ambient tint for deep contrast
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(white: 0.10).opacity(0.72))
+
+                // Native specular rim stroke
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.35),
+                                Color.white.opacity(0.12),
+                                Color.white.opacity(0.04)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.75
+                    )
+            }
         )
-        .shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 10)
+        .shadow(color: Color.black.opacity(0.45), radius: 24, x: 0, y: 12)
     }
 }
 
