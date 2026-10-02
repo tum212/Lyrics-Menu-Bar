@@ -36,7 +36,13 @@ struct ContentView: View {
     // Track which lyric index is active for scroll animation
     @State private var displayedIndex: Int = 0
     @State private var isLyricsHovered: Bool = false
-    @State private var isCoverFlowMode: Bool = false
+    @State private var isArtHovered: Bool = false
+    @State private var isActionTriggered: Bool = false
+    @State private var actionTriggerWorkItem: DispatchWorkItem? = nil
+
+    private var showCoverFlowPeek: Bool {
+        isArtHovered || isActionTriggered
+    }
     
     // User preferences
     @AppStorage("showLyrics") private var showLyrics = true
@@ -71,28 +77,44 @@ struct ContentView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: updateManager.showUpdateModal)
         .onChange(of: musicService.currentTrack?.id) { _ in
-                LyricLineLayoutCache.shared.clear()
-                if let track = musicService.currentTrack {
-                    lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
-                } else {
-                    lyricsService.lyrics = []
-                }
-                displayedIndex = 0
+            triggerCoverFlowPeek()
+            LyricLineLayoutCache.shared.clear()
+            if let track = musicService.currentTrack {
+                lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
+            } else {
+                lyricsService.lyrics = []
             }
-            .onChange(of: lyricsService.lyrics.count) { _ in
-                LyricLineLayoutCache.shared.clear()
+            displayedIndex = 0
+        }
+        .onChange(of: lyricsService.lyrics.count) { _ in
+            LyricLineLayoutCache.shared.clear()
+        }
+        .onChange(of: musicService.isPlaying) { isPlaying in
+            triggerCoverFlowPeek()
+            handlePlayStateChange(isPlaying)
+        }
+        .onAppear {
+            handlePlayStateChange(musicService.isPlaying)
+        }
+        .onDisappear {
+            if waveformBars == 0 {
+                audioAnalyzer.stop()
             }
-            .onChange(of: musicService.isPlaying) { isPlaying in
-                handlePlayStateChange(isPlaying)
+        }
+    }
+
+    private func triggerCoverFlowPeek() {
+        actionTriggerWorkItem?.cancel()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+            isActionTriggered = true
+        }
+        let work = DispatchWorkItem {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                isActionTriggered = false
             }
-            .onAppear {
-                handlePlayStateChange(musicService.isPlaying)
-            }
-            .onDisappear {
-                if waveformBars == 0 {
-                    audioAnalyzer.stop()
-                }
-            }
+        }
+        actionTriggerWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
     }
 
     private func handlePlayStateChange(_ isPlaying: Bool) {
@@ -127,76 +149,96 @@ struct ContentView: View {
 
     private var mainContent: some View {
         ZStack(alignment: .topTrailing) {
-            if isCoverFlowMode {
-                CoverFlowView(musicService: musicService, isCoverFlowMode: $isCoverFlowMode)
-                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
-            } else {
-                // Single unified content container - NO inner cards
-                HStack(spacing: 20) {
-                    playerLeftColumn
+            // Single unified content container - NO inner cards
+            HStack(spacing: 20) {
+                playerLeftColumn
 
-                    // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
-                    GeometryReader { geometry in
-                        lyricsPanel(containerWidth: geometry.size.width)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                // MARK: Right Column - Continuous Lyrics Stream (~290pt Dynamic Geometry)
+                GeometryReader { geometry in
+                    lyricsPanel(containerWidth: geometry.size.width)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
-                .frame(width: 480, height: 240)
-                .transition(.opacity.combined(with: .scale(scale: 1.02)))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .frame(width: 480, height: 240)
 
             topRightControls
                 .padding([.top, .trailing], 14)
         }
-        .animation(.spring(response: 0.38, dampingFraction: 0.80), value: isCoverFlowMode)
     }
 
     // MARK: - Left Column - Player Info (130pt)
     @ViewBuilder
     private var playerLeftColumn: some View {
         VStack(spacing: 0) {
-            // Album Art with iPod 3D Cover Flow & Apple Music Pause Compression (Click to toggle full Cover Flow)
-            Button(action: {
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
-                    isCoverFlowMode.toggle()
-                }
-                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-            }) {
-                ZStack {
-                    Group {
-                        if let image = musicService.activeArtworkImage {
-                            Image(nsImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } else {
-                            placeholderArt
-                        }
+            // Album Art with iPod 3D Cover Flow Peek (Hover or Triggered on prev/playpause/next)
+            ZStack {
+                // Left Peek Card (Previous Track)
+                AlbumPeekCard(track: musicService.sessionHistory.last, fallbackIcon: "backward.fill")
+                    .rotation3DEffect(
+                        .degrees(showCoverFlowPeek ? 52 : 0),
+                        axis: (x: 0, y: 1, z: 0),
+                        anchor: .trailing,
+                        perspective: 0.5
+                    )
+                    .scaleEffect(showCoverFlowPeek ? 0.86 : 0.70)
+                    .offset(x: showCoverFlowPeek ? -30 : 0)
+                    .opacity(showCoverFlowPeek ? 0.85 : 0.0)
+                    .zIndex(0)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        musicService.previousTrack()
+                        triggerCoverFlowPeek()
+                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
                     }
-                    .frame(width: 116, height: 116)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .id(musicService.currentTrack?.id ?? "none")
-                    .transition(.coverFlow(direction: musicService.navigationDirection))
+
+                // Right Peek Card (Next Track)
+                AlbumPeekCard(track: musicService.upcomingQueue.first, fallbackIcon: "forward.fill")
+                    .rotation3DEffect(
+                        .degrees(showCoverFlowPeek ? -52 : 0),
+                        axis: (x: 0, y: 1, z: 0),
+                        anchor: .leading,
+                        perspective: 0.5
+                    )
+                    .scaleEffect(showCoverFlowPeek ? 0.86 : 0.70)
+                    .offset(x: showCoverFlowPeek ? 30 : 0)
+                    .opacity(showCoverFlowPeek ? 0.85 : 0.0)
+                    .zIndex(0)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        musicService.nextTrack()
+                        triggerCoverFlowPeek()
+                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                    }
+
+                // Center Album Artwork (Clean, No Shadow)
+                Group {
+                    if let image = musicService.activeArtworkImage {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        placeholderArt
+                    }
                 }
-                .frame(width: 116, height: 116)
-                // Pause scale compression with Apple spring physics
-                .scaleEffect(musicService.isPlaying ? 1.0 : 0.88)
-                .animation(.spring(response: 0.38, dampingFraction: 0.68), value: musicService.isPlaying)
-                .shadow(
-                    color: Color.black.opacity(musicService.isPlaying ? 0.38 : 0.20),
-                    radius: musicService.isPlaying ? 8 : 4,
-                    x: 0,
-                    y: musicService.isPlaying ? 4 : 2
+                .frame(width: 114, height: 114)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
                 )
+                .id(musicService.currentTrack?.id ?? "none")
+                .transition(.coverFlow(direction: musicService.navigationDirection))
+                .scaleEffect(musicService.isPlaying ? 1.0 : 0.90)
+                .animation(.spring(response: 0.38, dampingFraction: 0.68), value: musicService.isPlaying)
+                .zIndex(2)
             }
-            .buttonStyle(PlainButtonStyle())
-            .help("Click to expand 3D Cover Flow")
-            .onHover { isHovered in
-                if isHovered {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
+            .frame(width: 114, height: 114)
+            .animation(.spring(response: 0.36, dampingFraction: 0.76), value: showCoverFlowPeek)
+            .onHover { hovering in
+                withAnimation(.spring(response: 0.36, dampingFraction: 0.76)) {
+                    isArtHovered = hovering
                 }
             }
 
@@ -211,15 +253,13 @@ struct ContentView: View {
                     Text(musicService.currentTrack?.name ?? "No Music Playing")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(.white)
-                        .shadow(color: Color.black.opacity(0.45), radius: 2, x: 0, y: 1)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: 130, alignment: .center)
 
                     Text(musicService.currentTrack?.artist ?? "Open Spotify or Apple Music")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
-                        .shadow(color: Color.black.opacity(0.40), radius: 2, x: 0, y: 1)
+                        .foregroundColor(.white.opacity(0.70))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: 130, alignment: .center)
@@ -242,6 +282,7 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 AppleMusicControlButton(systemName: "backward.fill", size: 15, frameSize: 32) {
                     musicService.previousTrack()
+                    triggerCoverFlowPeek()
                 }
 
                 AppleMusicControlButton(
@@ -250,10 +291,12 @@ struct ContentView: View {
                     frameSize: 40
                 ) {
                     musicService.playPause()
+                    triggerCoverFlowPeek()
                 }
 
                 AppleMusicControlButton(systemName: "forward.fill", size: 15, frameSize: 32) {
                     musicService.nextTrack()
+                    triggerCoverFlowPeek()
                 }
             }
         }
@@ -264,23 +307,6 @@ struct ContentView: View {
     @ViewBuilder
     private var topRightControls: some View {
         HStack(spacing: 8) {
-            Button(action: {
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) {
-                    isCoverFlowMode.toggle()
-                }
-                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-            }) {
-                Image(systemName: isCoverFlowMode ? "quote.bubble.fill" : "rectangle.stack.fill")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.white.opacity(0.85))
-                    .frame(width: 26, height: 26)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
-            }
-            .buttonStyle(PlainButtonStyle())
-            .focusable(false)
-            .help(isCoverFlowMode ? "Show Lyrics" : "Show 3D Cover Flow")
-
             ZStack(alignment: .topTrailing) {
                 NativeSettingsMenu()
                     .frame(width: 26, height: 26)
@@ -1594,7 +1620,6 @@ struct AppleMusicControlButton: View {
                 Image(systemName: systemName)
                     .font(.system(size: size, weight: .semibold))
                     .foregroundColor(.white.opacity(isHovered ? 1.0 : 0.88))
-                    .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
             }
             .scaleEffect(isPressed ? 0.86 : (isHovered ? 1.06 : 1.0))
             .animation(.spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
