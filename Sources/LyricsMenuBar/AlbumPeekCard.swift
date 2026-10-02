@@ -5,6 +5,8 @@ import AppKit
 struct AlbumPeekCard: View {
     let track: MusicTrack?
     let fallbackIcon: String
+    var size: CGFloat = 120
+    var cornerRadius: CGFloat = 14
     @State private var loadedImage: NSImage?
 
     var body: some View {
@@ -19,18 +21,18 @@ struct AlbumPeekCard: View {
                     .aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(Color.white.opacity(0.08))
                     Image(systemName: fallbackIcon)
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundColor(.white.opacity(0.40))
                 }
             }
         }
-        .frame(width: 106, height: 106)
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
         )
         .task(id: track?.id) {
