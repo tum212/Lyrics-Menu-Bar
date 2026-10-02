@@ -380,7 +380,8 @@ public final class LyricsService: ObservableObject {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "+&?=/")
         let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
-        let urlStr = "https://lrclib.net/api/search?q=\(encoded)"
+        let endpoint = RemoteConfigManager.lrclibSearchEndpoint
+        let urlStr = "\(endpoint)?q=\(encoded)"
         guard let url = URL(string: urlStr) else { return [] }
         
         var req = URLRequest(url: url, timeoutInterval: 15)
@@ -425,7 +426,8 @@ public final class LyricsService: ObservableObject {
         let tEnc = track.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
         let aEnc = artist.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
         let alEnc = album.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
-        let urlStr = "https://lrclib.net/api/get?track_name=\(tEnc)&artist_name=\(aEnc)&album_name=\(alEnc)"
+        let endpoint = RemoteConfigManager.lrclibGetEndpoint
+        let urlStr = "\(endpoint)?track_name=\(tEnc)&artist_name=\(aEnc)&album_name=\(alEnc)"
         guard let url = URL(string: urlStr) else { return [] }
         
         var req = URLRequest(url: url, timeoutInterval: 15)
@@ -515,7 +517,8 @@ public final class LyricsService: ObservableObject {
         allowed.remove(charactersIn: "+&?=/")
         let aEnc = artist.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
         let tEnc = track.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
-        let urlStr = "https://api.lyrics.ovh/v1/\(aEnc)/\(tEnc)"
+        let endpoint = RemoteConfigManager.lyricsOvhEndpoint
+        let urlStr = "\(endpoint)/\(aEnc)/\(tEnc)"
         guard let url = URL(string: urlStr) else { return [] }
         
         var req = URLRequest(url: url, timeoutInterval: 15)

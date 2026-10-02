@@ -44,12 +44,24 @@ struct ContentView: View {
     @AppStorage("hapticEnabled") private var hapticEnabled = false
     @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
     @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = true
+    @ObservedObject private var updateManager = UpdateManager.shared
 
     var body: some View {
-        mainContent
-            .overlay(specularBorder)
-            .background(Color.clear)
-            .onChange(of: musicService.currentTrack?.id) { _ in
+        ZStack {
+            mainContent
+                .overlay(specularBorder)
+                .background(Color.clear)
+            
+            if updateManager.showUpdateModal {
+                Color.black.opacity(0.4)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                
+                UpdateModalView()
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: updateManager.showUpdateModal)
+        .onChange(of: musicService.currentTrack?.id) { _ in
                 LyricLineLayoutCache.shared.clear()
                 if let track = musicService.currentTrack {
                     lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
@@ -196,12 +208,21 @@ struct ContentView: View {
     @ViewBuilder
     private var topRightControls: some View {
         HStack(spacing: 8) {
-            NativeSettingsMenu()
-                .frame(width: 26, height: 26)
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
-                .menuIndicator(.hidden)
-                .fixedSize()
+            ZStack(alignment: .topTrailing) {
+                NativeSettingsMenu()
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+
+                if updateManager.hasUpdate {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 7, height: 7)
+                        .offset(x: -1, y: 1)
+                }
+            }
 
             Button(action: { NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil) }) {
                 Image(systemName: "chevron.up")
@@ -1000,6 +1021,11 @@ struct NativeSettingsMenu: NSViewRepresentable {
             
             menu.addItem(.separator())
             
+            let updateTitle = UpdateManager.shared.hasUpdate ? "Check for Updates... (Update Available)" : "Check for Updates..."
+            let updateItem = NSMenuItem(title: updateTitle, action: #selector(checkForUpdates), keyEquivalent: "")
+            updateItem.target = self
+            menu.addItem(updateItem)
+            
             let aboutItem = NSMenuItem(title: "About & License...", action: #selector(showAbout), keyEquivalent: "")
             aboutItem.target = self
             menu.addItem(aboutItem)
@@ -1014,6 +1040,12 @@ struct NativeSettingsMenu: NSViewRepresentable {
             menu.popUp(positioning: nil, at: pt, in: sender)
         }
         
+        @objc func checkForUpdates() {
+            Task { @MainActor in
+                await UpdateManager.shared.checkForUpdates(manual: true)
+            }
+        }
+        
         @objc func setMusicSource(_ sender: NSMenuItem) {
             if let key = sender.representedObject as? String {
                 parent.musicSourceMode = key
@@ -1025,7 +1057,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
         
         @objc func showAbout() {
             let alert = NSAlert()
-            alert.messageText = "Lyrics Menu Bar 1.2.0"
+            alert.messageText = "Lyrics Menu Bar \(UpdateManager.shared.currentVersion)"
             alert.informativeText = "Native Glass HUD for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
@@ -1133,6 +1165,132 @@ struct NativeSettingsMenu: NSViewRepresentable {
                 parent.waveformBars = min(max(0, val), 128)
             }
         }
+    }
+}
+
+// MARK: - Update Modal View
+struct UpdateModalView: View {
+    @ObservedObject var updateManager = UpdateManager.shared
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.white.opacity(0.9))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    if case .updateAvailable(let version, _, _) = updateManager.state {
+                        Text("Lyrics Menu Bar v\(version)")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                    } else if case .downloading(let progress) = updateManager.state {
+                        Text("Downloading update (\(Int(progress * 100))%)...")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                    } else if case .installing = updateManager.state {
+                        Text("Installing & relaunching...")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                    } else if case .failed = updateManager.state {
+                        Text("Update failed")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.red)
+                    } else {
+                        Text("Update Available")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+
+                    Text("Current version: v\(updateManager.currentVersion)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+
+                Spacer()
+
+                Button(action: {
+                    updateManager.cancelDownload()
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundColor(.white.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if case .updateAvailable(_, let notes, _) = updateManager.state {
+                ScrollView {
+                    Text(notes)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.85))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                }
+                .frame(maxHeight: 55)
+                .background(Color.black.opacity(0.25))
+                .cornerRadius(6)
+            }
+
+            if case .downloading(let progress) = updateManager.state {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .tint(.white)
+                    .padding(.vertical, 4)
+            }
+
+            if case .failed(let err) = updateManager.state {
+                Text(err)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.8))
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 12) {
+                Button("Later") {
+                    updateManager.cancelDownload()
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.white.opacity(0.7))
+                .font(.system(size: 11))
+
+                Spacer()
+
+                if case .updateAvailable = updateManager.state {
+                    Button(action: {
+                        updateManager.startDownloadAndInstall()
+                    }) {
+                        Text("Update Now")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color.white)
+                            .cornerRadius(10)
+                    }
+                    .buttonStyle(.plain)
+                } else if case .downloading = updateManager.state {
+                    Text("Downloading...")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                } else if case .installing = updateManager.state {
+                    Text("Restarting...")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 360)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(white: 0.12).opacity(0.95))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.2), lineWidth: 0.75)
+                )
+        )
+        .shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 10)
     }
 }
 

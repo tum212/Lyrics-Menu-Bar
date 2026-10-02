@@ -72,6 +72,10 @@
 - Calibrated 5ms lead time so the tactile pulse matches the acoustic output.
 - Multiple intensity presets (Off, Subtle, Medium, Strong) and selectable actuator types.
 
+### In-App Updates & Remote Config
+- Automatic update checks against GitHub releases with 1-click in-app download and restart.
+- Dynamic Git-hosted remote configuration (`remote_config.json`) for zero-downtime lyrics endpoint updates and announcements.
+
 ---
 
 ## How It Works
@@ -162,8 +166,9 @@ bash build_dmg.sh
 ```
 LyricsMenuBar/
 ├── Package.swift                    # Swift Package Manager manifest (macOS 14.2+)
-├── build_dmg.sh                     # DMG packaging script
+├── build_dmg.sh                     # DMG packaging script (Universal arm64 + x86_64)
 ├── LyricsMenuBar.entitlements       # Hardened runtime & CoreAudio entitlements
+├── remote_config.json               # Remote configuration & version database
 ├── icon.icns                        # Application icon
 ├── docs/images/                     # Screenshots and demo GIFs
 ├── Sources/
@@ -175,6 +180,8 @@ LyricsMenuBar/
 │       ├── MusicService.swift       # Apple Music & Spotify IPC bridge
 │       ├── AudioAnalyzer.swift      # CoreAudio process tap & vDSP FFT analysis
 │       ├── HapticManager.swift      # Force Touch trackpad driver via MultitouchSupport
+│       ├── RemoteConfigManager.swift # Git-hosted dynamic config & endpoint provider
+│       ├── UpdateManager.swift      # In-app version checker & 1-click DMG installer
 │       ├── ColorExtractor.swift     # Album art color palette extraction
 │       ├── LaunchAtLoginManager.swift # Login item manager using SMAppService
 │       └── SpotifyService.swift     # Legacy bridge
