@@ -1,8 +1,8 @@
 {
   "version": "1.3.1",
-  "build": 49,
+  "build": 50,
   "release_date": "2026-10-02",
-  "release_notes": "Enlarged 120pt Cover Flow artwork, authentic iPod 60-degree 3D tilt reaching HUD edges, and buttery smooth non-jerky animation physics.",
+  "release_notes": "Senior Apple animation physics: natural settling duration for Genie effect, slower 0.75s squircle pop & morph, and visual snapshot deck for fluid continuous Cover Flow.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {

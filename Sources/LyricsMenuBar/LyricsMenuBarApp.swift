@@ -293,19 +293,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
-        // 3. Apple Spring Physics for snappy opening
+        // 3. Apple Spring Physics for fluid, non-jerking opening
         let springAnim = CASpringAnimation(keyPath: "transform")
         springAnim.mass = 1.0
-        springAnim.stiffness = 280.0
-        springAnim.damping = 24.0
+        springAnim.stiffness = 175.0
+        springAnim.damping = 22.0
         springAnim.fromValue = NSValue(caTransform3D: collapsed)
         springAnim.toValue = NSValue(caTransform3D: CATransform3DIdentity)
-        springAnim.duration = 0.32
+        springAnim.duration = springAnim.settlingDuration
         
         let fadeAnim = CABasicAnimation(keyPath: "opacity")
         fadeAnim.fromValue = 0.0
         fadeAnim.toValue = 1.0
-        fadeAnim.duration = 0.18
+        fadeAnim.duration = 0.30
+        fadeAnim.timingFunction = CAMediaTimingFunction(name: .easeOut)
         
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self] in
@@ -338,13 +339,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let transformAnim = CABasicAnimation(keyPath: "transform")
         transformAnim.fromValue = NSValue(caTransform3D: CATransform3DIdentity)
         transformAnim.toValue = NSValue(caTransform3D: collapsed)
-        transformAnim.duration = 0.22
+        transformAnim.duration = 0.28
         transformAnim.timingFunction = CAMediaTimingFunction(name: .easeIn)
         
         let fadeAnim = CABasicAnimation(keyPath: "opacity")
         fadeAnim.fromValue = 1.0
         fadeAnim.toValue = 0.0
-        fadeAnim.duration = 0.20
+        fadeAnim.duration = 0.24
         fadeAnim.timingFunction = CAMediaTimingFunction(name: .easeIn)
         
         CATransaction.begin()
@@ -1172,23 +1173,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         // 3. Draw album art with iPhone Dynamic Island Spring Pop & Breathe Morph
         if showAlbumArt, let currentArt = cachedAlbumArtImage {
-            // Morph scale & opacity smoothly between playing (1.0) and paused (0.80)
+            // Morph scale & opacity smoothly between playing (1.0) and paused (0.80) with slow, organic breathe
             let targetScale: CGFloat = spotify.isPlaying ? 1.0 : 0.80
             let targetOpacity: CGFloat = spotify.isPlaying ? 1.0 : 0.72
-            currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.22
-            currentMenuBarArtOpacity += (targetOpacity - currentMenuBarArtOpacity) * 0.22
+            currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.08
+            currentMenuBarArtOpacity += (targetOpacity - currentMenuBarArtOpacity) * 0.08
             
             let now = CACurrentMediaTime()
             let elapsed = now - dynamicIslandPopStartTime
-            let isPopping = (elapsed < 0.45) && (previousAlbumArtImage != nil)
+            let popDuration: TimeInterval = 0.75
+            let isPopping = (elapsed < popDuration) && (previousAlbumArtImage != nil)
             
-            // Dynamic Island damped spring: starts ~0.55, bounces to ~1.15, settles to 1.0
+            // Dynamic Island damped spring: slow, organic, luxurious pop (0.75s)
             var popScale: CGFloat = 1.0
             if isPopping {
-                let t = CGFloat(elapsed / 0.45)
-                let decay = exp(-6.0 * t)
-                let oscillation = cos(14.0 * t)
-                popScale = 1.0 - (decay * oscillation * 0.45)
+                let t = CGFloat(elapsed / popDuration)
+                let decay = exp(-4.2 * t)
+                let oscillation = cos(8.5 * t)
+                popScale = 1.0 - (decay * oscillation * 0.42)
             }
             
             let effectiveScale = currentMenuBarArtScale * popScale
@@ -1198,9 +1200,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let xOffset: CGFloat = (20.0 - artW) / 2.0
             
             if isPopping, let prevArt = previousAlbumArtImage {
-                let t = CGFloat(elapsed / 0.45)
-                let outAlpha = max(0.0, 1.0 - t * 2.2) * currentMenuBarArtOpacity
-                let inAlpha = min(1.0, t * 1.8) * currentMenuBarArtOpacity
+                let t = CGFloat(elapsed / popDuration)
+                let outAlpha = max(0.0, 1.0 - t * 1.5) * currentMenuBarArtOpacity
+                let inAlpha = min(1.0, t * 1.3) * currentMenuBarArtOpacity
                 
                 if outAlpha > 0.01 {
                     prevArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),

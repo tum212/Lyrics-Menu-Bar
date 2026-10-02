@@ -677,15 +677,21 @@ public final class MusicService: NSObject, ObservableObject {
                 updatedTrack.artworkURL = self.currentTrack?.artworkURL
             }
         }
+        let previousTrackBeforeChange = self.currentTrack
+        let previousImageBeforeChange = self.artworkImage
         self.currentTrack = updatedTrack
         
         let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
         
         if isTrackChanged {
-            if let oldTrack = self.currentTrack, !oldTrack.name.isEmpty {
+            if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
                 var savedTrack = oldTrack
-                if savedTrack.artworkData == nil, let currentImg = self.artworkImage {
-                    savedTrack.artworkData = currentImg.tiffRepresentation
+                if let prevImg = previousImageBeforeChange {
+                    ArtworkCache.shared.setImage(prevImg, forKey: oldTrack.id)
+                    ArtworkCache.shared.setImage(prevImg, forKey: ArtworkCache.cacheKey(for: oldTrack))
+                    if savedTrack.artworkData == nil {
+                        savedTrack.artworkData = prevImg.tiffRepresentation
+                    }
                 }
                 if self.sessionHistory.last?.name != savedTrack.name || self.sessionHistory.last?.artist != savedTrack.artist {
                     self.sessionHistory.append(savedTrack)
@@ -694,6 +700,22 @@ public final class MusicService: NSObject, ObservableObject {
                     }
                 }
             }
+            
+            // Immediate synchronous upcoming baseline: ensure upcoming card is NEVER empty or blank
+            if self.upcomingQueue.isEmpty || self.upcomingQueue.first?.name == updatedTrack.name {
+                let baselineUpcoming = MusicTrack(
+                    id: "next_\(updatedTrack.id)",
+                    name: "Next Track",
+                    artist: updatedTrack.artist,
+                    album: updatedTrack.album,
+                    artworkURL: updatedTrack.artworkURL,
+                    artworkData: updatedTrack.artworkData ?? previousImageBeforeChange?.tiffRepresentation,
+                    duration: 0,
+                    source: updatedTrack.source
+                )
+                self.upcomingQueue = [baselineUpcoming]
+            }
+            
             self.artworkImage = nil
             self.artworkState = .loading(trackId: updatedTrack.id)
             self.artworkRevision += 1
@@ -715,11 +737,10 @@ public final class MusicService: NSObject, ObservableObject {
         queueTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             
-            let queryTerm = (!track.album.isEmpty && track.album != track.name) 
-                ? "\(track.artist) \(track.album)" 
-                : "\(track.artist) \(track.name)"
+            // Search by artist name to get full catalog queue
+            let queryTerm = track.artist
             guard let encoded = queryTerm.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                  let url = URL(string: "https://itunes.apple.com/search?term=\(encoded)&entity=song&limit=15") else { return }
+                  let url = URL(string: "https://itunes.apple.com/search?term=\(encoded)&entity=song&limit=25") else { return }
             
             do {
                 let (data, response) = try await URLSession.shared.data(from: url)
@@ -745,7 +766,6 @@ public final class MusicService: NSObject, ObservableObject {
                     guard let name = item.trackName, !name.isEmpty,
                           let artist = item.artistName else { continue }
                     
-                    // Strict artist/album match: do not accept random unrelated artists!
                     let artistMatch = artist.lowercased().contains(track.artist.lowercased()) ||
                                       track.artist.lowercased().contains(artist.lowercased())
                     guard artistMatch else { continue }
@@ -767,6 +787,20 @@ public final class MusicService: NSObject, ObservableObject {
                     )
                     queued.append(qTrack)
                     if queued.count >= 8 { break }
+                }
+                
+                // Pre-cache the upcoming card image directly into RAM so it is instant
+                if let firstUpcoming = queued.first, let artURL = firstUpcoming.artworkURL,
+                   let sanitizedURL = ArtworkLoader.sanitizeArtworkURL(artURL) {
+                    let key = ArtworkCache.cacheKey(for: firstUpcoming)
+                    if ArtworkCache.shared.image(forKey: key) == nil {
+                        _ = await ArtworkLoader.fetchImage(from: sanitizedURL, cacheKey: key)
+                    }
+                }
+                
+                guard !Task.isCancelled else { return }
+                if !queued.isEmpty {
+                    self.upcomingQueue = queued
                 }
                 
                 // If queue is empty, fallback to upcoming placeholder with SAME album art

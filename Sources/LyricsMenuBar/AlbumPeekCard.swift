@@ -5,17 +5,25 @@ import AppKit
 struct AlbumPeekCard: View {
     let track: MusicTrack?
     let fallbackIcon: String
+    var overrideImage: NSImage? = nil
     var size: CGFloat = 120
     var cornerRadius: CGFloat = 14
     @State private var loadedImage: NSImage?
 
+    private var activeImage: NSImage? {
+        if let direct = overrideImage { return direct }
+        if let t = track {
+            let key = ArtworkCache.cacheKey(for: t)
+            if let cached = ArtworkCache.shared.image(forKey: key) { return cached }
+            if let cached = ArtworkCache.shared.image(forKey: t.id) { return cached }
+            if let data = t.artworkData, let img = NSImage(data: data) { return img }
+        }
+        return loadedImage
+    }
+
     var body: some View {
         Group {
-            if let data = track?.artworkData, let img = NSImage(data: data) {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else if let img = loadedImage {
+            if let img = activeImage {
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fill)

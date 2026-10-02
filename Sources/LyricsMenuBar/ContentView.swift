@@ -37,6 +37,14 @@ struct ContentView: View {
     @State private var displayedIndex: Int = 0
     @State private var isLyricsHovered: Bool = false
     
+    // Visual Snapshot Deck (Decoupled from async network latency for 100% fluid transitions)
+    @State private var deckLeftTrack: MusicTrack?
+    @State private var deckLeftImage: NSImage?
+    @State private var deckCenterTrack: MusicTrack?
+    @State private var deckCenterImage: NSImage?
+    @State private var deckRightTrack: MusicTrack?
+    @State private var deckRightImage: NSImage?
+
     // iPod Cover Flow Carousel Animation State
     @State private var carouselSlide: CGFloat = 0.0 // -1.0 = sliding left to next, +1.0 = sliding right to prev
     @State private var isTransitioning: Bool = false
@@ -81,9 +89,7 @@ struct ContentView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: updateManager.showUpdateModal)
         .onChange(of: musicService.currentTrack?.id) { _ in
-            if !isTransitioning {
-                carouselSlide = 0.0
-            }
+            syncDeckIfIdle()
             schedulePeekRetraction()
             LyricLineLayoutCache.shared.clear()
             if let track = musicService.currentTrack {
@@ -93,6 +99,12 @@ struct ContentView: View {
             }
             displayedIndex = 0
         }
+        .onChange(of: musicService.artworkRevision) { _ in
+            syncDeckIfIdle()
+        }
+        .onChange(of: musicService.upcomingQueue.count) { _ in
+            syncDeckIfIdle()
+        }
         .onChange(of: lyricsService.lyrics.count) { _ in
             LyricLineLayoutCache.shared.clear()
         }
@@ -101,6 +113,7 @@ struct ContentView: View {
             handlePlayStateChange(isPlaying)
         }
         .onAppear {
+            syncDeckIfIdle()
             handlePlayStateChange(musicService.isPlaying)
         }
         .onDisappear {
@@ -110,24 +123,64 @@ struct ContentView: View {
         }
     }
 
+    private func syncDeckIfIdle() {
+        guard !isTransitioning else { return }
+        deckCenterTrack = musicService.currentTrack
+        deckCenterImage = musicService.activeArtworkImage
+        
+        deckLeftTrack = musicService.sessionHistory.last
+        if let lt = deckLeftTrack {
+            deckLeftImage = ArtworkCache.shared.image(forKey: lt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: lt))
+        } else {
+            deckLeftImage = nil
+        }
+        
+        deckRightTrack = musicService.upcomingQueue.first
+        if let rt = deckRightTrack {
+            deckRightImage = ArtworkCache.shared.image(forKey: rt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: rt))
+        } else {
+            deckRightImage = nil
+        }
+    }
+
     private func skipToNext() {
         guard !isTransitioning else { return }
         isTransitioning = true
         isActionTriggered = true
+        
+        // Lock deck snapshot
+        syncDeckIfIdle()
+        
         musicService.nextTrack()
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
 
-        withAnimation(.spring(response: 0.52, dampingFraction: 0.86)) {
+        // Slow, fluid, luxurious Apple spring curve (0.65s)
+        withAnimation(.spring(response: 0.65, dampingFraction: 0.88)) {
             carouselSlide = -1.0
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+            // Commit transition atomically:
+            deckLeftTrack = deckCenterTrack
+            deckLeftImage = deckCenterImage
+            
+            deckCenterTrack = deckRightTrack
+            deckCenterImage = deckRightImage
+            
+            deckRightTrack = musicService.upcomingQueue.first
+            if let rt = deckRightTrack {
+                deckRightImage = ArtworkCache.shared.image(forKey: rt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: rt))
+            } else {
+                deckRightImage = nil
+            }
+            
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 carouselSlide = 0.0
                 isTransitioning = false
             }
+            syncDeckIfIdle()
         }
         schedulePeekRetraction()
     }
@@ -136,36 +189,55 @@ struct ContentView: View {
         guard !isTransitioning else { return }
         isTransitioning = true
         isActionTriggered = true
+        
+        syncDeckIfIdle()
+        
         musicService.previousTrack()
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
 
-        withAnimation(.spring(response: 0.52, dampingFraction: 0.86)) {
+        // Slow, fluid, luxurious Apple spring curve (0.65s)
+        withAnimation(.spring(response: 0.65, dampingFraction: 0.88)) {
             carouselSlide = 1.0
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+            // Commit transition atomically:
+            deckRightTrack = deckCenterTrack
+            deckRightImage = deckCenterImage
+            
+            deckCenterTrack = deckLeftTrack
+            deckCenterImage = deckLeftImage
+            
+            deckLeftTrack = musicService.sessionHistory.last
+            if let lt = deckLeftTrack {
+                deckLeftImage = ArtworkCache.shared.image(forKey: lt.id) ?? ArtworkCache.shared.image(forKey: ArtworkCache.cacheKey(for: lt))
+            } else {
+                deckLeftImage = nil
+            }
+            
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 carouselSlide = 0.0
                 isTransitioning = false
             }
+            syncDeckIfIdle()
         }
         schedulePeekRetraction()
     }
 
     private func schedulePeekRetraction() {
         triggerWorkItem?.cancel()
-        withAnimation(.spring(response: 0.50, dampingFraction: 0.86)) {
+        withAnimation(.spring(response: 0.58, dampingFraction: 0.88)) {
             isActionTriggered = true
         }
         let work = DispatchWorkItem {
-            withAnimation(.spring(response: 0.60, dampingFraction: 0.88)) {
+            withAnimation(.spring(response: 0.70, dampingFraction: 0.90)) {
                 isActionTriggered = false
             }
         }
         triggerWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: work)
     }
 
     private func handlePlayStateChange(_ isPlaying: Bool) {
@@ -227,44 +299,56 @@ struct ContentView: View {
             ZStack {
                 // Card -1: Previous Track
                 let leftPos = -1.0 + carouselSlide
-                AlbumPeekCard(track: musicService.sessionHistory.last, fallbackIcon: "backward.fill", size: 120, cornerRadius: 14)
-                    .rotation3DEffect(
-                        .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, leftPos))) * 60.0 : 0.0),
-                        axis: (x: 0, y: 1, z: 0),
-                        anchor: .center,
-                        perspective: 0.0
-                    )
-                    .scaleEffect(showCoverFlow ? max(0.90, 1.0 - min(1.0, abs(leftPos)) * 0.10) : 0.75)
-                    .offset(x: showCoverFlow ? leftPos * 54.0 : 0.0)
-                    .opacity(showCoverFlow ? (abs(leftPos) <= 1.05 ? 0.95 : max(0.0, 0.95 - (abs(leftPos) - 1.05) * 2.0)) : 0.0)
-                    .zIndex(max(1.0, 10.0 - abs(leftPos) * 8.0))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        skipToPrevious()
-                    }
+                AlbumPeekCard(
+                    track: deckLeftTrack ?? musicService.sessionHistory.last,
+                    fallbackIcon: "backward.fill",
+                    overrideImage: deckLeftImage,
+                    size: 120,
+                    cornerRadius: 14
+                )
+                .rotation3DEffect(
+                    .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, leftPos))) * 60.0 : 0.0),
+                    axis: (x: 0, y: 1, z: 0),
+                    anchor: .center,
+                    perspective: 0.0
+                )
+                .scaleEffect(showCoverFlow ? max(0.90, 1.0 - min(1.0, abs(leftPos)) * 0.10) : 0.75)
+                .offset(x: showCoverFlow ? leftPos * 54.0 : 0.0)
+                .opacity(showCoverFlow ? (abs(leftPos) <= 1.05 ? 0.95 : max(0.0, 0.95 - (abs(leftPos) - 1.05) * 2.0)) : 0.0)
+                .zIndex(max(1.0, 10.0 - abs(leftPos) * 8.0))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    skipToPrevious()
+                }
 
                 // Card +1: Next Track
                 let rightPos = 1.0 + carouselSlide
-                AlbumPeekCard(track: musicService.upcomingQueue.first, fallbackIcon: "forward.fill", size: 120, cornerRadius: 14)
-                    .rotation3DEffect(
-                        .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, rightPos))) * 60.0 : 0.0),
-                        axis: (x: 0, y: 1, z: 0),
-                        anchor: .center,
-                        perspective: 0.0
-                    )
-                    .scaleEffect(showCoverFlow ? max(0.90, 1.0 - min(1.0, abs(rightPos)) * 0.10) : 0.75)
-                    .offset(x: showCoverFlow ? rightPos * 54.0 : 0.0)
-                    .opacity(showCoverFlow ? (abs(rightPos) <= 1.05 ? 0.95 : max(0.0, 0.95 - (abs(rightPos) - 1.05) * 2.0)) : 0.0)
-                    .zIndex(max(1.0, 10.0 - abs(rightPos) * 8.0))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        skipToNext()
-                    }
+                AlbumPeekCard(
+                    track: deckRightTrack ?? musicService.upcomingQueue.first,
+                    fallbackIcon: "forward.fill",
+                    overrideImage: deckRightImage,
+                    size: 120,
+                    cornerRadius: 14
+                )
+                .rotation3DEffect(
+                    .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, rightPos))) * 60.0 : 0.0),
+                    axis: (x: 0, y: 1, z: 0),
+                    anchor: .center,
+                    perspective: 0.0
+                )
+                .scaleEffect(showCoverFlow ? max(0.90, 1.0 - min(1.0, abs(rightPos)) * 0.10) : 0.75)
+                .offset(x: showCoverFlow ? rightPos * 54.0 : 0.0)
+                .opacity(showCoverFlow ? (abs(rightPos) <= 1.05 ? 0.95 : max(0.0, 0.95 - (abs(rightPos) - 1.05) * 2.0)) : 0.0)
+                .zIndex(max(1.0, 10.0 - abs(rightPos) * 8.0))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    skipToNext()
+                }
 
                 // Card 0: Current Playing Track
                 let centerPos = 0.0 + carouselSlide
                 Group {
-                    if let image = musicService.activeArtworkImage {
+                    if let image = deckCenterImage ?? musicService.activeArtworkImage {
                         Image(nsImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -289,9 +373,9 @@ struct ContentView: View {
                 .zIndex(max(1.0, 10.0 - abs(centerPos) * 8.0))
             }
             .frame(width: 120, height: 120)
-            .animation(.spring(response: 0.50, dampingFraction: 0.86), value: showCoverFlow)
+            .animation(.spring(response: 0.58, dampingFraction: 0.88), value: showCoverFlow)
             .onHover { hovering in
-                withAnimation(.spring(response: 0.50, dampingFraction: 0.86)) {
+                withAnimation(.spring(response: 0.58, dampingFraction: 0.88)) {
                     isArtHovered = hovering
                 }
             }
