@@ -1,8 +1,8 @@
 {
   "version": "1.3.1",
-  "build": 47,
+  "build": 48,
   "release_date": "2026-10-02",
-  "release_notes": "Clean minimal 3D Cover Flow peek on hover and playback actions, eliminated heavy shadows, always visible synchronized lyrics.",
+  "release_notes": "Symmetric parallel projection Cover Flow, fluid iPod continuous sliding animation on track navigation, strict artwork queue synchronization, clean shadowless HUD.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {

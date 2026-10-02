@@ -36,12 +36,16 @@ struct ContentView: View {
     // Track which lyric index is active for scroll animation
     @State private var displayedIndex: Int = 0
     @State private var isLyricsHovered: Bool = false
+    
+    // iPod Cover Flow Carousel Animation State
+    @State private var carouselSlide: CGFloat = 0.0 // -1.0 = sliding left to next, +1.0 = sliding right to prev
+    @State private var isTransitioning: Bool = false
     @State private var isArtHovered: Bool = false
     @State private var isActionTriggered: Bool = false
-    @State private var actionTriggerWorkItem: DispatchWorkItem? = nil
+    @State private var triggerWorkItem: DispatchWorkItem? = nil
 
-    private var showCoverFlowPeek: Bool {
-        isArtHovered || isActionTriggered
+    private var showCoverFlow: Bool {
+        isArtHovered || isActionTriggered || isTransitioning
     }
     
     // User preferences
@@ -77,7 +81,11 @@ struct ContentView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: updateManager.showUpdateModal)
         .onChange(of: musicService.currentTrack?.id) { _ in
-            triggerCoverFlowPeek()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                carouselSlide = 0.0
+                isTransitioning = false
+            }
+            schedulePeekRetraction()
             LyricLineLayoutCache.shared.clear()
             if let track = musicService.currentTrack {
                 lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
@@ -90,7 +98,7 @@ struct ContentView: View {
             LyricLineLayoutCache.shared.clear()
         }
         .onChange(of: musicService.isPlaying) { isPlaying in
-            triggerCoverFlowPeek()
+            schedulePeekRetraction()
             handlePlayStateChange(isPlaying)
         }
         .onAppear {
@@ -103,8 +111,52 @@ struct ContentView: View {
         }
     }
 
-    private func triggerCoverFlowPeek() {
-        actionTriggerWorkItem?.cancel()
+    private func skipToNext() {
+        guard !isTransitioning else { return }
+        isTransitioning = true
+        isActionTriggered = true
+        musicService.nextTrack()
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+            carouselSlide = -1.0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                carouselSlide = 0.0
+                isTransitioning = false
+            }
+        }
+        schedulePeekRetraction()
+    }
+
+    private func skipToPrevious() {
+        guard !isTransitioning else { return }
+        isTransitioning = true
+        isActionTriggered = true
+        musicService.previousTrack()
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+            carouselSlide = 1.0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                carouselSlide = 0.0
+                isTransitioning = false
+            }
+        }
+        schedulePeekRetraction()
+    }
+
+    private func schedulePeekRetraction() {
+        triggerWorkItem?.cancel()
         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
             isActionTriggered = true
         }
@@ -113,8 +165,8 @@ struct ContentView: View {
                 isActionTriggered = false
             }
         }
-        actionTriggerWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
+        triggerWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
     private func handlePlayStateChange(_ isPlaying: Bool) {
@@ -172,47 +224,46 @@ struct ContentView: View {
     @ViewBuilder
     private var playerLeftColumn: some View {
         VStack(spacing: 0) {
-            // Album Art with iPod 3D Cover Flow Peek (Hover or Triggered on prev/playpause/next)
+            // iPod Classic 3D Cover Flow Carousel (Symmetric, Parallel Projection, Continuous Slide)
             ZStack {
-                // Left Peek Card (Previous Track)
+                // Card -1: Previous Track
+                let leftPos = -1.0 + carouselSlide
                 AlbumPeekCard(track: musicService.sessionHistory.last, fallbackIcon: "backward.fill")
                     .rotation3DEffect(
-                        .degrees(showCoverFlowPeek ? 52 : 0),
+                        .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, leftPos))) * 46.0 : 0.0),
                         axis: (x: 0, y: 1, z: 0),
-                        anchor: .trailing,
-                        perspective: 0.5
+                        anchor: .center,
+                        perspective: 0.0
                     )
-                    .scaleEffect(showCoverFlowPeek ? 0.86 : 0.70)
-                    .offset(x: showCoverFlowPeek ? -30 : 0)
-                    .opacity(showCoverFlowPeek ? 0.85 : 0.0)
-                    .zIndex(0)
+                    .scaleEffect(showCoverFlow ? max(0.76, 1.0 - min(1.0, abs(leftPos)) * 0.24) : 0.70)
+                    .offset(x: showCoverFlow ? leftPos * 28.0 : 0.0)
+                    .opacity(showCoverFlow ? (abs(leftPos) <= 1.05 ? 0.88 : max(0.0, 0.88 - (abs(leftPos) - 1.0) * 2.0)) : 0.0)
+                    .zIndex(max(1.0, 10.0 - abs(leftPos) * 9.0))
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        musicService.previousTrack()
-                        triggerCoverFlowPeek()
-                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                        skipToPrevious()
                     }
 
-                // Right Peek Card (Next Track)
+                // Card +1: Next Track
+                let rightPos = 1.0 + carouselSlide
                 AlbumPeekCard(track: musicService.upcomingQueue.first, fallbackIcon: "forward.fill")
                     .rotation3DEffect(
-                        .degrees(showCoverFlowPeek ? -52 : 0),
+                        .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, rightPos))) * 46.0 : 0.0),
                         axis: (x: 0, y: 1, z: 0),
-                        anchor: .leading,
-                        perspective: 0.5
+                        anchor: .center,
+                        perspective: 0.0
                     )
-                    .scaleEffect(showCoverFlowPeek ? 0.86 : 0.70)
-                    .offset(x: showCoverFlowPeek ? 30 : 0)
-                    .opacity(showCoverFlowPeek ? 0.85 : 0.0)
-                    .zIndex(0)
+                    .scaleEffect(showCoverFlow ? max(0.76, 1.0 - min(1.0, abs(rightPos)) * 0.24) : 0.70)
+                    .offset(x: showCoverFlow ? rightPos * 28.0 : 0.0)
+                    .opacity(showCoverFlow ? (abs(rightPos) <= 1.05 ? 0.88 : max(0.0, 0.88 - (abs(rightPos) - 1.0) * 2.0)) : 0.0)
+                    .zIndex(max(1.0, 10.0 - abs(rightPos) * 9.0))
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        musicService.nextTrack()
-                        triggerCoverFlowPeek()
-                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                        skipToNext()
                     }
 
-                // Center Album Artwork (Clean, No Shadow)
+                // Card 0: Current Playing Track
+                let centerPos = 0.0 + carouselSlide
                 Group {
                     if let image = musicService.activeArtworkImage {
                         Image(nsImage: image)
@@ -222,20 +273,24 @@ struct ContentView: View {
                         placeholderArt
                     }
                 }
-                .frame(width: 114, height: 114)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .frame(width: 106, height: 106)
+                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
                 )
-                .id(musicService.currentTrack?.id ?? "none")
-                .transition(.coverFlow(direction: musicService.navigationDirection))
-                .scaleEffect(musicService.isPlaying ? 1.0 : 0.90)
-                .animation(.spring(response: 0.38, dampingFraction: 0.68), value: musicService.isPlaying)
-                .zIndex(2)
+                .rotation3DEffect(
+                    .degrees(showCoverFlow ? Double(max(-1.0, min(1.0, centerPos))) * 46.0 : 0.0),
+                    axis: (x: 0, y: 1, z: 0),
+                    anchor: .center,
+                    perspective: 0.0
+                )
+                .scaleEffect(musicService.isPlaying ? (showCoverFlow ? max(0.76, 1.0 - min(1.0, abs(centerPos)) * 0.24) : 1.0) : 0.90)
+                .offset(x: showCoverFlow ? centerPos * 28.0 : 0.0)
+                .zIndex(max(1.0, 10.0 - abs(centerPos) * 9.0))
             }
-            .frame(width: 114, height: 114)
-            .animation(.spring(response: 0.36, dampingFraction: 0.76), value: showCoverFlowPeek)
+            .frame(width: 106, height: 106)
+            .animation(.spring(response: 0.36, dampingFraction: 0.76), value: showCoverFlow)
             .onHover { hovering in
                 withAnimation(.spring(response: 0.36, dampingFraction: 0.76)) {
                     isArtHovered = hovering
@@ -281,8 +336,7 @@ struct ContentView: View {
             // Tactile Apple Music Playback Controls (Hover Glass Ring + Spring Depth)
             HStack(spacing: 8) {
                 AppleMusicControlButton(systemName: "backward.fill", size: 15, frameSize: 32) {
-                    musicService.previousTrack()
-                    triggerCoverFlowPeek()
+                    skipToPrevious()
                 }
 
                 AppleMusicControlButton(
@@ -291,12 +345,11 @@ struct ContentView: View {
                     frameSize: 40
                 ) {
                     musicService.playPause()
-                    triggerCoverFlowPeek()
+                    schedulePeekRetraction()
                 }
 
                 AppleMusicControlButton(systemName: "forward.fill", size: 15, frameSize: 32) {
-                    musicService.nextTrack()
-                    triggerCoverFlowPeek()
+                    skipToNext()
                 }
             }
         }

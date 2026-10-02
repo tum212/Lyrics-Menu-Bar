@@ -9,32 +9,33 @@ struct AlbumPeekCard: View {
 
     var body: some View {
         Group {
-            if let img = loadedImage {
+            if let data = track?.artworkData, let img = NSImage(data: data) {
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-            } else if let data = track?.artworkData, let img = NSImage(data: data) {
+            } else if let img = loadedImage {
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .fill(Color.white.opacity(0.08))
                     Image(systemName: fallbackIcon)
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(.white.opacity(0.40))
                 }
             }
         }
-        .frame(width: 98, height: 98)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(width: 106, height: 106)
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
         )
         .task(id: track?.id) {
             guard let t = track else { return }
+            if t.artworkData != nil { return }
             let key = ArtworkCache.cacheKey(for: t)
             if let cached = ArtworkCache.shared.image(forKey: key) {
                 loadedImage = cached

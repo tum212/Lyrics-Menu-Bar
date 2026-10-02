@@ -683,8 +683,12 @@ public final class MusicService: NSObject, ObservableObject {
         
         if isTrackChanged {
             if let oldTrack = self.currentTrack, !oldTrack.name.isEmpty {
-                if self.sessionHistory.last?.name != oldTrack.name || self.sessionHistory.last?.artist != oldTrack.artist {
-                    self.sessionHistory.append(oldTrack)
+                var savedTrack = oldTrack
+                if savedTrack.artworkData == nil, let currentImg = self.artworkImage {
+                    savedTrack.artworkData = currentImg.tiffRepresentation
+                }
+                if self.sessionHistory.last?.name != savedTrack.name || self.sessionHistory.last?.artist != savedTrack.artist {
+                    self.sessionHistory.append(savedTrack)
                     if self.sessionHistory.count > 10 {
                         self.sessionHistory.removeFirst()
                     }
@@ -711,7 +715,9 @@ public final class MusicService: NSObject, ObservableObject {
         queueTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             
-            let queryTerm = (!track.album.isEmpty && track.album != track.name) ? "\(track.artist) \(track.album)" : track.artist
+            let queryTerm = (!track.album.isEmpty && track.album != track.name) 
+                ? "\(track.artist) \(track.album)" 
+                : "\(track.artist) \(track.name)"
             guard let encoded = queryTerm.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
                   let url = URL(string: "https://itunes.apple.com/search?term=\(encoded)&entity=song&limit=15") else { return }
             
@@ -738,11 +744,17 @@ public final class MusicService: NSObject, ObservableObject {
                 for item in decoded.results {
                     guard let name = item.trackName, !name.isEmpty,
                           let artist = item.artistName else { continue }
+                    
+                    // Strict artist/album match: do not accept random unrelated artists!
+                    let artistMatch = artist.lowercased().contains(track.artist.lowercased()) ||
+                                      track.artist.lowercased().contains(artist.lowercased())
+                    guard artistMatch else { continue }
+                    
                     if name.lowercased() == track.name.lowercased() { continue }
                     if self.sessionHistory.contains(where: { $0.name.lowercased() == name.lowercased() }) { continue }
                     if queued.contains(where: { $0.name.lowercased() == name.lowercased() }) { continue }
                     
-                    let artURL = item.artworkUrl100?.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+                    let artURL = item.artworkUrl100?.replacingOccurrences(of: "100x100bb", with: "600x600bb") ?? track.artworkURL
                     let dur = (item.trackTimeMillis ?? 0) / 1000.0
                     let qTrack = MusicTrack(
                         id: "itunes:\(item.trackId ?? queued.count)",
@@ -757,10 +769,38 @@ public final class MusicService: NSObject, ObservableObject {
                     if queued.count >= 8 { break }
                 }
                 
+                // If queue is empty, fallback to upcoming placeholder with SAME album art
+                if queued.isEmpty && (track.artworkURL != nil || self.artworkImage != nil) {
+                    let fallback = MusicTrack(
+                        id: "next_\(track.id)",
+                        name: "Next Track",
+                        artist: track.artist,
+                        album: track.album,
+                        artworkURL: track.artworkURL,
+                        artworkData: track.artworkData ?? self.artworkImage?.tiffRepresentation,
+                        duration: 0,
+                        source: track.source
+                    )
+                    queued.append(fallback)
+                }
+                
                 guard !Task.isCancelled else { return }
                 self.upcomingQueue = queued
             } catch {
-                // Keep existing or leave empty on error
+                // If network fails, provide a fallback with same album art
+                if self.upcomingQueue.isEmpty && (track.artworkURL != nil || self.artworkImage != nil) {
+                    let fallback = MusicTrack(
+                        id: "next_\(track.id)",
+                        name: "Next Track",
+                        artist: track.artist,
+                        album: track.album,
+                        artworkURL: track.artworkURL,
+                        artworkData: track.artworkData ?? self.artworkImage?.tiffRepresentation,
+                        duration: 0,
+                        source: track.source
+                    )
+                    self.upcomingQueue = [fallback]
+                }
             }
         }
     }
