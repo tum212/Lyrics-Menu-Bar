@@ -241,7 +241,7 @@ public final class MusicService: NSObject, ObservableObject {
         let name = (info["Name"] as? String) ?? ""
         let artist = (info["Artist"] as? String) ?? ""
         let album = (info["Album"] as? String) ?? ""
-        let trackId = (info["PersistentID"] as? String) ?? (info["Persistent ID"] as? String) ?? "\(name)-\(artist)"
+        let trackId = "apple:\(name)-\(artist)"
         
         var duration: Double = 0
         if let durNum = info["Total Time"] as? NSNumber {
@@ -429,15 +429,27 @@ public final class MusicService: NSObject, ObservableObject {
         if application "Music" is running then
             tell application "Music"
                 try
-                    set t to current track
-                    set tName to name of t
-                    set tArtist to artist of t
-                    set tAlbum to album of t
-                    set tId to persistent ID of t
-                    set tDur to duration of t
-                    set tPos to player position
-                    set tState to player state as string
-                    return {tName, tArtist, tAlbum, tId, tDur, tPos, tState}
+                    set pState to player state as string
+                    if pState is not "stopped" then
+                        set t to current track
+                        set tName to name of t
+                        set tArtist to artist of t
+                        set tAlbum to album of t
+                        try
+                            set tId to persistent ID of t
+                        on error
+                            set tId to ""
+                        end try
+                        set tDur to duration of t
+                        try
+                            set tPos to player position
+                        on error
+                            set tPos to 0
+                        end try
+                        return {tName, tArtist, tAlbum, tId, tDur, tPos, pState}
+                    else
+                        return "STOPPED"
+                    end if
                 on error
                     return "NOT_PLAYING"
                 end try
@@ -450,14 +462,17 @@ public final class MusicService: NSObject, ObservableObject {
         var error: NSDictionary?
         guard let appleScript = NSAppleScript(source: script) else { return (nil, false, 0, false) }
         let output = appleScript.executeAndReturnError(&error)
-        if output.stringValue == "NOT_RUNNING" || output.stringValue == "NOT_PLAYING" {
+        if output.stringValue == "NOT_RUNNING" {
             return (nil, false, 0, true)
+        }
+        if output.stringValue == "STOPPED" || output.stringValue == "NOT_PLAYING" {
+            return (nil, false, 0, false)
         }
         if output.numberOfItems >= 7 {
             let name = output.atIndex(1)?.stringValue ?? ""
             let artist = output.atIndex(2)?.stringValue ?? ""
             let album = output.atIndex(3)?.stringValue ?? ""
-            let id = output.atIndex(4)?.stringValue ?? ""
+            let id = "apple:\(name)-\(artist)"
             let duration = output.atIndex(5)?.doubleValue ?? 0.0
             let position = output.atIndex(6)?.doubleValue ?? 0.0
             let state = output.atIndex(7)?.stringValue ?? ""
@@ -498,15 +513,15 @@ public final class MusicService: NSObject, ObservableObject {
             if m.isPlaying { return (m.track, true, m.position, .appleMusic, false) }
             let s = executeSpotifyScript()
             if s.isPlaying { return (s.track, true, s.position, .spotify, false) }
-            if m.track != nil { return (m.track, false, m.position, .appleMusic, false) }
-            return (s.track, false, s.position, .spotify, s.isNotRunning)
+            // Neither is actively playing: stay on activeSource (Apple Music), NEVER fall back to Spotify
+            return (m.track, false, m.position, .appleMusic, m.isNotRunning)
         } else {
             let s = executeSpotifyScript()
             if s.isPlaying { return (s.track, true, s.position, .spotify, false) }
             let m = executeAppleMusicScript()
             if m.isPlaying { return (m.track, true, m.position, .appleMusic, false) }
-            if s.track != nil { return (s.track, false, s.position, .spotify, false) }
-            return (m.track, false, m.position, .appleMusic, m.isNotRunning)
+            // Neither is actively playing: stay on activeSource (Spotify), NEVER fall back to Apple Music
+            return (s.track, false, s.position, .spotify, s.isNotRunning)
         }
     }
     
@@ -633,7 +648,11 @@ public final class MusicService: NSObject, ObservableObject {
     // MARK: - Unified Anti-Jitter Playback Synchronization
     
     private func updatePlaybackState(track: MusicTrack, position: Double, isPlaying: Bool, source: MusicSourceMode, bundleID: String) {
-        let isTrackChanged = (self.currentTrack?.id != track.id)
+        let isTrackChanged: Bool = {
+            guard let cur = self.currentTrack else { return !track.name.isEmpty }
+            return cur.name.lowercased() != track.name.lowercased() ||
+                   cur.artist.lowercased() != track.artist.lowercased()
+        }()
         let isArtworkChanged = (self.currentTrack?.artworkURL != track.artworkURL)
         let isPlayStateChanged = (self.isPlaying != isPlaying)
         
@@ -683,13 +702,25 @@ public final class MusicService: NSObject, ObservableObject {
         }
         let previousTrackBeforeChange = self.currentTrack
         let previousImageBeforeChange = self.artworkImage
-        self.currentTrack = updatedTrack
         
         let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
         
         if isTrackChanged {
-            // Manage queue & history according to navigation direction
+            // Auto-detect navigation direction: if not manually forced by previous button, check history
+            let navDir: Int
             if self.navigationDirection == -1 {
+                navDir = -1
+            } else if let lastHist = self.sessionHistory.last,
+                      lastHist.name.lowercased() == updatedTrack.name.lowercased() &&
+                      lastHist.artist.lowercased() == updatedTrack.artist.lowercased() {
+                navDir = -1
+            } else {
+                navDir = 1
+            }
+            self.navigationDirection = navDir
+            
+            // Manage queue & history according to navigation direction
+            if navDir == -1 {
                 // Moving backwards: the track we just came from goes back to upcomingQueue!
                 if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
                     var savedTrack = oldTrack
@@ -706,7 +737,7 @@ public final class MusicService: NSObject, ObservableObject {
                    lastHistory.name.lowercased() == updatedTrack.name.lowercased() {
                     self.sessionHistory.removeLast()
                 }
-            } else if self.navigationDirection == 1 {
+            } else {
                 // Moving forwards: the track we just came from goes to sessionHistory
                 if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
                     var savedTrack = oldTrack
@@ -729,8 +760,6 @@ public final class MusicService: NSObject, ObservableObject {
                     self.upcomingQueue.removeFirst()
                 }
             }
-            // Reset navigation direction
-            self.navigationDirection = 1
             
             // Check sessionHistory and upcomingQueue for existing artwork
             if updatedTrack.artworkData == nil {
@@ -759,13 +788,19 @@ public final class MusicService: NSObject, ObservableObject {
             self.artworkRevision += 1
             self.artworkRetryCount = 0
             self.nextArtworkRetryDate = .distantPast
+            
+            self.currentTrack = updatedTrack
+            
             loadArtwork(for: updatedTrack)
             
             if self.upcomingQueue.isEmpty {
                 fetchUpcomingQueue(for: updatedTrack)
             }
-        } else if isArtworkChanged || shouldRetryArtwork {
-            loadArtwork(for: updatedTrack)
+        } else {
+            self.currentTrack = updatedTrack
+            if isArtworkChanged || shouldRetryArtwork {
+                loadArtwork(for: updatedTrack)
+            }
         }
     }
     

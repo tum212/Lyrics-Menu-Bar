@@ -138,7 +138,7 @@ public struct AppleCoverFlowView: View {
                     perspective: 0.0
                 )
                 .scaleEffect(cardScale)
-                .animation(.spring(response: 0.45, dampingFraction: 0.78), value: isPlaying)
+                .animation(.spring(response: 0.55, dampingFraction: 0.82), value: isPlaying)
                 .offset(x: showCoverFlow ? xOffset : 0.0)
                 .brightness(showCoverFlow ? brightness : 0.0)
                 .opacity(opacity)

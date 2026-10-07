@@ -43,6 +43,7 @@ struct ContentView: View {
     @State private var isArtHovered: Bool = false
     @State private var isActionTriggered: Bool = false
     @State private var triggerWorkItem: DispatchWorkItem? = nil
+    @State private var lastObservedTrackId: String = ""
 
     private var showCoverFlow: Bool {
         isArtHovered || isActionTriggered || isTransitioning
@@ -80,7 +81,7 @@ struct ContentView: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: updateManager.showUpdateModal)
-        .onChange(of: musicService.currentTrack?.id) { _ in
+        .onChange(of: musicService.currentTrack?.id) { newId in
             schedulePeekRetraction()
             LyricLineLayoutCache.shared.clear()
             if let track = musicService.currentTrack {
@@ -90,14 +91,11 @@ struct ContentView: View {
             }
             displayedIndex = 0
             
-            // Instantly finalize any active Cover Flow slide transition to zero-out displacement
-            if isTransitioning {
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    carouselSlide = 0.0
-                    isTransitioning = false
-                }
+            let isGenuineTrackChange = !lastObservedTrackId.isEmpty && (newId != nil) && (lastObservedTrackId != (newId ?? ""))
+            lastObservedTrackId = newId ?? ""
+            
+            if isGenuineTrackChange {
+                triggerCoverFlowTransition(direction: musicService.navigationDirection)
             }
         }
         .onChange(of: lyricsService.lyrics.count) { _ in
@@ -108,6 +106,7 @@ struct ContentView: View {
             handlePlayStateChange(isPlaying)
         }
         .onAppear {
+            lastObservedTrackId = musicService.currentTrack?.id ?? ""
             handlePlayStateChange(musicService.isPlaying)
         }
         .onDisappear {
@@ -119,6 +118,21 @@ struct ContentView: View {
 
     private var coverFlowDeck: (items: [CoverFlowItem], activeIndex: Int) {
         var items: [CoverFlowItem] = []
+        var usedIds = Set<String>()
+        
+        func resolveUniqueId(prefix: String, trackId: String?) -> String {
+            guard let trackId = trackId, !trackId.isEmpty else {
+                return "\(prefix)_empty"
+            }
+            let base = "track_\(trackId)"
+            if !usedIds.contains(base) {
+                usedIds.insert(base)
+                return base
+            }
+            let fallback = "\(prefix)_\(trackId)"
+            usedIds.insert(fallback)
+            return fallback
+        }
         
         // Slot 0: Far Left (History 2 back)
         let histCount = musicService.sessionHistory.count
@@ -126,7 +140,8 @@ struct ContentView: View {
             let t = musicService.sessionHistory[histCount - 2]
             let img = ArtworkCache.shared.findImage(for: t)
                 ?? t.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(id: "h2_\(t.id)", track: t, fallbackIcon: "backward.fill", image: img))
+            let id = resolveUniqueId(prefix: "h2", trackId: t.id)
+            items.append(CoverFlowItem(id: id, track: t, fallbackIcon: "backward.fill", image: img))
         } else {
             items.append(CoverFlowItem(id: "slot_0_empty", track: nil, fallbackIcon: "backward.fill", image: nil))
         }
@@ -135,7 +150,8 @@ struct ContentView: View {
         if let prevTrack = musicService.sessionHistory.last {
             let img = ArtworkCache.shared.findImage(for: prevTrack)
                 ?? prevTrack.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(id: "h1_\(prevTrack.id)", track: prevTrack, fallbackIcon: "backward.fill", image: img))
+            let id = resolveUniqueId(prefix: "h1", trackId: prevTrack.id)
+            items.append(CoverFlowItem(id: id, track: prevTrack, fallbackIcon: "backward.fill", image: img))
         } else {
             items.append(CoverFlowItem(id: "slot_1_empty", track: nil, fallbackIcon: "backward.fill", image: nil))
         }
@@ -146,7 +162,8 @@ struct ContentView: View {
             let img = musicService.activeArtworkImage
                 ?? ArtworkCache.shared.findImage(for: current)
                 ?? current.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(id: "curr_\(current.id)", track: current, isCurrent: true, fallbackIcon: "music.quarternote.3", image: img))
+            let id = resolveUniqueId(prefix: "curr", trackId: current.id)
+            items.append(CoverFlowItem(id: id, track: current, isCurrent: true, fallbackIcon: "music.quarternote.3", image: img))
         } else {
             items.append(CoverFlowItem(id: "curr_none", track: nil, isCurrent: true, fallbackIcon: "music.quarternote.3", image: nil))
         }
@@ -155,7 +172,8 @@ struct ContentView: View {
         if let nextTrack = musicService.upcomingQueue.first {
             let img = ArtworkCache.shared.findImage(for: nextTrack)
                 ?? nextTrack.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(id: "u1_\(nextTrack.id)", track: nextTrack, fallbackIcon: "forward.fill", image: img))
+            let id = resolveUniqueId(prefix: "u1", trackId: nextTrack.id)
+            items.append(CoverFlowItem(id: id, track: nextTrack, fallbackIcon: "forward.fill", image: img))
         } else {
             items.append(CoverFlowItem(id: "slot_3_empty", track: nil, fallbackIcon: "forward.fill", image: nil))
         }
@@ -165,7 +183,8 @@ struct ContentView: View {
             let t = musicService.upcomingQueue[1]
             let img = ArtworkCache.shared.findImage(for: t)
                 ?? t.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(id: "u2_\(t.id)", track: t, fallbackIcon: "forward.fill", image: img))
+            let id = resolveUniqueId(prefix: "u2", trackId: t.id)
+            items.append(CoverFlowItem(id: id, track: t, fallbackIcon: "forward.fill", image: img))
         } else {
             items.append(CoverFlowItem(id: "slot_4_empty", track: nil, fallbackIcon: "forward.fill", image: nil))
         }
@@ -173,68 +192,62 @@ struct ContentView: View {
         return (items, activeIdx)
     }
 
-    private func skipToNext() {
-        guard !isTransitioning else { return }
-        isTransitioning = true
-        isActionTriggered = true
+    private func triggerCoverFlowTransition(direction: Int) {
+        guard direction != 0 else { return }
+        schedulePeekRetraction()
         
-        musicService.nextTrack()
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-
-        withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
-            carouselSlide = -1.0
+        let initialSlide: CGFloat = (direction > 0) ? 1.0 : -1.0
+        
+        // Step 1: Instantly stage carousel slide without animation
+        var stageTransaction = Transaction()
+        stageTransaction.disablesAnimations = true
+        withTransaction(stageTransaction) {
+            carouselSlide = initialSlide
+            isTransitioning = true
         }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
+        
+        // Step 2: Next frame, glide smoothly to 0.0 with authentic iPod spring physics
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
                 carouselSlide = 0.0
-                isTransitioning = false
             }
         }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
+            isTransitioning = false
+        }
+    }
+
+    private func skipToNext() {
+        guard !isTransitioning else { return }
+        musicService.nextTrack()
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
         schedulePeekRetraction()
     }
 
     private func skipToPrevious(force: Bool = false) {
         guard !isTransitioning else { return }
-        isTransitioning = true
-        isActionTriggered = true
-        
         if force {
             musicService.forcePreviousTrack()
         } else {
             musicService.previousTrack()
         }
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-
-        withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
-            carouselSlide = 1.0
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                carouselSlide = 0.0
-                isTransitioning = false
-            }
-        }
         schedulePeekRetraction()
     }
 
     private func schedulePeekRetraction() {
         triggerWorkItem?.cancel()
-        withAnimation(.spring(response: 0.58, dampingFraction: 0.88)) {
+        withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
             isActionTriggered = true
         }
         let work = DispatchWorkItem {
-            withAnimation(.spring(response: 0.70, dampingFraction: 0.90)) {
+            withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
                 isActionTriggered = false
             }
         }
         triggerWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)
     }
 
     private func handlePlayStateChange(_ isPlaying: Bool) {
@@ -313,9 +326,9 @@ struct ContentView: View {
                     }
                 }
             )
-            .animation(.spring(response: 0.52, dampingFraction: 0.88), value: showCoverFlow)
+            .animation(.spring(response: 0.68, dampingFraction: 0.86), value: showCoverFlow)
             .onHover { hovering in
-                withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
+                withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
                     isArtHovered = hovering
                 }
             }
