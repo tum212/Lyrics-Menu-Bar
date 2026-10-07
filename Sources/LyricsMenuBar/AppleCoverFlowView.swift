@@ -30,6 +30,7 @@ public struct AppleCoverFlowView: View {
     public let activeIndex: Int
     public let scrollPosition: Double
     public let showCoverFlow: Bool
+    public let isPlaying: Bool
     public let cardSize: CGFloat
     public let cornerRadius: CGFloat
     public var onCardTap: ((Int, CoverFlowItem) -> Void)? = nil
@@ -45,6 +46,7 @@ public struct AppleCoverFlowView: View {
         activeIndex: Int,
         scrollPosition: Double,
         showCoverFlow: Bool,
+        isPlaying: Bool = true,
         cardSize: CGFloat = 120,
         cornerRadius: CGFloat = 14,
         onCardTap: ((Int, CoverFlowItem) -> Void)? = nil
@@ -53,6 +55,7 @@ public struct AppleCoverFlowView: View {
         self.activeIndex = activeIndex
         self.scrollPosition = scrollPosition
         self.showCoverFlow = showCoverFlow
+        self.isPlaying = isPlaying
         self.cardSize = cardSize
         self.cornerRadius = cornerRadius
         self.onCardTap = onCardTap
@@ -83,12 +86,17 @@ public struct AppleCoverFlowView: View {
                     }
                 }()
                 
-                // 3. Apple Preset Scale / Depth
-                let scale: CGFloat = {
-                    if absPos < 0.5 {
-                        return 1.0 - CGFloat(absPos) * 0.16
+                // 3. Apple Preset Scale / Depth with tactile Pause shrinkage (0.90)
+                let centerBaseScale: CGFloat = isPlaying ? 1.0 : 0.90
+                let cardScale: CGFloat = {
+                    if showCoverFlow {
+                        if absPos < 0.5 {
+                            return centerBaseScale - CGFloat(absPos) * 0.16
+                        } else {
+                            return 0.92
+                        }
                     } else {
-                        return 0.92
+                        return absPos < 0.5 ? centerBaseScale : 0.75
                     }
                 }()
                 
@@ -129,7 +137,8 @@ public struct AppleCoverFlowView: View {
                     anchor: .center,
                     perspective: 0.0
                 )
-                .scaleEffect(showCoverFlow ? scale : (absPos < 0.5 ? 1.0 : 0.75))
+                .scaleEffect(cardScale)
+                .animation(.spring(response: 0.45, dampingFraction: 0.78), value: isPlaying)
                 .offset(x: showCoverFlow ? xOffset : 0.0)
                 .brightness(showCoverFlow ? brightness : 0.0)
                 .opacity(opacity)
@@ -153,8 +162,7 @@ struct CoverFlowCard: View {
     private var resolvedImage: NSImage? {
         if let direct = item.image { return direct }
         if let t = item.track {
-            let key = ArtworkCache.cacheKey(for: t)
-            if let cached = ArtworkCache.shared.image(forKey: key) ?? ArtworkCache.shared.image(forKey: t.id) {
+            if let cached = ArtworkCache.shared.findImage(for: t) {
                 return cached
             }
             if let data = t.artworkData, let img = NSImage(data: data) {

@@ -1,8 +1,8 @@
 {
   "version": "1.3.1",
-  "build": 52,
-  "release_date": "2026-10-02",
-  "release_notes": "Official Apple Cover Flow preset from ashishgogula/coverflow: 67-degree rotation, 54pt center gap, 18pt stack spacing (no reflection), continuous multi-card deck, and parallel RAM pre-caching for zero lag.",
+  "build": 53,
+  "release_date": "2026-10-07",
+  "release_notes": "Cover Flow Stability & Tactile Physics: Fixed 5-slot symmetric deck layout (eliminates artwork mismatch & flickering), zero-animation rewind for Previous button when past 3 seconds, dynamic spring-physics shrink animation on pause (0.90x scale), and album-strict queue synchronization.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {

@@ -89,6 +89,16 @@ struct ContentView: View {
                 lyricsService.lyrics = []
             }
             displayedIndex = 0
+            
+            // Instantly finalize any active Cover Flow slide transition to zero-out displacement
+            if isTransitioning {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    carouselSlide = 0.0
+                    isTransitioning = false
+                }
+            }
         }
         .onChange(of: lyricsService.lyrics.count) { _ in
             LyricLineLayoutCache.shared.clear()
@@ -110,84 +120,54 @@ struct ContentView: View {
     private var coverFlowDeck: (items: [CoverFlowItem], activeIndex: Int) {
         var items: [CoverFlowItem] = []
         
-        // 1. History tracks (up to 2 previous songs)
-        let recentHistory = musicService.sessionHistory.suffix(2)
-        for track in recentHistory {
-            let key = ArtworkCache.cacheKey(for: track)
-            let img = ArtworkCache.shared.image(forKey: track.id)
-                ?? ArtworkCache.shared.image(forKey: key)
-                ?? track.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(
-                id: "hist_\(track.id)",
-                track: track,
-                isCurrent: false,
-                fallbackIcon: "backward.fill",
-                image: img
-            ))
-        }
-        
-        // If history is empty, add a clean placeholder so left card is always available
-        if items.isEmpty {
-            items.append(CoverFlowItem(
-                id: "placeholder_left",
-                track: nil,
-                isCurrent: false,
-                fallbackIcon: "backward.fill",
-                image: nil
-            ))
-        }
-        
-        let activeIdx = items.count // index of currentTrack
-        
-        // 2. Current playing track
-        if let current = musicService.currentTrack {
-            let key = ArtworkCache.cacheKey(for: current)
-            let img = musicService.activeArtworkImage
-                ?? ArtworkCache.shared.image(forKey: current.id)
-                ?? ArtworkCache.shared.image(forKey: key)
-                ?? current.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(
-                id: "curr_\(current.id)",
-                track: current,
-                isCurrent: true,
-                fallbackIcon: "music.quarternote.3",
-                image: img
-            ))
+        // Slot 0: Far Left (History 2 back)
+        let histCount = musicService.sessionHistory.count
+        if histCount >= 2 {
+            let t = musicService.sessionHistory[histCount - 2]
+            let img = ArtworkCache.shared.findImage(for: t)
+                ?? t.artworkData.flatMap { NSImage(data: $0) }
+            items.append(CoverFlowItem(id: "h2_\(t.id)", track: t, fallbackIcon: "backward.fill", image: img))
         } else {
-            items.append(CoverFlowItem(
-                id: "curr_none",
-                track: nil,
-                isCurrent: true,
-                fallbackIcon: "music.quarternote.3",
-                image: nil
-            ))
+            items.append(CoverFlowItem(id: "slot_0_empty", track: nil, fallbackIcon: "backward.fill", image: nil))
         }
         
-        // 3. Upcoming tracks (up to 2 upcoming songs)
-        let upNext = musicService.upcomingQueue.prefix(2)
-        for track in upNext {
-            let key = ArtworkCache.cacheKey(for: track)
-            let img = ArtworkCache.shared.image(forKey: track.id)
-                ?? ArtworkCache.shared.image(forKey: key)
-                ?? track.artworkData.flatMap { NSImage(data: $0) }
-            items.append(CoverFlowItem(
-                id: "up_\(track.id)",
-                track: track,
-                isCurrent: false,
-                fallbackIcon: "forward.fill",
-                image: img
-            ))
+        // Slot 1: Left (Immediate previous track)
+        if let prevTrack = musicService.sessionHistory.last {
+            let img = ArtworkCache.shared.findImage(for: prevTrack)
+                ?? prevTrack.artworkData.flatMap { NSImage(data: $0) }
+            items.append(CoverFlowItem(id: "h1_\(prevTrack.id)", track: prevTrack, fallbackIcon: "backward.fill", image: img))
+        } else {
+            items.append(CoverFlowItem(id: "slot_1_empty", track: nil, fallbackIcon: "backward.fill", image: nil))
         }
         
-        // If upcoming is empty, add a clean placeholder
-        if upNext.isEmpty {
-            items.append(CoverFlowItem(
-                id: "placeholder_right",
-                track: nil,
-                isCurrent: false,
-                fallbackIcon: "forward.fill",
-                image: nil
-            ))
+        // Slot 2: Center (Current track) -> FIXED activeIndex = 2
+        let activeIdx = 2
+        if let current = musicService.currentTrack {
+            let img = musicService.activeArtworkImage
+                ?? ArtworkCache.shared.findImage(for: current)
+                ?? current.artworkData.flatMap { NSImage(data: $0) }
+            items.append(CoverFlowItem(id: "curr_\(current.id)", track: current, isCurrent: true, fallbackIcon: "music.quarternote.3", image: img))
+        } else {
+            items.append(CoverFlowItem(id: "curr_none", track: nil, isCurrent: true, fallbackIcon: "music.quarternote.3", image: nil))
+        }
+        
+        // Slot 3: Right (Immediate next track)
+        if let nextTrack = musicService.upcomingQueue.first {
+            let img = ArtworkCache.shared.findImage(for: nextTrack)
+                ?? nextTrack.artworkData.flatMap { NSImage(data: $0) }
+            items.append(CoverFlowItem(id: "u1_\(nextTrack.id)", track: nextTrack, fallbackIcon: "forward.fill", image: img))
+        } else {
+            items.append(CoverFlowItem(id: "slot_3_empty", track: nil, fallbackIcon: "forward.fill", image: nil))
+        }
+        
+        // Slot 4: Far Right (Upcoming 2 ahead)
+        if musicService.upcomingQueue.count >= 2 {
+            let t = musicService.upcomingQueue[1]
+            let img = ArtworkCache.shared.findImage(for: t)
+                ?? t.artworkData.flatMap { NSImage(data: $0) }
+            items.append(CoverFlowItem(id: "u2_\(t.id)", track: t, fallbackIcon: "forward.fill", image: img))
+        } else {
+            items.append(CoverFlowItem(id: "slot_4_empty", track: nil, fallbackIcon: "forward.fill", image: nil))
         }
         
         return (items, activeIdx)
@@ -319,6 +299,7 @@ struct ContentView: View {
                 activeIndex: deck.activeIndex,
                 scrollPosition: Double(deck.activeIndex) - Double(carouselSlide),
                 showCoverFlow: showCoverFlow,
+                isPlaying: musicService.isPlaying,
                 cardSize: 120,
                 cornerRadius: 14,
                 onCardTap: { index, item in
@@ -378,9 +359,9 @@ struct ContentView: View {
             // Tactile Apple Music Playback Controls (Hover Glass Ring + Spring Depth)
             HStack(spacing: 8) {
                 AppleMusicControlButton(systemName: "backward.fill", size: 15, frameSize: 32) {
-                    if musicService.playbackPosition > 3.0 {
-                        musicService.previousTrack()
-                        schedulePeekRetraction()
+                    if musicService.currentTime > 3.0 || musicService.playbackPosition > 3.0 {
+                        // Rewind current song to 0:00 without ANY Cover Flow animation or slide!
+                        musicService.seek(to: 0)
                         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
                     } else {
                         skipToPrevious(force: false)
