@@ -119,6 +119,25 @@ public enum WebMusicDomainParser {
         return nil
     }
 
+    /// Extracts the 11-character YouTube video ID from `youtube.com/watch?v=...`, `music.youtube.com/watch?v=...`, or `youtu.be/...`.
+    public static func extractYouTubeVideoID(from urlString: String) -> String? {
+        guard let comps = URLComponents(string: urlString),
+              let host = comps.host?.lowercased() else { return nil }
+        if host.contains("youtube.com") {
+            if let v = comps.queryItems?.first(where: { $0.name == "v" })?.value, !v.isEmpty {
+                return v
+            }
+            let parts = comps.path.split(separator: "/")
+            if parts.count >= 2 && (parts[0] == "shorts" || parts[0] == "live") {
+                return String(parts[1])
+            }
+        } else if host == "youtu.be" {
+            let trimmed = comps.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
     /// Parse a browser tab title or desktop window title into (track, artist).
     public static func parseTitle(_ rawTitle: String, urlString: String = "", appDisplayName: String = "") -> WebMusicMatch? {
         let cleaned = stripNoisePrefixes(rawTitle)
@@ -237,6 +256,18 @@ public enum WebMusicDomainParser {
             let right = cleanArtistDecorators(String(body[pipeRange.upperBound...]))
             if !left.isEmpty && !right.isEmpty {
                 return WebMusicMatch(serviceName: service, trackName: left, artistName: right, albumName: "")
+            }
+        }
+
+        // Single-title fallback for explicit playback URLs (e.g. YouTube Auto-Generated Art Track "Over - YouTube" -> body "Over")
+        if extractYouTubeVideoID(from: urlString) != nil
+            || lowerURL.contains("open.spotify.com/track")
+            || lowerURL.contains("music.apple.com/")
+            || lowerURL.contains("listen.tidal.com/")
+            || lowerURL.contains("deezer.com/") {
+            let cleanTitle = cleanTrackDecorators(body)
+            if !cleanTitle.isEmpty {
+                return WebMusicMatch(serviceName: service, trackName: cleanTitle, artistName: "", albumName: "")
             }
         }
 

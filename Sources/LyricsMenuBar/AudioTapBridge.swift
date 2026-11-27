@@ -298,6 +298,14 @@ private enum AudioProcessInspector {
         return matched
     }
 
+    /// Returns the executable path of `pid` using BSD `proc_pidpath` (zero shell spawns).
+    static func executablePath(of pid: pid_t) -> String {
+        var buf = [UInt8](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let len = proc_pidpath(pid, &buf, UInt32(buf.count))
+        guard len > 0 else { return "" }
+        return String(decoding: buf.prefix(Int(len)), as: UTF8.self)
+    }
+
     /// Returns canonical bundle IDs of all apps/browsers currently outputting audio via CoreAudio (no tap permission needed).
     static func activeOutputBundleIDs() -> Set<String> {
         guard #available(macOS 14.2, *) else { return [] }
@@ -307,21 +315,35 @@ private enum AudioProcessInspector {
 
         // Build map of running app PIDs -> canonical bundle ID for fast ancestor lookup
         var pidToCanonical = [pid_t: String]()
+        var isSafariRunning = false
         for (desc, app) in registry.runningPlayers() {
             pidToCanonical[app.processIdentifier] = desc.id
+            if desc.id == "com.apple.Safari" {
+                isSafariRunning = true
+            }
         }
 
         for objID in allObjects {
             guard isRunningOutput(processObject: objID) else { continue }
-            let objBID = bundleID(forProcessObject: objID) ?? ""
-            if let desc = registry.canonicalDescriptor(forBundleID: objBID) {
+            var objBID = bundleID(forProcessObject: objID) ?? ""
+            let p = pid(forProcessObject: objID)
+
+            if objBID.isEmpty && p > 0 {
+                objBID = NSRunningApplication(processIdentifier: p)?.bundleIdentifier ?? ""
+            }
+            if !objBID.isEmpty, let desc = registry.canonicalDescriptor(forBundleID: objBID) {
                 active.insert(desc.id)
                 continue
             }
-            let p = pid(forProcessObject: objID)
             if p > 0 {
                 if let direct = pidToCanonical[p] {
                     active.insert(direct)
+                    continue
+                }
+                // Check XPC/WebKit helper executable path (Safari WebKit.GPU/WebContent has parent PID 1)
+                let exePath = executablePath(of: p)
+                if isSafariRunning && (exePath.contains("WebKit.GPU") || exePath.contains("WebKit.WebContent") || exePath.contains("Safari")) {
+                    active.insert("com.apple.Safari")
                     continue
                 }
                 var cur = p

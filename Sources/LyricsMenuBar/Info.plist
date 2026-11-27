@@ -23,7 +23,7 @@
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Lyrics Menu Bar requires audio access to visualize live sound as a waveform</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Lyrics Menu Bar requires permission to control Spotify and Apple Music to display track info, synchronized lyrics, and playback controls in the menu bar.</string>
+	<string>Lyrics Menu Bar needs Automation permission to read the currently playing track from supported music apps and web browsers (Spotify, Apple Music, Safari, Chrome, Brave, etc.) to display synchronized lyrics and playback controls in the menu bar.</string>
 	<key>NSAppleScriptEnabled</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>

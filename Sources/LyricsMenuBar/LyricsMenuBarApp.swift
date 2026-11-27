@@ -460,6 +460,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         layer.opacity = 1.0
         CATransaction.commit()
         NSCursor.arrow.set()
+        hudContentView?.resetTopControlsVisibility()
         hudContentView?.lyricsView.purgeImageCache()
         isGenieAnimating = false
         syncMenuBarTimerState()

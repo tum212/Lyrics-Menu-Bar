@@ -1,6 +1,79 @@
 import AppKit
+import CLyricsCore
 import CoreGraphics
 import Foundation
+
+// MARK: - Cached YouTube / YouTube Music oEmbed Metadata Resolver (Uses Rust native-tls Pool)
+
+private struct YouTubeOEmbedInfo: Sendable {
+    let title: String
+    let artist: String
+    let artworkURL: String?
+}
+
+private final class YouTubeOEmbedResolver: @unchecked Sendable {
+    static let shared = YouTubeOEmbedResolver()
+
+    private let lock = NSLock()
+    private var cache: [String: YouTubeOEmbedInfo] = [:]
+    private var failedUntil: [String: Date] = [:]
+
+    func resolveSync(videoID: String) -> YouTubeOEmbedInfo? {
+        lock.lock()
+        if let hit = cache[videoID] {
+            lock.unlock()
+            return hit
+        }
+        if let until = failedUntil[videoID], Date() < until {
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+
+        let endpoint = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=\(videoID)&format=json"
+        let buf = endpoint.withCString { lyrics_core_download_bytes($0, 4) }
+        guard let ptr = buf.data, buf.len > 2 else {
+            if buf.data != nil { lyrics_core_free_bytes(buf) }
+            lock.lock()
+            failedUntil[videoID] = Date().addingTimeInterval(30.0)
+            lock.unlock()
+            return nil
+        }
+        let data = Data(bytes: ptr, count: buf.len)
+        lyrics_core_free_bytes(buf)
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawTitle = json["title"] as? String, !rawTitle.isEmpty else {
+            return nil
+        }
+        let rawAuthor = (json["author_name"] as? String) ?? ""
+        let thumb = json["thumbnail_url"] as? String
+
+        // If title itself is "Artist - Track" (e.g. label upload), split it; otherwise use author_name (Art Track / Topic)
+        var resolvedTitle = WebMusicDomainParser.cleanTrackDecorators(rawTitle)
+        var resolvedArtist = WebMusicDomainParser.cleanArtistDecorators(rawAuthor)
+        if let dash = rawTitle.range(of: " - ") {
+            let left = WebMusicDomainParser.cleanArtistDecorators(String(rawTitle[..<dash.lowerBound]))
+            let right = WebMusicDomainParser.cleanTrackDecorators(String(rawTitle[dash.upperBound...]))
+            if !left.isEmpty && !right.isEmpty {
+                resolvedArtist = left
+                resolvedTitle = right
+            }
+        }
+
+        let info = YouTubeOEmbedInfo(
+            title: resolvedTitle,
+            artist: resolvedArtist,
+            artworkURL: (thumb?.isEmpty == false) ? thumb : nil
+        )
+        lock.lock()
+        if cache.count >= 120 { cache.removeAll(keepingCapacity: true) }
+        cache[videoID] = info
+        failedUntil.removeValue(forKey: videoID)
+        lock.unlock()
+        return info
+    }
+}
 
 // MARK: - Playback Snapshot Produced by Any Detection Layer
 
@@ -20,12 +93,13 @@ private final class OSAScriptExecutor: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.lyricsmenubar.ipc.osa", qos: .utility)
     private var compiledScripts: [String: NSAppleScript] = [:]
-    private var deniedBundleIDs: Set<String> = []
+    /// Cooldown backoff on -1743 (never permanently locks out an app once the user clicks Allow!)
+    private var deniedUntil: [String: Date] = [:]
     private var browserJSBlockedBundleIDs: Set<String> = []
 
     func clearDenial(for bundleID: String) {
         queue.async {
-            self.deniedBundleIDs.remove(bundleID)
+            self.deniedUntil.removeValue(forKey: bundleID)
             self.browserJSBlockedBundleIDs.remove(bundleID)
         }
     }
@@ -54,7 +128,7 @@ private final class OSAScriptExecutor: @unchecked Sendable {
     }
 
     private func executeLocked(key: String?, source: String, bundleID: String?) -> NSAppleEventDescriptor? {
-        if let bid = bundleID, deniedBundleIDs.contains(bid) {
+        if let bid = bundleID, let until = deniedUntil[bid], Date() < until {
             return nil
         }
 
@@ -79,10 +153,13 @@ private final class OSAScriptExecutor: @unchecked Sendable {
         if let error {
             let errNum = (error[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
             if errNum == -1743, let bid = bundleID {
-                // User denied Automation permission for this app — stop spamming OS prompts
-                deniedBundleIDs.insert(bid)
+                // Short 12s backoff so we don't spam OS prompts, while recovering automatically right after Allow
+                deniedUntil[bid] = Date().addingTimeInterval(12.0)
             }
             return nil
+        }
+        if let bid = bundleID {
+            deniedUntil.removeValue(forKey: bid)
         }
         return output
     }
@@ -440,7 +517,7 @@ private final class OSAScriptExecutor: @unchecked Sendable {
 
         guard let found = bestCandidate else { return nil }
 
-        // Optionally enrich with exact MediaSession / <video>/<audio> timing when user enabled "Allow JavaScript from Apple Events"
+        // 1. Enrich YouTube / YouTube Music via official public oEmbed (resolves exact Artist + Artwork even on single-title Art Tracks!)
         var finalTrack = found.match.trackName
         var finalArtist = found.match.artistName
         var finalAlbum = found.match.albumName
@@ -450,6 +527,14 @@ private final class OSAScriptExecutor: @unchecked Sendable {
         var isPlaying = isAudioActive
         var approxClock = true
 
+        if let videoID = WebMusicDomainParser.extractYouTubeVideoID(from: found.url),
+           let oembed = YouTubeOEmbedResolver.shared.resolveSync(videoID: videoID) {
+            if !oembed.title.isEmpty { finalTrack = oembed.title }
+            if !oembed.artist.isEmpty { finalArtist = oembed.artist }
+            if let art = oembed.artworkURL { artworkURL = art }
+        }
+
+        // 2. Optionally enrich with exact MediaSession / <video>/<audio> timing when user enabled "Allow JavaScript from Apple Events"
         if !isJSBlocked(for: runningBundleID) {
             if let jsData = queryBrowserMediaSessionLocked(
                 runningBundleID: runningBundleID,

@@ -196,6 +196,7 @@ private final class TactileCircleButton: NSView {
 @MainActor
 private final class GlassIconCircleButton: NSView {
     private let bg = NSVisualEffectView()
+    private let iconOverlayView = NSView()
     private let iconLayer = CALayer()
     private let badgeLayer = CALayer()
     private let symbolName: String
@@ -203,6 +204,8 @@ private final class GlassIconCircleButton: NSView {
     private let weight: NSFont.Weight
     private var backingScale: CGFloat = 2.0
     private var trackingAreaRef: NSTrackingArea?
+    var isPointerInside: Bool = false
+    var onHoverChange: ((Bool) -> Void)?
     var onClick: (() -> Void)?
 
     init(frame: NSRect, symbolName: String, pointSize: CGFloat, weight: NSFont.Weight) {
@@ -221,19 +224,26 @@ private final class GlassIconCircleButton: NSView {
         bg.layer?.cornerRadius = bounds.width / 2.0
         bg.layer?.masksToBounds = true
         bg.layer?.borderWidth = 0.5
-        bg.layer?.borderColor = NSColor.white.withAlphaComponent(0.20).cgColor
+        bg.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
         addSubview(bg)
+
+        // Dedicated overlay NSView ABOVE NSVisualEffectView so AppKit always composites icons on top!
+        iconOverlayView.frame = bounds
+        iconOverlayView.wantsLayer = true
+        iconOverlayView.layer?.backgroundColor = NSColor.clear.cgColor
+        iconOverlayView.layer?.masksToBounds = false
+        addSubview(iconOverlayView)
 
         iconLayer.frame = bounds
         iconLayer.contentsGravity = .resizeAspect
-        layer?.addSublayer(iconLayer)
+        iconOverlayView.layer?.addSublayer(iconLayer)
         updateSymbolTexture()
 
         badgeLayer.frame = CGRect(x: bounds.width - 6, y: bounds.height - 6, width: 7, height: 7)
         badgeLayer.cornerRadius = 3.5
         badgeLayer.backgroundColor = NSColor.systemOrange.cgColor
         badgeLayer.isHidden = true
-        layer?.addSublayer(badgeLayer)
+        iconOverlayView.layer?.addSublayer(badgeLayer)
     }
 
     override func viewDidMoveToWindow() {
@@ -253,7 +263,7 @@ private final class GlassIconCircleButton: NSView {
             symbolName,
             pointSize: pointSize,
             weight: weight,
-            color: NSColor.white.withAlphaComponent(0.88),
+            color: NSColor.white.withAlphaComponent(0.92),
             canvasSize: bounds.size,
             scale: scale
         )
@@ -281,16 +291,21 @@ private final class GlassIconCircleButton: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        guard alphaValue >= 0.05, (superview?.alphaValue ?? 1.0) >= 0.05 else { return nil }
         let local = convert(point, from: superview)
         return bounds.contains(local) ? self : nil
     }
 
     override func mouseEntered(with event: NSEvent) {
         guard !LyricsCoreEngine.shared.showUpdateModal else { return }
+        isPointerInside = true
+        onHoverChange?(true)
         NSCursor.pointingHand.set()
     }
 
     override func mouseExited(with event: NSEvent) {
+        isPointerInside = false
+        onHoverChange?(false)
         NSCursor.arrow.set()
     }
 
@@ -681,8 +696,12 @@ final class HUDContentView: NSView {
     private let playPauseBtn = TactileCircleButton(frame: NSRect(x: 70, y: 15, width: 38, height: 38), symbolName: "play.fill", iconSize: 20)
     private let nextBtn = TactileCircleButton(frame: NSRect(x: 112, y: 18, width: 32, height: 32), symbolName: "forward.fill", iconSize: 15)
 
-    private let settingsBtn = GlassIconCircleButton(frame: NSRect(x: 406, y: 200, width: 26, height: 26), symbolName: "ellipsis", pointSize: 12, weight: .bold)
-    private let closeBtn = GlassIconCircleButton(frame: NSRect(x: 440, y: 200, width: 26, height: 26), symbolName: "chevron.up", pointSize: 10, weight: .bold)
+    private let topControlsContainer = NSView(frame: NSRect(x: 400, y: 194, width: 72, height: 38))
+    private let settingsBtn = GlassIconCircleButton(frame: NSRect(x: 6, y: 6, width: 26, height: 26), symbolName: "ellipsis", pointSize: 12, weight: .bold)
+    private let closeBtn = GlassIconCircleButton(frame: NSRect(x: 40, y: 6, width: 26, height: 26), symbolName: "chevron.up", pointSize: 10, weight: .bold)
+    private var hudTrackingAreaRef: NSTrackingArea?
+    private var controlsFadeTimer: Timer?
+    private var isTopControlsVisible: Bool = false
 
     private var updateModal: HUDUpdateModalOverlay?
     private var lastArtworkRevision = -1
@@ -801,16 +820,35 @@ final class HUDContentView: NSView {
         }
         addSubview(lyricsView)
 
-        // 3. Top Right Buttons
+        // 3. Top Right Buttons (Hidden by default; smoothly fade in on HUD hover & auto-fade out after 2.0s idle)
+        topControlsContainer.wantsLayer = true
+        topControlsContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        topControlsContainer.alphaValue = 0.0
+
+        let onBtnHover: (Bool) -> Void = { [weak self] hovering in
+            guard let self else { return }
+            if hovering {
+                self.revealTopControls(scheduleFadeOut: false)
+            } else {
+                self.scheduleTopControlsFadeOut()
+            }
+        }
+        settingsBtn.onHoverChange = onBtnHover
+        closeBtn.onHoverChange = onBtnHover
+
         settingsBtn.onClick = { [weak self] in
             guard let self = self else { return }
+            self.controlsFadeTimer?.invalidate()
+            self.controlsFadeTimer = nil
             SettingsMenuController.shared.showMenu(anchoredTo: self.settingsBtn)
+            self.scheduleTopControlsFadeOut()
         }
         closeBtn.onClick = {
             NotificationCenter.default.post(name: Notification.Name("ClosePopover"), object: nil)
         }
-        addSubview(settingsBtn)
-        addSubview(closeBtn)
+        topControlsContainer.addSubview(settingsBtn)
+        topControlsContainer.addSubview(closeBtn)
+        addSubview(topControlsContainer)
 
         // Observe RustCore notifications
         let nc = NotificationCenter.default
@@ -822,6 +860,88 @@ final class HUDContentView: NSView {
 
         refreshAll()
         refreshUpdateModal()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = hudTrackingAreaRef {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hudTrackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
+        revealTopControls(scheduleFadeOut: true)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
+        revealTopControls(scheduleFadeOut: !(settingsBtn.isPointerInside || closeBtn.isPointerInside))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard !SettingsMenuController.isPresentingModal else { return }
+        fadeOutTopControls(duration: 0.30)
+    }
+
+    func revealTopControls(scheduleFadeOut: Bool = true) {
+        controlsFadeTimer?.invalidate()
+        controlsFadeTimer = nil
+        if !isTopControlsVisible || topControlsContainer.alphaValue < 0.99 {
+            isTopControlsVisible = true
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                topControlsContainer.animator().alphaValue = 1.0
+            }
+        }
+        if scheduleFadeOut {
+            scheduleTopControlsFadeOut()
+        }
+    }
+
+    private func scheduleTopControlsFadeOut() {
+        controlsFadeTimer?.invalidate()
+        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if self.settingsBtn.isPointerInside || self.closeBtn.isPointerInside || SettingsMenuController.isPresentingModal {
+                        return
+                    }
+                    self.fadeOutTopControls(duration: 0.45)
+                }
+            }
+        }
+        controlsFadeTimer = t
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    private func fadeOutTopControls(duration: TimeInterval) {
+        controlsFadeTimer?.invalidate()
+        controlsFadeTimer = nil
+        guard isTopControlsVisible || topControlsContainer.alphaValue > 0.01 else { return }
+        isTopControlsVisible = false
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = duration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            topControlsContainer.animator().alphaValue = 0.0
+        }
+    }
+
+    func resetTopControlsVisibility() {
+        controlsFadeTimer?.invalidate()
+        controlsFadeTimer = nil
+        isTopControlsVisible = false
+        topControlsContainer.alphaValue = 0.0
     }
 
     @objc private func handleTrackChanged() { refreshAll() }
