@@ -1,0 +1,4 @@
+module CLyricsCore {
+    header "lyrics_core.h"
+    export *
+}

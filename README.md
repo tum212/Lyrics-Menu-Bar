@@ -5,15 +5,15 @@
 </p>
 
 <p align="center">
-  Ultra-lightweight synchronized lyrics, floating glass HUD, audio visualizer, and Force Touch trackpad haptics for macOS 13.0+.
+  Rust-powered core engine + zero-SwiftUI native AppKit 60 FPS lyrics, floating glass HUD, audio visualizer, and Force Touch trackpad haptics for macOS 13.0+.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-macOS%2013.0%2B-blue?style=flat-square&logo=apple" alt="Platform">
-  <img src="https://img.shields.io/badge/Swift-6.0-orange?style=flat-square&logo=swift" alt="Swift">
-  <img src="https://img.shields.io/badge/Release-v1.3.1-emerald?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Core-Rust-DEA584?style=flat-square&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/UI-AppKit%20%2F%20CALayer-orange?style=flat-square&logo=swift" alt="AppKit">
+  <img src="https://img.shields.io/badge/Release-v2.0.0-emerald?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/Architecture-Apple%20Silicon%20%2F%20Intel-purple?style=flat-square" alt="Arch">
-  <img src="https://img.shields.io/badge/Mode-Ultra--Light%20Adaptive-teal?style=flat-square" alt="Ultra-Light Mode">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
 </p>
 
@@ -75,20 +75,20 @@
 - Selectable intensity presets (`Off`, `Light`, `Medium`, `Firm`) and actuator profiles (`Type 1`–`Type 6`).
 
 ### In-App Updates & Remote Config
-- Automatic update checks against GitHub Releases (`v1.3.1`) with 1-click in-app DMG download, install, and relaunch.
+- Automatic update checks against GitHub Releases (`v2.0.0`) with 1-click in-app DMG streaming download (`ureq` in Rust), install, and relaunch.
 - Dynamic Git-hosted remote configuration (`remote_config.json`) for zero-downtime lyrics endpoint updates.
 
 ---
 
 ## Ultra-Light Mode & Performance Architecture
 
-One universal app (**`LyricsMenuBar-1.3.1.dmg`**) delivers **locked 60 FPS VSync smoothness** on everything from Apple Silicon MacBooks to fanless Intel Macs such as the **MacBook 12" (2017 Core m3)** — without ever throttling frame rates down — using a hardware-respecting two-layer design:
+**v2.0.0** eliminates SwiftUI (`SwiftUICore` / `NSHostingView`) completely, pairing a **Rust staticlib core engine** (`liblyrics_core.a`) with a **pure AppKit / `CALayer` shell**. One universal app (**`LyricsMenuBar-2.0.0.dmg`**) sustains **locked 60 FPS VSync smoothness** on everything from Apple Silicon MacBooks down to fanless Intel Macs such as the **MacBook 12" (2017 Core m3)** without ever throttling frame rates down:
 
-### Layer 1: GPU-Native 60 FPS Architecture (All Macs)
-- **Zero-Redraw `CALayer` Menu Bar Canvas (`MenuBarCanvasView`)**: Each lyric line is rasterized **once** into a Retina `CGImage`, while marquee sliding, syllable wipe masking (`CAGradientLayer`), equalizer bar heights (`CAShapeLayer` / `CALayer` mask), and album artwork crossfades run directly on the GPU compositor with zero per-frame `NSImage.lockFocus()` CPU rasterization or WindowServer bitmap uploads.
-- **`CVDisplayLink` VSync + 0% CPU Idle/Paused**: Driven at locked 60 FPS (capped from 120 Hz on ProMotion) only during active playback or short pause-settle transitions, sleeping at **`0 Hz`** whenever playback is paused or idle.
-- **Zero-`GeometryReader`, 1-Mask-Per-Row HUD Karaoke**: Caches wrapped row widths and word x-offsets (`LyricLineLayoutCache`) so HUD word-by-word karaoke runs at full **60 FPS** using one `LinearGradient` mask per wrapped row instead of per-word layout passes and offscreen blur trees.
-- **Precompiled Background IPC**: Compiles Spotify and Apple Music `NSAppleScript` instances once on a `.utility` background serial queue (`2.0s` coalesced polling + instant `DistributedNotificationCenter` events) instead of recompiling scripts from source every tick.
+### Layer 1: Rust Core Engine + Zero-SwiftUI 60 FPS Pipeline (All Macs)
+- **Rust Core Engine (`rust/lyrics-core`)**: Runs zero-allocation 4096-pt `realfft` DSP + beat-synced Force Touch haptics (`IOKit` + `MultitouchSupport`), LRC/eLRC/TTML/Plain lyrics parsing & phonetic word timing, concurrent LRCLib/OVH fetching + 100-item LRU cache, monotonic anti-jitter clock, 12-hue-bucket color extraction, and streaming OTA DMG downloads.
+- **Zero-Redraw `CALayer` Menu Bar Canvas & Virtualized HUD**: Both the Menu Bar strip (`MenuBarCanvasView`) and floating HUD stream (`HUDLyricsView`) rasterize each lyric row once into Retina `CGImage`s and animate karaoke wipes (`CAGradientLayer`), spring scrolls, marquee sliding, equalizer bars, and art crossfades directly on CoreAnimation GPU layers — **0 SwiftUI views**, **0 `NSImage.lockFocus()` redraws**.
+- **`CVDisplayLink` VSync + 0% CPU Idle/Paused**: Shared `CVDisplayLink` runs at locked 60 FPS (capped from 120 Hz on ProMotion) only during active playback or visible HUD animation, sleeping at **`0 Hz`** whenever playback is paused or idle.
+- **Precompiled Background IPC**: Compiles Spotify and Apple Music `NSAppleScript` instances once on a `.utility` background serial queue (`2.0s` coalesced polling + instant `DistributedNotificationCenter` events).
 
 ### Layer 2: Reduce Glass & Blur Effects *(Auto-ON on Intel Macs, macOS 13 & Low Power Mode)*
 - **Automatic Hardware Detection**: Automatically enabled on `x86_64` Intel Macs, macOS 13 Ventura, or when macOS Low Power Mode is active — and **toggleable anytime** under **Settings → Appearance & Performance → Reduce Glass & Blur Effects (60 FPS Lightweight)**.
@@ -143,7 +143,7 @@ Unsupported system-tap features on macOS 13 Ventura are **automatically greyed o
 ## Installation
 
 ### Pre-built Universal DMG
-1. Download **`LyricsMenuBar-1.3.1.dmg`** from [Releases](https://github.com/tum212/Lyrics-Menu-Bar/releases).
+1. Download **`LyricsMenuBar-2.0.0.dmg`** from [Releases](https://github.com/tum212/Lyrics-Menu-Bar/releases).
 2. Drag **Lyrics Menu Bar** into your `/Applications` folder.
 3. Grant **Automation** permissions when prompted on first launch *(and **System Audio Recording** on macOS 14.2+ if using the live audio visualizer)*.
 
@@ -159,14 +159,14 @@ Unsupported system-tap features on macOS 13 Ventura are **automatically greyed o
 ## Building from Source
 
 ```bash
-# Clone the repository
+# 1. Install Rust toolchain with universal Apple Silicon + Intel targets
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+# 2. Clone the repository
 git clone https://github.com/tum212/Lyrics-Menu-Bar.git
 cd Lyrics-Menu-Bar
 
-# Build release binary via Swift Package Manager (macOS 13.0+)
-swift build -c release
-
-# Or package the Universal (arm64 + x86_64) DMG
+# 3. Build universal Rust core + Universal macOS DMG (arm64 + x86_64, macOS 13.0+)
 bash build_dmg.sh
 ```
 
@@ -176,30 +176,39 @@ bash build_dmg.sh
 
 ```text
 SpoticatMenuBar/
-├── Package.swift                       # Swift 6 Package manifest (Universal macOS 13.0+)
-├── build_dmg.sh                        # Universal DMG packaging script (arm64 + x86_64)
+├── Package.swift                       # Swift 6 Package manifest (CLyricsCore + AppKit macOS 13.0+)
+├── build_dmg.sh                        # Universal Rust + Swift DMG packaging script (arm64 + x86_64)
 ├── LyricsMenuBar.entitlements          # Hardened runtime & CoreAudio entitlements
 ├── remote_config.json                  # Remote OTA version & lyrics endpoints config
 ├── icon.icns                           # Application icon
 ├── docs/images/                        # Screenshots and demo GIFs
+├── rust/lyrics-core/                   # Rust staticlib Core Engine (liblyrics_core.a)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs & ffi.rs             # C ABI exports & panic-safe FFI boundary
+│       ├── dsp.rs                      # Zero-alloc 4096-pt realfft DSP & equalizer physics
+│       ├── haptics.rs                  # MultitouchSupport / IOKit beat-synced Force Touch haptics
+│       ├── lyrics.rs                   # LRC/eLRC/TTML/Plain parsers, syllable timing & LRU fetcher
+│       ├── playback.rs                 # Monotonic clock & Menu Bar animation state machine
+│       ├── color.rs                    # 12-hue album palette extractor & artwork networking
+│       └── updater.rs                  # Remote config & streaming OTA DMG downloader
 ├── Sources/
-│   └── LyricsMenuBar/
-│       ├── Info.plist                  # Universal bundle metadata (LSMinimumSystemVersion 13.0)
-│       ├── AppSettings.swift           # Capability detection, Ultra-Light Mode & defaults
-│       ├── LyricsMenuBarApp.swift      # App entry point, 60 FPS CVDisplayLink & HUD panel
-│       ├── MenuBarCanvasView.swift     # GPU-native CALayer menu bar renderer (0 per-frame redraws)
-│       ├── ContentView.swift           # Floating HUD, 1-mask 60 FPS karaoke & settings menu
+│   ├── CLyricsCore/include/
+│   │   ├── lyrics_core.h               # C header generated for Swift/Clang interop
+│   │   └── module.modulemap
+│   └── LyricsMenuBar/                  # Zero-SwiftUI AppKit / CALayer Shell
+│       ├── Info.plist                  # Universal bundle metadata (v2.0.0, LSMinimumSystemVersion 13.0)
+│       ├── AppSettings.swift           # Capability detection, Lightweight defaults & keys
+│       ├── RustBridge.swift            # Swift facade over liblyrics_core.a & NSCache images
+│       ├── LyricsMenuBarApp.swift      # App entry point, 60 FPS CVDisplayLink & Genie panel
+│       ├── MenuBarCanvasView.swift     # GPU-native CALayer menu bar renderer
 │       ├── HUDGlassView.swift          # Adaptive AppKit / CABackdropLayer glass backdrop
-│       ├── MusicService.swift          # Precompiled AppleScript & notification IPC bridge
-│       ├── LyricsService.swift         # Lyrics fetching, LRU cache & syllable timing calculator
-│       ├── ArtworkLoader.swift         # URL sanitizer, compact downscaler & NSCache artwork store
-│       ├── AudioAnalyzer.swift         # CoreAudio Process Tap & vDSP FFT analyzer (macOS 14.2+)
-│       ├── HapticManager.swift         # Force Touch trackpad actuator driver (macOS 14.2+)
-│       ├── ColorExtractor.swift        # Album art palette extraction
-│       ├── RemoteConfigManager.swift   # Git-hosted dynamic config fetcher
-│       ├── UpdateManager.swift         # In-app OTA version checker & DMG installer
-│       ├── LaunchAtLoginManager.swift  # SMAppService login item manager
-│       └── SpotifyService.swift        # Backwards compatibility alias
+│       ├── HUDContentView.swift        # Pure AppKit 480x240 HUD & Software Update modal
+│       ├── HUDLyricsView.swift         # Virtualized 60 FPS CALayer HUD karaoke stream
+│       ├── SettingsMenuController.swift# Native AppKit NSMenu settings
+│       ├── AudioTapBridge.swift        # CoreAudio Process Tap -> Rust DSP bridge (macOS 14.2+)
+│       ├── MusicIPCBridge.swift        # Spotify & Apple Music Notification/AppleScript bridge
+│       └── LaunchAtLoginManager.swift  # SMAppService login item manager
 └── README.md                           # Documentation & GitHub landing page
 ```
 

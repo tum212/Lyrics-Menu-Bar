@@ -99,6 +99,9 @@ final class HUDGlassView: NSView {
             self.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         } else {
             visualEffect.material = .popover
+            let specularOn = UserDefaults.standard.object(forKey: AppSettingKey.specularEdgeEnabled) == nil
+                ? !AppPerformance.defaultUltraLightMode
+                : UserDefaults.standard.bool(forKey: AppSettingKey.specularEdgeEnabled)
             self.layer?.borderWidth = 0.0
             self.layer?.borderColor = nil
             
@@ -125,8 +128,8 @@ final class HUDGlassView: NSView {
             }
             
             topRefractionSheen.isHidden = false
-            innerSoftGlow.isHidden = false
-            rimGradientLayer.isHidden = false
+            innerSoftGlow.isHidden = !specularOn
+            rimGradientLayer.isHidden = !specularOn
             updateColorsForAppearance()
         }
         

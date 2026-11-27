@@ -386,7 +386,7 @@ final class MenuBarCanvasView: NSView {
         barHeights: [CGFloat],
         barW: CGFloat,
         barSp: CGFloat,
-        waveformTheme: WaveformTheme,
+        waveformTheme: WaveformThemeModel,
         showAlbumArt: Bool,
         artX: CGFloat,
         artScale: CGFloat,

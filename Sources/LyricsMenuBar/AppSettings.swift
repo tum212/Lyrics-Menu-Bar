@@ -1,5 +1,4 @@
 import Foundation
-import SwiftUI
 
 public enum AppCapabilities {
     /// True on macOS 14.2+ where CoreAudio Process Tap (CATapDescription) is available

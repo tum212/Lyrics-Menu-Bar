@@ -11,15 +11,31 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_TITLE="Lyrics Menu Bar"
 PLIST_SRC="Sources/LyricsMenuBar/Info.plist"
-DMG_NAME="LyricsMenuBar-1.3.1.dmg"
+DMG_NAME="LyricsMenuBar-2.0.0.dmg"
 VOLUME_NAME="Lyrics Menu Bar"
 MIN_OS="13.0"
 DMG_STAGING="$SCRIPT_DIR/.dmg_staging_Universal"
 
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║  Building ${APP_TITLE} Universal (macOS ${MIN_OS}+)        ║"
+echo "║  Building ${APP_TITLE} v2.0.0 Rust+AppKit (macOS ${MIN_OS}+) ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
+
+# ----- 0. BUILD RUST CORE ENGINE (arm64 + x86_64 -> universal) -------
+echo "=== Building Rust Core Engine (lyrics-core) ==="
+export PATH="$HOME/.cargo/bin:$PATH"
+export MACOSX_DEPLOYMENT_TARGET="${MIN_OS}"
+cd "$SCRIPT_DIR"
+
+cargo build --release --manifest-path rust/lyrics-core/Cargo.toml --target aarch64-apple-darwin
+cargo build --release --manifest-path rust/lyrics-core/Cargo.toml --target x86_64-apple-darwin
+
+mkdir -p "$SCRIPT_DIR/rust/target/universal"
+lipo -create \
+    "$SCRIPT_DIR/rust/lyrics-core/target/aarch64-apple-darwin/release/liblyrics_core.a" \
+    "$SCRIPT_DIR/rust/lyrics-core/target/x86_64-apple-darwin/release/liblyrics_core.a" \
+    -output "$SCRIPT_DIR/rust/target/universal/liblyrics_core.a"
+echo "   Rust universal staticlib complete ✓"
 
 # ----- 1. BUILD -------------------------------------------------------
 cd "$SCRIPT_DIR"

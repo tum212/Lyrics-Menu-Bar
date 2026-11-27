@@ -10,6 +10,10 @@ xcuserdata/
 DerivedData/
 .swiftpm/
 
+# Rust build artifacts
+rust/lyrics-core/target/
+rust/target/
+
 # Packaging temp files & release binaries
 .dmg_staging*
 .temp_rw*

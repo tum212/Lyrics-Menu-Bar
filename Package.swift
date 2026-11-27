@@ -1,5 +1,4 @@
 // swift-tools-version: 6.0
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
@@ -9,11 +8,33 @@ let package = Package(
         .macOS(.v13)
     ],
     targets: [
+        .target(
+            name: "CLyricsCore",
+            path: "Sources/CLyricsCore"
+        ),
         .executableTarget(
             name: "LyricsMenuBar",
+            dependencies: ["CLyricsCore"],
+            path: "Sources/LyricsMenuBar",
             exclude: ["Info.plist"],
             linkerSettings: [
-                .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Sources/LyricsMenuBar/Info.plist"])
+                .unsafeFlags([
+                    "-Lrust/target/universal",
+                    "-llyrics_core",
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/LyricsMenuBar/Info.plist"
+                ]),
+                .linkedFramework("Security"),
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreHaptics"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("ServiceManagement")
             ]
         ),
     ]
