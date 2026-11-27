@@ -17,12 +17,12 @@ public final class ArtworkCache {
     private let cache = NSCache<NSString, NSImage>()
     
     private init() {
-        if AppEdition.isLite {
+        if AppPerformance.isUltraLightMode {
             cache.countLimit = 30
-            cache.totalCostLimit = 12 * 1024 * 1024 // 12MB lightweight limit for older Macs
+            cache.totalCostLimit = 12 * 1024 * 1024 // 12MB lightweight limit
         } else {
-            cache.countLimit = 200
-            cache.totalCostLimit = 60 * 1024 * 1024 // 60MB
+            cache.countLimit = 100
+            cache.totalCostLimit = 30 * 1024 * 1024 // 30MB
         }
     }
     
@@ -113,9 +113,8 @@ public enum ArtworkLoader {
             guard !data.isEmpty, var image = NSImage(data: data) else {
                 return nil
             }
-            if AppEdition.isLite {
-                image = downscaleIfNeeded(image, maxDimension: 240)
-            }
+            let maxDim: CGFloat = AppPerformance.isUltraLightMode ? 240 : 300
+            image = downscaleIfNeeded(image, maxDimension: maxDim)
             ArtworkCache.shared.setImage(image, forKey: cacheKey)
             return image
         } catch {

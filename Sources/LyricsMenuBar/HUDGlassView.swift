@@ -1,13 +1,14 @@
 import AppKit
 import QuartzCore
 
-// MARK: - Native GPU Backdrop Glass
+// MARK: - Native GPU Backdrop Glass (Adaptive Standard / Ultra-Light)
 final class HUDGlassView: NSView {
     
     // Core Engine: Native macOS Popover glass that naturally adapts to light & dark backgrounds
     private let visualEffect = NSVisualEffectView()
     
-    // Optical Rim & Specular Layers
+    // Optional Standard-mode GPU Backdrop & Specular Layers
+    private var backdropLayer: CALayer?
     private let rimGradientLayer = CAGradientLayer()
     private let rimMaskLayer = CAShapeLayer()
     private let topRefractionSheen = CAGradientLayer()
@@ -31,8 +32,7 @@ final class HUDGlassView: NSView {
         self.layer?.cornerRadius = cornerRadiusValue
         self.layer?.cornerCurve = .continuous
         
-        // 1. Native macOS Popover Glass (Zero fake tint - 100% optical clarity)
-        visualEffect.material = AppEdition.isLite ? .hudWindow : .popover
+        // 1. Native macOS Glass View
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
@@ -41,32 +41,7 @@ final class HUDGlassView: NSView {
         visualEffect.layer?.cornerCurve = .continuous
         self.addSubview(visualEffect)
         
-        // In Lite mode, stop at single-pass native AppKit vibrancy to avoid dual-backdrop GPU overhead on Intel HD 615
-        if AppEdition.isLite {
-            self.layer?.borderWidth = 0.75
-            self.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
-            return
-        }
-        
-        // 2. Hardware CABackdropLayer for Vibrant Saturation boost
-        if let cls = NSClassFromString("CABackdropLayer") as? CALayer.Type {
-            let backdrop = cls.init()
-            backdrop.masksToBounds = true
-            backdrop.cornerRadius = cornerRadiusValue
-            backdrop.cornerCurve = .continuous
-            backdrop.setValue(true, forKey: "windowServerAware")
-            backdrop.setValue(true, forKey: "enabled")
-            
-            if let filterClass = NSClassFromString("CAFilter") as? NSObject.Type {
-                if let sat = filterClass.perform(NSSelectorFromString("filterWithType:"), with: "colorSaturate")?.takeUnretainedValue() as? NSObject {
-                    sat.setValue(1.6, forKey: "inputAmount")
-                    backdrop.filters = [sat]
-                }
-            }
-            self.layer?.addSublayer(backdrop)
-        }
-        
-        // 3. Top Refraction Sheen (Light bending across the top curve)
+        // Setup optical layers once (hidden in Ultra-Light mode)
         topRefractionSheen.masksToBounds = true
         topRefractionSheen.cornerRadius = cornerRadiusValue
         topRefractionSheen.cornerCurve = .continuous
@@ -74,13 +49,11 @@ final class HUDGlassView: NSView {
         topRefractionSheen.endPoint = CGPoint(x: 0.5, y: 0.28)
         self.layer?.addSublayer(topRefractionSheen)
         
-        // 4. Soft Inner Glow (2.0px diffuse refraction hugging the perimeter)
         innerSoftGlow.fillColor = NSColor.clear.cgColor
         innerSoftGlow.lineWidth = 2.5
         innerSoftGlow.lineCap = .round
         self.layer?.addSublayer(innerSoftGlow)
         
-        // 5. Specular Optical Rim Gradient (1.5px crisp highlight reflection)
         rimMaskLayer.fillColor = NSColor.clear.cgColor
         rimMaskLayer.strokeColor = NSColor.white.cgColor
         rimMaskLayer.lineWidth = 1.5
@@ -92,31 +65,95 @@ final class HUDGlassView: NSView {
         self.layer?.addSublayer(rimGradientLayer)
         
         self.addObserver(self, forKeyPath: "effectiveAppearance", options: .new, context: nil)
-        updateColorsForAppearance()
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePerformanceModeChanged),
+            name: Notification.Name("UltraLightModeChanged"),
+            object: nil
+        )
+        
+        updateForPerformanceMode()
+    }
+    
+    @objc private func handlePerformanceModeChanged() {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateForPerformanceMode()
+        }
+    }
+    
+    public func updateForPerformanceMode() {
+        let isUltraLight = AppPerformance.isUltraLightMode
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        
+        if isUltraLight {
+            // Single-pass native AppKit vibrancy: zero dual-backdrop GPU overhead on Intel iGPUs
+            visualEffect.material = .hudWindow
+            backdropLayer?.removeFromSuperlayer()
+            backdropLayer = nil
+            topRefractionSheen.isHidden = true
+            innerSoftGlow.isHidden = true
+            rimGradientLayer.isHidden = true
+            self.layer?.borderWidth = 0.75
+            self.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        } else {
+            visualEffect.material = .popover
+            self.layer?.borderWidth = 0.0
+            self.layer?.borderColor = nil
+            
+            if backdropLayer == nil, let cls = NSClassFromString("CABackdropLayer") as? CALayer.Type {
+                let backdrop = cls.init()
+                backdrop.masksToBounds = true
+                backdrop.cornerRadius = cornerRadiusValue
+                backdrop.cornerCurve = .continuous
+                backdrop.setValue(true, forKey: "windowServerAware")
+                backdrop.setValue(true, forKey: "enabled")
+                
+                if let filterClass = NSClassFromString("CAFilter") as? NSObject.Type,
+                   let sat = filterClass.perform(NSSelectorFromString("filterWithType:"), with: "colorSaturate")?.takeUnretainedValue() as? NSObject {
+                    sat.setValue(1.6, forKey: "inputAmount")
+                    backdrop.filters = [sat]
+                }
+                if let veLayer = visualEffect.layer {
+                    self.layer?.insertSublayer(backdrop, above: veLayer)
+                } else {
+                    self.layer?.insertSublayer(backdrop, at: 0)
+                }
+                backdrop.frame = bounds
+                backdropLayer = backdrop
+            }
+            
+            topRefractionSheen.isHidden = false
+            innerSoftGlow.isHidden = false
+            rimGradientLayer.isHidden = false
+            updateColorsForAppearance()
+        }
+        
+        CATransaction.commit()
+        needsLayout = true
     }
     
     private func updateColorsForAppearance() {
+        guard !AppPerformance.isUltraLightMode else { return }
         self.effectiveAppearance.performAsCurrentDrawingAppearance {
             let isDark = self.effectiveAppearance.name == .darkAqua || self.effectiveAppearance.name == .vibrantDark
             
-            // Top Refraction Sheen: light catching the upper glass curve
             topRefractionSheen.colors = [
                 isDark ? NSColor.white.withAlphaComponent(0.18).cgColor : NSColor.white.withAlphaComponent(0.40).cgColor,
                 NSColor.clear.cgColor
             ]
             
-            // Soft Inner Glow: ambient light bleeding inside the squircle edge
             innerSoftGlow.strokeColor = isDark
                 ? NSColor.white.withAlphaComponent(0.14).cgColor
                 : NSColor.white.withAlphaComponent(0.35).cgColor
             
-            // Specular Rim: high-visibility optical refraction highlight
             if isDark {
                 rimGradientLayer.colors = [
-                    NSColor.white.withAlphaComponent(0.85).cgColor, // Crisp bright specular reflection at top-left
+                    NSColor.white.withAlphaComponent(0.85).cgColor,
                     NSColor.white.withAlphaComponent(0.45).cgColor,
                     NSColor.white.withAlphaComponent(0.15).cgColor,
-                    NSColor.white.withAlphaComponent(0.35).cgColor  // Bottom-right rim reflection
+                    NSColor.white.withAlphaComponent(0.35).cgColor
                 ]
             } else {
                 rimGradientLayer.colors = [
@@ -139,9 +176,8 @@ final class HUDGlassView: NSView {
     }
     
     deinit {
-        if !AppEdition.isLite {
-            self.removeObserver(self, forKeyPath: "effectiveAppearance")
-        }
+        self.removeObserver(self, forKeyPath: "effectiveAppearance")
+        NotificationCenter.default.removeObserver(self)
     }
     
     override func layout() {
@@ -150,19 +186,18 @@ final class HUDGlassView: NSView {
         CATransaction.setDisableActions(true)
         
         visualEffect.frame = bounds
-        if AppEdition.isLite {
+        backdropLayer?.frame = bounds
+        if AppPerformance.isUltraLightMode {
             CATransaction.commit()
             return
         }
         topRefractionSheen.frame = bounds
         rimGradientLayer.frame = bounds
         
-        // 1.5px inset path for the crisp specular rim
         let strokeBounds = bounds.insetBy(dx: 0.75, dy: 0.75)
         rimMaskLayer.frame = bounds
         rimMaskLayer.path = CGPath(roundedRect: strokeBounds, cornerWidth: cornerRadiusValue - 0.75, cornerHeight: cornerRadiusValue - 0.75, transform: nil)
         
-        // 2.0px inset path for the soft inner ambient glow
         let innerBounds = bounds.insetBy(dx: 1.5, dy: 1.5)
         innerSoftGlow.frame = bounds
         innerSoftGlow.path = CGPath(roundedRect: innerBounds, cornerWidth: cornerRadiusValue - 1.5, cornerHeight: cornerRadiusValue - 1.5, transform: nil)

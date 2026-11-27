@@ -1,10 +1,10 @@
 {
   "version": "1.3.1",
-  "build": 55,
+  "build": 56,
   "release_date": "2026-11-27",
-  "release_notes": "Ultra-Lightweight Edition Lite & Performance Overhaul: Adaptive 12 FPS / 0% idle Menu Bar engine, LazyVStack & hidden-panel rendering freeze, single-pass AppKit HUD glass without heavy blur/shadow shaders for older Macs (MacBook 12\" 2017 / macOS 13), reduced RAM footprint, and fixed Lite OTA updater.",
+  "release_notes": "Unified Universal Release (macOS 13.0+): Single lightweight app supporting macOS 13 Ventura through macOS 26. Auto-enables Ultra-Light Mode on Intel Macs, macOS 13, and Low Power Mode (toggleable live in Settings), gracefully greys out macOS 14.2+ Audio Tap & Beat Haptics on macOS 13, and idles at 0% CPU when paused or hidden.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
-  "download_url_lite": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-Lite-1.3.1.dmg",
+  "download_url_lite": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {
     "lrclib_search": "https://lrclib.net/api/search",

@@ -88,8 +88,7 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
 
     public override init() {
         super.init()
-        guard !AppEdition.isLite else { return }
-        guard #available(macOS 14.2, *) else { return }
+        guard AppCapabilities.supportsAudioTap else { return }
 
         let obs = NotificationCenter.default.addObserver(forName: Notification.Name("ActiveMusicSourceChanged"), object: nil, queue: .main) { [weak self] notif in
             if let bundleID = notif.userInfo?["bundleID"] as? String {
@@ -149,8 +148,7 @@ public final class AudioAnalyzer: NSObject, ObservableObject, @unchecked Sendabl
     }
 
     public func start() {
-        guard !AppEdition.isLite else { return }
-        guard #available(macOS 14.2, *) else { return }
+        guard AppCapabilities.supportsAudioTap else { return }
         guard !isRunning else { return }
         guard UserDefaults.standard.bool(forKey: "audioFeaturesEnabled") else { return }
         requestAccessAndSetup()

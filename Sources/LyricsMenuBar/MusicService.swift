@@ -295,13 +295,14 @@ public final class MusicService: NSObject, ObservableObject {
     public func startPolling() {
         timer?.invalidate()
         timer = nil
-        let interval: TimeInterval = AppEdition.isLite ? 3.0 : 1.0
+        let isUltraLight = AppPerformance.isUltraLightMode
+        let interval: TimeInterval = isUltraLight ? 3.0 : 1.5
         let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollActivePlayer()
             }
         }
-        t.tolerance = AppEdition.isLite ? 0.5 : 0.15
+        t.tolerance = isUltraLight ? 0.5 : 0.25
         timer = t
         RunLoop.main.add(t, forMode: .common)
         pollActivePlayer()
@@ -324,8 +325,7 @@ public final class MusicService: NSObject, ObservableObject {
         
         let mode = self.sourceMode
         let active = self.activeSource
-        let priority: TaskPriority = AppEdition.isLite ? .utility : .userInitiated
-        Task.detached(priority: priority) { [weak self] in
+        Task.detached(priority: .utility) { [weak self] in
             let res: (track: MusicTrack?, isPlaying: Bool, position: Double, source: MusicSourceMode, isNotRunning: Bool)
             switch mode {
             case .spotify:
@@ -608,11 +608,10 @@ public final class MusicService: NSObject, ObservableObject {
                 }.value
                 
                 if let data = result.data, var image = NSImage(data: data) {
-                    if AppEdition.isLite {
-                        image = ArtworkLoader.downscaleIfNeeded(image, maxDimension: 240)
-                    }
+                    let isUltraLight = AppPerformance.isUltraLightMode
+                    image = ArtworkLoader.downscaleIfNeeded(image, maxDimension: isUltraLight ? 240 : 300)
                     loadedImage = image
-                    if self.currentTrack?.id == trackId && !AppEdition.isLite {
+                    if self.currentTrack?.id == trackId && !isUltraLight {
                         self.currentTrack?.artworkData = data
                     }
                 }

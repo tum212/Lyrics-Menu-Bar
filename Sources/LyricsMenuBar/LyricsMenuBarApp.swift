@@ -163,6 +163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AppDefaults.register()
         refreshCachedPrefs()
         NotificationCenter.default.addObserver(self, selector: #selector(handleUserDefaultsChanged), name: UserDefaults.didChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleUltraLightModeChanged), name: Notification.Name("UltraLightModeChanged"), object: nil)
         
         let contentView = ContentView(
             musicService: spotify,
@@ -235,7 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isPlaying in
                 guard let self = self else { return }
-                if !AppEdition.isLite {
+                if AppCapabilities.supportsAudioTap {
                     let waveformBars = self.cachedWaveformBars
                     let featuresEnabled = UserDefaults.standard.bool(forKey: "audioFeaturesEnabled")
                     if isPlaying && waveformBars > 0 && featuresEnabled {
@@ -243,6 +244,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     } else {
                         self.audioAnalyzer.stop()
                     }
+                }
+                if !isPlaying {
+                    self.currentMenuBarArtScale = 0.85
+                    self.currentMenuBarArtOpacity = 0.78
                 }
                 self.syncMenuBarTimerState()
                 self.updateMenuBar()
@@ -312,7 +317,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.setFrame(NSRect(x: geom.xPos, y: geom.yPos, width: 480, height: 240), display: true)
         panel.invalidateShadow()
         
-        if AppEdition.isLite {
+        if AppPerformance.isUltraLightMode {
             // Ultra-lightweight snappy 2D open animation for Intel iGPU (zero 3D perspective / spring cost)
             layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
             layer.position = CGPoint(x: 240, y: 120)
@@ -401,7 +406,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard self.panel != nil, let glassView = self.glassView, let layer = glassView.layer else { return }
         isGenieAnimating = true
         
-        if AppEdition.isLite {
+        if AppPerformance.isUltraLightMode {
             let fadeAnim = CABasicAnimation(keyPath: "opacity")
             fadeAnim.fromValue = 1.0
             fadeAnim.toValue = 0.0
@@ -475,7 +480,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         stopMenuBarUpdater()
         audioAnalyzer.stop()
-        if !AppEdition.isLite {
+        if AppCapabilities.supportsAudioTap {
             HapticManager.shared.teardown()
         }
         spotify.cleanup()
@@ -514,7 +519,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if ud.object(forKey: "waveformBars") != nil {
             cachedWaveformBars = min(128, max(0, ud.integer(forKey: "waveformBars")))
         } else {
-            cachedWaveformBars = AppEdition.isLite ? 0 : 14
+            cachedWaveformBars = (AppPerformance.isUltraLightMode || !AppCapabilities.supportsAudioTap) ? 0 : 14
         }
         cachedShowAlbumArt = ud.object(forKey: "showAlbumArt") != nil ? ud.bool(forKey: "showAlbumArt") : true
         cachedShowLyrics = ud.object(forKey: "showLyrics") != nil ? ud.bool(forKey: "showLyrics") : true
@@ -527,22 +532,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     @objc private func handleUserDefaultsChanged() {
         refreshCachedPrefs()
+        syncMenuBarTimerState()
+        forceRedrawLyrics = true
+        updateMenuBar()
+    }
+    
+    @objc private func handleUltraLightModeChanged() {
+        refreshCachedPrefs()
+        syncMenuBarTimerState()
         forceRedrawLyrics = true
         updateMenuBar()
     }
     
     func syncMenuBarTimerState() {
+        let isUltraLight = AppPerformance.isUltraLightMode
         let desiredInterval: TimeInterval
-        if AppEdition.isLite {
-            // Lite mode: 0 Hz when idle or paused (zero CPU wakeups), 12 FPS when playing
-            if spotify.currentTrack != nil && spotify.isPlaying {
-                desiredInterval = 1.0 / 12.0
-            } else {
-                desiredInterval = 0
-            }
+        if spotify.currentTrack == nil || !spotify.isPlaying {
+            // Zero wakeups (0% CPU) when idle or paused across all Macs
+            desiredInterval = 0
         } else {
-            // Standard mode: 2 Hz idle check when no track, 60 FPS when track present
-            desiredInterval = (spotify.currentTrack == nil) ? 0.5 : (1.0 / 60.0)
+            desiredInterval = isUltraLight ? (1.0 / 12.0) : (1.0 / 60.0)
         }
         
         if desiredInterval == currentTimerInterval && (desiredInterval == 0 ? updateTimer == nil : updateTimer != nil) {
@@ -554,7 +563,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         guard desiredInterval > 0 else { return }
         let timer = Timer.scheduledTimer(timeInterval: desiredInterval, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
-        timer.tolerance = AppEdition.isLite ? 0.025 : (desiredInterval >= 0.5 ? 0.2 : 0.002)
+        timer.tolerance = isUltraLight ? 0.025 : 0.002
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
     }
@@ -606,14 +615,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         var deltaTime = now.timeIntervalSince(lastFrameTime)
         lastFrameTime = now
-        if deltaTime > 0.25 || deltaTime <= 0 { deltaTime = AppEdition.isLite ? (1.0 / 12.0) : 0.016 }
+        let isUltraLight = AppPerformance.isUltraLightMode
+        if deltaTime > 0.25 || deltaTime <= 0 { deltaTime = isUltraLight ? (1.0 / 12.0) : 0.016 }
         
         let waveformBars = cachedWaveformBars
         let showAlbumArt = cachedShowAlbumArt
         let showLyrics = cachedShowLyrics
         
         // Pass dynamic band count to audio analyzer
-        if waveformBars > 0 && !AppEdition.isLite {
+        if waveformBars > 0 && AppCapabilities.supportsAudioTap {
             audioAnalyzer.updateBandCount(waveformBars)
         }
         
@@ -637,7 +647,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let primaryTextColor = isDark ? NSColor.white : NSColor(white: 0.1, alpha: 1.0)
             
             let sparkleTime = now.timeIntervalSince(trackChangedTime)
-            let isSparkling = !AppEdition.isLite && (lyricsService.isLoading || sparkleTime < 5.5)
+            let isSparkling = !isUltraLight && (lyricsService.isLoading || sparkleTime < 5.5)
             
             if lastTrackIdForSparkle != track.id {
                 lastTrackIdForSparkle = track.id
@@ -910,13 +920,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     text: currentLineText,
                     canvasWidth: canvasWidth,
                     isDark: isDark,
-                    marqueeOffsetQuantized: AppEdition.isLite ? Int(marqueeOffset) : Int(marqueeOffset * 2.0),
-                    wordLeadXQuantized: AppEdition.isLite ? Int((wordLeadX ?? -100.0) / 3.0) : Int((wordLeadX ?? -100.0) * 2.0),
-                    transitionProgressQuantized: AppEdition.isLite ? Int(transitionProgress * 20.0) : Int(transitionProgress * 100.0),
+                    marqueeOffsetQuantized: isUltraLight ? Int(marqueeOffset) : Int(marqueeOffset * 2.0),
+                    wordLeadXQuantized: isUltraLight ? Int((wordLeadX ?? -100.0) / 3.0) : Int((wordLeadX ?? -100.0) * 2.0),
+                    transitionProgressQuantized: isUltraLight ? Int(transitionProgress * 20.0) : Int(transitionProgress * 100.0),
                     isSparkling: isSparkling,
                     sparkleFrame: isSparkling ? Int(sparkleTime * 60.0) : 0,
                     isInterlude: isInterlude,
-                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * (AppEdition.isLite ? 10.0 : 60.0)) : 0
+                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * (isUltraLight ? 10.0 : 60.0)) : 0
                 )
                 
                 if currentLyricsKey == lastLyricsRenderKey, let cached = cachedLyricsImage {
@@ -969,7 +979,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         let center = NSPoint(x: startX + CGFloat(sIdx) * spacing, y: centerY)
                         
                         NSGraphicsContext.current?.saveGraphicsState()
-                        if !AppEdition.isLite {
+                        if !isUltraLight {
                             let shadow = NSShadow()
                             shadow.shadowColor = primaryTextColor.withAlphaComponent(alpha * 0.85)
                             shadow.shadowBlurRadius = 5.0
@@ -1010,7 +1020,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         }
                         let textPoint1 = NSPoint(x: glowPad + marqueeOffset, y: yOffsetNew)
                         
-                        if AppEdition.isLite {
+                        if AppPerformance.isUltraLightMode {
                             // Zero-allocation clipped highlight draw for Lite (no temporary NSImage or NSGradient)
                             let clipWidth = max(0, min(safeSize.width, leadX + fadeWidth * 0.5))
                             if clipWidth > 0 {
@@ -1047,7 +1057,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                 }
                 let totalSparkleDuration = 5.5
-                let isSparkling = !AppEdition.isLite && (lyricsService.isLoading || (sparkleTime < totalSparkleDuration && currentLineText == trackName))
+                let isSparkling = !isUltraLight && (lyricsService.isLoading || (sparkleTime < totalSparkleDuration && currentLineText == trackName))
                 
                 if isSparkling {
                     let cycleTime = lyricsService.isLoading ? sparkleTime.truncatingRemainder(dividingBy: totalSparkleDuration) : sparkleTime
@@ -1262,15 +1272,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             quantizedWidth: quantizedWidth,
             lyricsX: lyricsX,
             lyricsWidth: lyricsWidth,
-            marqueeOffsetQuantized: AppEdition.isLite ? Int(marqueeOffset) : Int(marqueeOffset * 2.0),
-            wordLeadXQuantized: AppEdition.isLite ? Int((wordLeadX ?? -100.0) / 3.0) : Int((wordLeadX ?? -100.0) * 2.0),
-            transitionProgressQuantized: AppEdition.isLite ? Int(transitionProgress * 20.0) : Int(transitionProgress * 100.0),
+            marqueeOffsetQuantized: isUltraLight ? Int(marqueeOffset) : Int(marqueeOffset * 2.0),
+            wordLeadXQuantized: isUltraLight ? Int((wordLeadX ?? -100.0) / 3.0) : Int((wordLeadX ?? -100.0) * 2.0),
+            transitionProgressQuantized: isUltraLight ? Int(transitionProgress * 20.0) : Int(transitionProgress * 100.0),
             isSparkling: isSparkling,
             sparkleFrame: isSparkling ? Int(sparkleTime * 60.0) : 0,
             isInterlude: isInterlude,
-            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * (AppEdition.isLite ? 10.0 : 60.0)) : 0,
+            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * (isUltraLight ? 10.0 : 60.0)) : 0,
             vizWidth: vizWidth,
-            barHeightsQuantized: barHeights.map { AppEdition.isLite ? Int($0) : Int($0 * 2.0) }
+            barHeightsQuantized: barHeights.map { isUltraLight ? Int($0) : Int($0 * 2.0) }
         )
 
         if currentKey == lastMenuBarRenderKey && !prefsChanged && !forceRedrawLyrics {
@@ -1302,7 +1312,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             
             // 1. Apple Music subtle bloom behind bars (skipped in Lite to avoid CPU Gaussian blur)
             let theme = cachedWaveformTheme
-            if !AppEdition.isLite {
+            if !isUltraLight {
                 NSGraphicsContext.current?.saveGraphicsState()
                 let outerGlow = NSShadow()
                 outerGlow.shadowColor = theme.glowColor.withAlphaComponent(0.35)
@@ -1329,7 +1339,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         // 3. Draw album art (Static clean scale in Lite / Dynamic Island Spring Pop in Standard)
         if showAlbumArt, let currentArt = cachedAlbumArtImage {
-            if AppEdition.isLite {
+            if AppPerformance.isUltraLightMode {
                 let effectiveScale: CGFloat = spotify.isPlaying ? 1.0 : 0.86
                 let effectiveOpacity: CGFloat = spotify.isPlaying ? 1.0 : 0.78
                 let artW: CGFloat = 20.0 * effectiveScale

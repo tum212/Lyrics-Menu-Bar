@@ -81,26 +81,22 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         let config = await RemoteConfigManager.shared.fetchRemoteConfig()
         lastCheckDate = Date()
 
-        if let config = config {
-            let isLite = AppEdition.isLite
-            let chosenUrlStr = (isLite ? config.downloadUrlLite : config.downloadUrl) ?? config.downloadUrl
-            if let chosenUrlStr = chosenUrlStr, let downloadUrl = URL(string: chosenUrlStr) {
-                let isNewerVersion = Self.isVersion(config.version, greaterThan: currentVersion)
-                let isNewerBuild = config.build > currentBuild && config.version == currentVersion
+        if let config = config, let downloadUrlStr = config.downloadUrl, let downloadUrl = URL(string: downloadUrlStr) {
+            let isNewerVersion = Self.isVersion(config.version, greaterThan: currentVersion)
+            let isNewerBuild = config.build > currentBuild && config.version == currentVersion
 
-                if isNewerVersion || isNewerBuild {
-                    let notes = config.releaseNotes ?? "A new update for Lyrics Menu Bar is ready."
-                    state = .updateAvailable(version: config.version, releaseNotes: notes, downloadUrl: downloadUrl)
-                    showUpdateModal = true
-                    return
-                }
+            if isNewerVersion || isNewerBuild {
+                let notes = config.releaseNotes ?? "A new update for Lyrics Menu Bar is ready."
+                state = .updateAvailable(version: config.version, releaseNotes: notes, downloadUrl: downloadUrl)
+                showUpdateModal = true
+                return
             }
         }
 
         // 2. Fallback to GitHub Releases API if remote config wasn't newer
         if let release = await fetchLatestGitHubRelease() {
             let releaseTag = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
-            if Self.isVersion(releaseTag, greaterThan: currentVersion), let assetUrl = release.dmgDownloadUrl(isLite: AppEdition.isLite) {
+            if Self.isVersion(releaseTag, greaterThan: currentVersion), let assetUrl = release.dmgDownloadUrl {
                 state = .updateAvailable(version: releaseTag, releaseNotes: release.body, downloadUrl: assetUrl)
                 showUpdateModal = true
                 return
@@ -173,8 +169,7 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         state = .installing
 
         let currentAppPath = Bundle.main.bundlePath
-        let defaultAppName = AppEdition.isLite ? "Lyrics Menu Bar Lite.app" : "Lyrics Menu Bar.app"
-        let targetAppPath = currentAppPath.hasPrefix("/Applications") ? currentAppPath : "/Applications/\(defaultAppName)"
+        let targetAppPath = currentAppPath.hasPrefix("/Applications") ? currentAppPath : "/Applications/Lyrics Menu Bar.app"
         let scriptPath = "/tmp/update_lyricsmenubar.sh"
         let mountPoint = "/tmp/LyricsMenuBarMount"
 
@@ -244,13 +239,7 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
             case name, body, assets
         }
 
-        func dmgDownloadUrl(isLite: Bool) -> URL? {
-            if isLite, let asset = assets.first(where: { $0.name.lowercased().contains("lite") && $0.name.hasSuffix(".dmg") }) {
-                return URL(string: asset.browserDownloadUrl)
-            }
-            if !isLite, let asset = assets.first(where: { !$0.name.lowercased().contains("lite") && $0.name.hasSuffix(".dmg") }) {
-                return URL(string: asset.browserDownloadUrl)
-            }
+        var dmgDownloadUrl: URL? {
             if let asset = assets.first(where: { $0.name.hasSuffix(".dmg") }) {
                 return URL(string: asset.browserDownloadUrl)
             }

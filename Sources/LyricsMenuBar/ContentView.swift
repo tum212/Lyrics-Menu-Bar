@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - Native Optical Glass Backdrop
 struct VisualEffectBackground: NSViewRepresentable {
@@ -38,12 +39,13 @@ struct ContentView: View {
     @State private var isLyricsHovered: Bool = false
     
     // User preferences
+    @AppStorage("ultraLightMode") private var ultraLightMode = AppPerformance.defaultUltraLightMode
     @AppStorage("showLyrics") private var showLyrics = true
-    @AppStorage("waveformBars") private var waveformBars = AppEdition.isLite ? 0 : 14
+    @AppStorage("waveformBars") private var waveformBars = (AppPerformance.defaultUltraLightMode || !AppCapabilities.supportsAudioTap) ? 0 : 14
     @AppStorage("showAlbumArt") private var showAlbumArt = true
     @AppStorage("hapticEnabled") private var hapticEnabled = false
     @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
-    @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = !AppEdition.isLite
+    @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = !AppPerformance.defaultUltraLightMode
     @ObservedObject private var updateManager = UpdateManager.shared
 
     var body: some View {
@@ -281,6 +283,7 @@ struct ContentView: View {
                 lyricsService: lyricsService,
                 lyricsFocusMode: lyricsFocusMode,
                 isUnsynced: isUnsynced,
+                ultraLightMode: ultraLightMode,
                 onSeek: { idx, line in
                     let seekTime: TimeInterval
                     if line.time > 0 {
@@ -293,6 +296,7 @@ struct ContentView: View {
                     NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                 }
             )
+            .id(ultraLightMode)
         }
     }
 
@@ -403,18 +407,40 @@ struct LyricsStreamView: View {
     @ObservedObject var lyricsService: LyricsService
     let lyricsFocusMode: Bool
     let isUnsynced: Bool
+    let ultraLightMode: Bool
     let onSeek: (Int, LyricLine) -> Void
     
     @State private var activeLineId: UUID? = nil
     @State private var isLyricsHovered: Bool = false
     
-    // Lite uses ~6.6 Hz clock with tolerance; Standard uses 60 Hz; both idle at 0% when HUD is closed
-    private let clock = Timer.publish(
-        every: AppEdition.isLite ? 0.15 : (1.0 / 60.0),
-        tolerance: AppEdition.isLite ? 0.05 : 0.005,
-        on: .main,
-        in: .common
-    ).autoconnect()
+    // Ultra-Light uses ~6.6 Hz clock with tolerance; Standard uses 60 Hz; both idle at 0% when HUD is closed
+    private let clock: Publishers.Autoconnect<Timer.TimerPublisher>
+    
+    init(
+        allLyrics: [LyricLine],
+        containerWidth: CGFloat,
+        musicService: MusicService,
+        lyricsService: LyricsService,
+        lyricsFocusMode: Bool,
+        isUnsynced: Bool,
+        ultraLightMode: Bool,
+        onSeek: @escaping (Int, LyricLine) -> Void
+    ) {
+        self.allLyrics = allLyrics
+        self.containerWidth = containerWidth
+        self.musicService = musicService
+        self.lyricsService = lyricsService
+        self.lyricsFocusMode = lyricsFocusMode
+        self.isUnsynced = isUnsynced
+        self.ultraLightMode = ultraLightMode
+        self.onSeek = onSeek
+        self.clock = Timer.publish(
+            every: ultraLightMode ? 0.15 : (1.0 / 60.0),
+            tolerance: ultraLightMode ? 0.05 : 0.005,
+            on: .main,
+            in: .common
+        ).autoconnect()
+    }
     
     private func syncActiveLine(proxy: ScrollViewProxy, animated: Bool) {
         let time = musicService.currentTime
@@ -435,7 +461,7 @@ struct LyricsStreamView: View {
         
         if targetId != activeLineId {
             let anim: Animation? = animated
-                ? (AppEdition.isLite ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86))
+                ? (ultraLightMode ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86))
                 : nil
             if let anim = anim {
                 withAnimation(anim) {
@@ -474,6 +500,7 @@ struct LyricsStreamView: View {
                             musicService: musicService,
                             fallbackProgress: 0.0,
                             isUnsynced: isUnsynced,
+                            ultraLightMode: ultraLightMode,
                             containerWidth: containerWidth,
                             onSeek: { onSeek(idx, line) }
                         )
@@ -484,7 +511,7 @@ struct LyricsStreamView: View {
                 .padding(.horizontal, 4)
             }
             .onHover { hovering in
-                if AppEdition.isLite {
+                if ultraLightMode {
                     withAnimation(.easeOut(duration: 0.18)) {
                         isLyricsHovered = hovering
                     }
@@ -617,6 +644,7 @@ struct LyricLineRowView: View {
     @ObservedObject var musicService: MusicService
     let fallbackProgress: Double
     let isUnsynced: Bool
+    let ultraLightMode: Bool
     let containerWidth: CGFloat
     let onSeek: () -> Void
     
@@ -640,7 +668,7 @@ struct LyricLineRowView: View {
                     } else {
                         fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
                     }
-                } else if AppEdition.isLite {
+                } else if ultraLightMode {
                     TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { _ in
                         if !line.words.isEmpty {
                             wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
@@ -670,12 +698,12 @@ struct LyricLineRowView: View {
                 .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
         )
         .contentShape(Rectangle())
-        .blur(radius: (!AppEdition.isLite && lyricsFocusMode && !isActive && !effectiveHover) ? 2.5 : 0.0)
+        .blur(radius: (!ultraLightMode && lyricsFocusMode && !isActive && !effectiveHover) ? 2.5 : 0.0)
         .opacity(lyricsFocusMode ? (isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.32 : 0.38))) : (isActive ? 1.0 : 0.85))
-        .animation(AppEdition.isLite ? .easeOut(duration: 0.20) : .spring(response: 0.35, dampingFraction: 0.8), value: lyricsFocusMode)
-        .animation(AppEdition.isLite ? .easeOut(duration: 0.18) : .spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
-        .animation(AppEdition.isLite ? .easeOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
-        .animation(AppEdition.isLite ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86), value: isActive)
+        .animation(ultraLightMode ? .easeOut(duration: 0.20) : .spring(response: 0.35, dampingFraction: 0.8), value: lyricsFocusMode)
+        .animation(ultraLightMode ? .easeOut(duration: 0.18) : .spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
+        .animation(ultraLightMode ? .easeOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
+        .animation(ultraLightMode ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86), value: isActive)
         .onTapGesture {
             onSeek()
         }
@@ -699,7 +727,7 @@ struct LyricLineRowView: View {
                     .font(.system(size: fontSize, weight: fontWeight))
                     .italic(isBgVocal)
                     .foregroundColor(.white.opacity(effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40)))
-                    .shadow(color: AppEdition.isLite ? .clear : Color.black.opacity(0.35), radius: AppEdition.isLite ? 0 : 2, x: 0, y: 1)
+                    .shadow(color: ultraLightMode ? .clear : Color.black.opacity(0.35), radius: ultraLightMode ? 0 : 2, x: 0, y: 1)
                     .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
             }
         }
@@ -739,6 +767,7 @@ struct LyricLineRowView: View {
                             isPast: isPast,
                             isHovered: isHovered,
                             lyricsFocusMode: lyricsFocusMode,
+                            ultraLightMode: ultraLightMode,
                             currentTime: currentTime,
                             fontSize: fontSize,
                             fontWeight: fontWeight,
@@ -756,7 +785,7 @@ struct LyricLineRowView: View {
     private func fallbackWipeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
         let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
         let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
-        if AppEdition.isLite {
+        if ultraLightMode {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(0..<lines.count, id: \.self) { i in
                     Text(lines[i])
@@ -843,6 +872,7 @@ struct WordLyricItemView: View {
     let isPast: Bool
     let isHovered: Bool
     let lyricsFocusMode: Bool
+    let ultraLightMode: Bool
     let currentTime: TimeInterval
     var fontSize: CGFloat = 20
     var fontWeight: Font.Weight = .bold
@@ -854,7 +884,7 @@ struct WordLyricItemView: View {
         let wordEnd = word.endTime
         let hasStarted = currentTime >= wordStart
 
-        if AppEdition.isLite {
+        if ultraLightMode {
             // Ultra-lightweight word-by-word karaoke for Lite: zero GeometryReader, zero mask, zero blur shadow
             Text(word.text)
                 .font(font)
@@ -937,15 +967,16 @@ struct WordLyricItemView: View {
 // MARK: - Native NSMenu for Settings
 // Fixes SwiftUI Menu submenu flickering bug in NSPopover
 struct NativeSettingsMenu: NSViewRepresentable {
+    @AppStorage("ultraLightMode") var ultraLightMode = AppPerformance.defaultUltraLightMode
     @AppStorage("showLyrics") var showLyrics = true
     @AppStorage("showAlbumArt") var showAlbumArt = true
-    @AppStorage("audioFeaturesEnabled") var audioFeaturesEnabled = !AppEdition.isLite
+    @AppStorage("audioFeaturesEnabled") var audioFeaturesEnabled = AppCapabilities.supportsAudioTap && !AppPerformance.defaultUltraLightMode
     @AppStorage("musicSourceMode") var musicSourceMode = "Auto"
     @AppStorage("lyricsFocusMode") var lyricsFocusMode = true
-    @AppStorage("specularEdgeEnabled") var specularEdgeEnabled = !AppEdition.isLite
+    @AppStorage("specularEdgeEnabled") var specularEdgeEnabled = !AppPerformance.defaultUltraLightMode
     @AppStorage("hapticIntensity") var hapticIntensity = 0
     @AppStorage("hapticActuatorType") var hapticActuatorType = 0  // 0 = Auto
-    @AppStorage("waveformBars") var waveformBars = AppEdition.isLite ? 0 : 14
+    @AppStorage("waveformBars") var waveformBars = (AppPerformance.defaultUltraLightMode || !AppCapabilities.supportsAudioTap) ? 0 : 14
     @AppStorage("lyricsMaxWidth") var lyricsMaxWidth: Int = 200
     
     func makeNSView(context: Context) -> NSButton {
@@ -1060,72 +1091,85 @@ struct NativeSettingsMenu: NSViewRepresentable {
             lyricsSectionItem.submenu = lyricsSectionMenu
             menu.addItem(lyricsSectionItem)
             
-            // ── 3. Appearance & Glass Submenu ────────────────────────────────
-            let appearanceItem = NSMenuItem(title: "Appearance & Glass", action: nil, keyEquivalent: "")
-            let appearanceMenu = NSMenu(title: "Appearance & Glass")
+            // ── 3. Appearance & Performance Submenu ──────────────────────────
+            let appearanceItem = NSMenuItem(title: "Appearance & Performance", action: nil, keyEquivalent: "")
+            let appearanceMenu = NSMenu(title: "Appearance & Performance")
+            
+            let isUltraLight = AppPerformance.isUltraLightMode
+            let ultraLightItem = NSMenuItem(title: "Ultra-Light Mode (Best for Intel / Battery)", action: #selector(toggleUltraLightMode), keyEquivalent: "")
+            ultraLightItem.target = self
+            ultraLightItem.state = isUltraLight ? .on : .off
+            appearanceMenu.addItem(ultraLightItem)
             
             let specularItem = NSMenuItem(title: "Specular Edge Highlight", action: #selector(toggleSpecularEdge), keyEquivalent: "")
             specularItem.target = self
-            specularItem.state = specularEdgeEnabled ? .on : .off
+            specularItem.isEnabled = !isUltraLight
+            specularItem.state = (!isUltraLight && specularEdgeEnabled) ? .on : .off
             appearanceMenu.addItem(specularItem)
             
             appearanceItem.submenu = appearanceMenu
             menu.addItem(appearanceItem)
             
             // ── 4. Haptics Submenu ───────────────────────────────────────────
-            let hapticsItem = NSMenuItem(title: "Haptics", action: nil, keyEquivalent: "")
-            let hapticsMenu = NSMenu(title: "Haptics")
-            
-            let intensityItem = NSMenuItem(title: "Intensity", action: nil, keyEquivalent: "")
-            let intensityMenu = NSMenu(title: "Intensity")
-            let hModes = ["Off", "Light", "Medium", "Firm"]
-            for (i, mode) in hModes.enumerated() {
-                let item = NSMenuItem(title: mode, action: #selector(setHaptic(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = i
-                item.state = hapticIntensity == i ? .on : .off
-                intensityMenu.addItem(item)
+            if !AppCapabilities.supportsAudioTap {
+                let hapticsItem = NSMenuItem(title: "Haptics (Requires macOS 14.2+)", action: nil, keyEquivalent: "")
+                hapticsItem.isEnabled = false
+                menu.addItem(hapticsItem)
+            } else {
+                let hapticsItem = NSMenuItem(title: "Haptics", action: nil, keyEquivalent: "")
+                let hapticsMenu = NSMenu(title: "Haptics")
+                
+                let intensityItem = NSMenuItem(title: "Intensity", action: nil, keyEquivalent: "")
+                let intensityMenu = NSMenu(title: "Intensity")
+                let hModes = ["Off", "Light", "Medium", "Firm"]
+                for (i, mode) in hModes.enumerated() {
+                    let item = NSMenuItem(title: mode, action: #selector(setHaptic(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.tag = i
+                    item.state = hapticIntensity == i ? .on : .off
+                    intensityMenu.addItem(item)
+                }
+                intensityItem.submenu = intensityMenu
+                hapticsMenu.addItem(intensityItem)
+                
+                // Haptic Feel submenu
+                hapticsMenu.addItem(.separator())
+                let feelItem = NSMenuItem(title: "Haptic Feel", action: nil, keyEquivalent: "")
+                let feelMenu = NSMenu(title: "Haptic Feel")
+                let types: [(tag: Int, label: String, desc: String)] = [
+                    (0, "Auto",   "Auto (kick=6, beat=4)"),
+                    (1, "Type 1", "1 - Very light tap"),
+                    (2, "Type 2", "2 - Light-medium click"),
+                    (3, "Type 3", "3 - Standard click"),
+                    (4, "Type 4", "4 - Sharp crisp (Pacinian)"),
+                    (5, "Type 5", "5 - Medium-heavy"),
+                    (6, "Type 6", "6 - Deep sub-bass thump")
+                ]
+                for t in types {
+                    let item = NSMenuItem(title: t.desc, action: #selector(setHapticType(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.tag = t.tag
+                    item.state = parent.hapticActuatorType == t.tag ? .on : .off
+                    feelMenu.addItem(item)
+                }
+                feelMenu.addItem(.separator())
+                let testItem = NSMenuItem(title: "▶ Test All Types (0.4s apart)", action: #selector(testAllHapticTypes), keyEquivalent: "")
+                testItem.target = self
+                feelMenu.addItem(testItem)
+                feelItem.submenu = feelMenu
+                hapticsMenu.addItem(feelItem)
+                
+                hapticsItem.submenu = hapticsMenu
+                menu.addItem(hapticsItem)
             }
-            intensityItem.submenu = intensityMenu
-            hapticsMenu.addItem(intensityItem)
-            
-            // Haptic Feel submenu
-            hapticsMenu.addItem(.separator())
-            let feelItem = NSMenuItem(title: "Haptic Feel", action: nil, keyEquivalent: "")
-            let feelMenu = NSMenu(title: "Haptic Feel")
-            let types: [(tag: Int, label: String, desc: String)] = [
-                (0, "Auto",   "Auto (kick=6, beat=4)"),
-                (1, "Type 1", "1 - Very light tap"),
-                (2, "Type 2", "2 - Light-medium click"),
-                (3, "Type 3", "3 - Standard click"),
-                (4, "Type 4", "4 - Sharp crisp (Pacinian)"),
-                (5, "Type 5", "5 - Medium-heavy"),
-                (6, "Type 6", "6 - Deep sub-bass thump")
-            ]
-            for t in types {
-                let item = NSMenuItem(title: t.desc, action: #selector(setHapticType(_:)), keyEquivalent: "")
-                item.target = self
-                item.tag = t.tag
-                item.state = parent.hapticActuatorType == t.tag ? .on : .off
-                feelMenu.addItem(item)
-            }
-            feelMenu.addItem(.separator())
-            let testItem = NSMenuItem(title: "▶ Test All Types (0.4s apart)", action: #selector(testAllHapticTypes), keyEquivalent: "")
-            testItem.target = self
-            feelMenu.addItem(testItem)
-            feelItem.submenu = feelMenu
-            hapticsMenu.addItem(feelItem)
-            
-            hapticsItem.submenu = hapticsMenu
-            menu.addItem(hapticsItem)
             
             // ── 5. Audio Submenu ─────────────────────────────────────────────
             let audioSectionItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
             let audioSectionMenu = NSMenu(title: "Audio")
             
             let audioItem: NSMenuItem
-            if AppEdition.isLite {
-                audioItem = NSMenuItem(title: "Audio Visualizer Tap (Standard Edition)", action: nil, keyEquivalent: "")
+            if !AppCapabilities.supportsAudioTap {
+                audioItem = NSMenuItem(title: "Audio Visualizer Tap (Requires macOS 14.2+)", action: nil, keyEquivalent: "")
                 audioItem.isEnabled = false
             } else {
                 audioItem = NSMenuItem(title: "Audio Visualizer (Tap)", action: #selector(toggleAudioFeatures), keyEquivalent: "")
@@ -1197,14 +1241,28 @@ struct NativeSettingsMenu: NSViewRepresentable {
         
         @objc func showAbout() {
             let alert = NSAlert()
-            let title = AppEdition.isLite ? "Lyrics Menu Bar Lite" : "Lyrics Menu Bar"
-            alert.messageText = "\(title) \(UpdateManager.shared.currentVersion) (Build \(UpdateManager.shared.currentBuild))"
-            alert.informativeText = AppEdition.isLite
-                ? "Ultra-Lightweight HUD for Spotify & Apple Music (macOS 13+ Edition)\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
-                : "Native Glass HUD for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
+            let modeLabel = AppPerformance.isUltraLightMode ? "Ultra-Light Mode" : "Standard Mode"
+            alert.messageText = "Lyrics Menu Bar \(UpdateManager.shared.currentVersion) (Build \(UpdateManager.shared.currentBuild))"
+            alert.informativeText = "Native Glass HUD for Spotify & Apple Music (\(modeLabel))\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
+        }
+        
+        @objc func toggleUltraLightMode() {
+            let newVal = !AppPerformance.isUltraLightMode
+            UserDefaults.standard.set(newVal, forKey: AppSettingKey.ultraLightMode)
+            parent.ultraLightMode = newVal
+            
+            let newSpecular = !newVal
+            UserDefaults.standard.set(newSpecular, forKey: AppSettingKey.specularEdgeEnabled)
+            parent.specularEdgeEnabled = newSpecular
+            
+            if newVal && !AppCapabilities.supportsAudioTap {
+                UserDefaults.standard.set(0, forKey: AppSettingKey.waveformBars)
+                parent.waveformBars = 0
+            }
+            NotificationCenter.default.post(name: Notification.Name("UltraLightModeChanged"), object: nil)
         }
         
         @objc func toggleFocusMode() {
@@ -1629,7 +1687,7 @@ struct AppleMusicControlButton: View {
                     .foregroundColor(.white.opacity(isHovered ? 1.0 : 0.88))
             }
             .scaleEffect(isPressed ? 0.86 : (isHovered ? 1.06 : 1.0))
-            .animation(AppEdition.isLite ? .easeOut(duration: 0.12) : .spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
+            .animation(AppPerformance.isUltraLightMode ? .easeOut(duration: 0.12) : .spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
             .animation(.easeInOut(duration: 0.14), value: isHovered)
             .contentShape(Circle())
         }
