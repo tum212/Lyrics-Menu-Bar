@@ -11,8 +11,15 @@ struct SpoticatApp {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.run()
+        withExtendedLifetime(delegate) {
+            app.run()
+        }
     }
+}
+
+final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 let appLogger = Logger(subsystem: "com.lyricsmenubar.app", category: "General")
@@ -115,8 +122,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         nc.addObserver(self, selector: #selector(handleAudioFeaturesEnabled), name: Notification.Name("AudioFeaturesEnabled"), object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(handleDistributedTogglePopover), name: NSNotification.Name("com.spoticat.TogglePopover"), object: nil)
 
-        // Setup NSPanel + HUDGlassView + Pure AppKit HUDContentView (ZERO SwiftUI)
-        let panel = NSPanel(
+        // Setup KeyablePanel + HUDGlassView + Pure AppKit HUDContentView (ZERO SwiftUI)
+        let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
@@ -162,9 +169,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if self.coreEngine.currentTrack == nil {
-                        self.audioTap.stop()
-                    }
+                    self.syncAudioTapState()
                     self.needsActiveFramesFromRust = true
                     self.syncMenuBarTimerState()
                     self.updateMenuBar()
@@ -176,15 +181,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if AppCapabilities.supportsAudioTap {
-                        let bars = self.cachedWaveformBars
-                        let featuresEnabled = UserDefaults.standard.bool(forKey: AppSettingKey.audioFeaturesEnabled)
-                        if self.coreEngine.isPlaying && bars > 0 && featuresEnabled {
-                            self.audioTap.start()
-                        } else {
-                            self.audioTap.stop()
-                        }
-                    }
+                    self.syncAudioTapState()
+                    self.needsActiveFramesFromRust = true
+                    self.syncMenuBarTimerState()
+                    self.updateMenuBar()
+                }
+            }
+        })
+
+        observers.append(nc.addObserver(forName: LyricsCoreEngine.playbackDidSeekNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
                     self.needsActiveFramesFromRust = true
                     self.syncMenuBarTimerState()
                     self.updateMenuBar()
@@ -204,6 +212,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         })
 
+        syncAudioTapState()
         syncMenuBarTimerState()
         updateMenuBar()
     }
@@ -436,6 +445,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        guard !SettingsMenuController.isPresentingMenuOrAlert else { return }
         if let window = notification.object as? NSWindow, window == panel {
             if panel?.isVisible == true && !isGenieAnimating {
                 animateGenieClose()
@@ -448,12 +458,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func handleAudioFeaturesDisabled() {
-        audioTap.stop()
+        syncAudioTapState()
     }
 
     @objc private func handleAudioFeaturesEnabled() {
-        if coreEngine.isPlaying {
+        syncAudioTapState()
+    }
+
+    private func syncAudioTapState() {
+        guard AppCapabilities.supportsAudioTap else { return }
+        let featuresEnabled = UserDefaults.standard.bool(forKey: AppSettingKey.audioFeaturesEnabled)
+        let hapticIntensity = UserDefaults.standard.integer(forKey: AppSettingKey.hapticIntensity)
+        let needsTap = coreEngine.currentTrack != nil
+            && coreEngine.isPlaying
+            && featuresEnabled
+            && (cachedWaveformBars > 0 || hapticIntensity > 0)
+        if needsTap {
+            if cachedWaveformBars > 0 {
+                coreEngine.updateWaveformBandCount(cachedWaveformBars)
+            }
             audioTap.start()
+        } else {
+            audioTap.stop()
         }
     }
 
@@ -477,6 +503,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func handleUserDefaultsChanged() {
         refreshCachedPrefs()
+        syncAudioTapState()
         syncMenuBarTimerState()
         updateMenuBar()
     }
@@ -484,6 +511,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func handleUltraLightModeChanged() {
         refreshCachedPrefs()
         glassView?.updateForPerformanceMode()
+        syncAudioTapState()
         syncMenuBarTimerState()
         updateMenuBar()
     }

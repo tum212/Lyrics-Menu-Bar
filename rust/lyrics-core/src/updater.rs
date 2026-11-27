@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -84,10 +83,7 @@ pub fn is_version_greater(remote: &str, local: &str) -> bool {
 }
 
 pub fn check_updates(current_version: &str, current_build: i32) -> UpdateCheckOutcome {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(10))
-        .build();
+    let agent = crate::build_https_agent(10, 10);
     let ua = format!("LyricsMenuBar/{current_version}");
 
     let mut endpoints: Option<LyricsEndpointsConfig> = None;
@@ -163,10 +159,7 @@ pub fn download_dmg_streaming<F: FnMut(f64)>(
     cancel_flag: &AtomicBool,
     mut on_progress: F,
 ) -> Result<(), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(60))
-        .build();
+    let agent = crate::build_https_agent(15, 60);
 
     let resp = agent
         .get(url)

@@ -3,7 +3,6 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
 
 use encoding_rs::WINDOWS_874;
 use regex::Regex;
@@ -628,10 +627,7 @@ struct OvhResult {
 }
 
 fn fetch_url_text(url: &str) -> Option<String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(12))
-        .timeout_read(Duration::from_secs(15))
-        .build();
+    let agent = crate::build_https_agent(12, 15);
     let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     let resp = agent.get(url).set("User-Agent", ua).call().ok()?;
     if resp.status() != 200 {

@@ -180,9 +180,20 @@ final class HUDLyricsView: NSView {
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(handlePrefsChanged), name: UserDefaults.didChangeNotification, object: nil)
         nc.addObserver(self, selector: #selector(handlePrefsChanged), name: Notification.Name("UltraLightModeChanged"), object: nil)
+        nc.addObserver(self, selector: #selector(handlePlaybackSeek), name: LyricsCoreEngine.playbackDidSeekNotification, object: nil)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
     }
 
     @objc private func handlePrefsChanged() {
+        renderNow()
+    }
+
+    @objc private func handlePlaybackSeek() {
+        manualScrollUntil = 0
+        snapScrollToActive()
         renderNow()
     }
 
@@ -251,6 +262,7 @@ final class HUDLyricsView: NSView {
         manualScrollUntil = 0
         hoveredRowIndex = -1
         rebuildLayout()
+        snapScrollToActive()
         renderNow()
     }
 
@@ -702,6 +714,8 @@ final class HUDLyricsView: NSView {
         guard idx >= 0 && idx < lines.count else { return }
         manualScrollUntil = 0
         onSeek?(idx, lines[idx])
+        snapScrollToActive()
+        renderNow()
     }
 
     // MARK: - Direct CGContext Line Rasterizer (1 CGImage per wrapped row)

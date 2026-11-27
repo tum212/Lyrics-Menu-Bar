@@ -289,6 +289,7 @@ version = "2.0.0"
 dependencies = [
  "encoding_rs",
  "libc",
+ "native-tls",
  "realfft",
  "regex",
  "serde",

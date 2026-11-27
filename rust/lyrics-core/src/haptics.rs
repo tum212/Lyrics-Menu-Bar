@@ -3,7 +3,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 type MTActuatorCreateFn = unsafe extern "C" fn(u64) -> *mut c_void;
 type MTActuatorOpenFn = unsafe extern "C" fn(*mut c_void) -> i32;
@@ -22,6 +22,7 @@ struct MachTimebaseInfo {
 
 extern "C" {
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+    fn mach_absolute_time() -> u64;
     fn pthread_set_qos_class_self_np(qos_class: libc::c_uint, relative_priority: libc::c_int) -> libc::c_int;
 
     fn IOServiceMatching(name: *const libc::c_char) -> *mut c_void;
@@ -232,11 +233,11 @@ impl HapticEngine {
                                 let base_lead = if mt.is_some() { 0.005 } else { 0.003 };
                                 let lat = f64::from_bits(latency_clone.load(Ordering::Relaxed));
                                 let fire_wall = buf_wall + onset_offset - (base_lead + lat);
-                                let wall_now = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map(|d| d.as_secs_f64())
-                                    .unwrap_or(0.0);
-                                let delta = fire_wall - wall_now;
+                                let now_mach = (unsafe { mach_absolute_time() } as f64)
+                                    * (numer as f64)
+                                    / (denom as f64)
+                                    * 1e-9;
+                                let delta = fire_wall - now_mach;
 
                                 if delta <= 0.001 {
                                     fire_actuator(

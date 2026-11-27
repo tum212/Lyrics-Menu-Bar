@@ -177,7 +177,8 @@ private final class CompiledAppleScriptRunner: @unchecked Sendable {
             let name = output.atIndex(1)?.stringValue ?? ""
             let artist = output.atIndex(2)?.stringValue ?? ""
             let album = output.atIndex(3)?.stringValue ?? ""
-            let id = "apple:\(name)-\(artist)"
+            let persistentId = output.atIndex(4)?.stringValue ?? ""
+            let id = persistentId.isEmpty ? "apple:\(name)-\(artist)" : persistentId
             let duration = output.atIndex(5)?.doubleValue ?? 0.0
             let position = output.atIndex(6)?.doubleValue ?? 0.0
             let state = output.atIndex(7)?.stringValue ?? ""
@@ -213,7 +214,31 @@ public final class MusicIPCBridge: NSObject {
     private override init() {
         super.init()
         setupDistributedNotifications()
+        setupWorkspaceNotifications()
         startPolling()
+    }
+
+    private func setupWorkspaceNotifications() {
+        let wnc = NSWorkspace.shared.notificationCenter
+        wnc.addObserver(
+            self,
+            selector: #selector(handleWorkspaceAppEvent(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
+        wnc.addObserver(
+            self,
+            selector: #selector(handleWorkspaceAppEvent(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWorkspaceAppEvent(_ notif: Notification) {
+        guard let app = notif.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let bid = app.bundleIdentifier,
+              (bid == "com.spotify.client" || bid == "com.apple.Music") else { return }
+        pollActivePlayer()
     }
 
     private func setupDistributedNotifications() {
@@ -376,6 +401,7 @@ public final class MusicIPCBridge: NSObject {
     public func cleanup() {
         stopPolling()
         DistributedNotificationCenter.default().removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     public func pollActivePlayer() {
@@ -403,7 +429,7 @@ public final class MusicIPCBridge: NSObject {
     }
 
     nonisolated public static func fetchAppleMusicArtworkData(expectedID: String) -> (persistentID: String, data: Data?) {
-        let escapedID = expectedID.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedID = expectedID.hasPrefix("apple:") ? "" : expectedID.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
         tell application "Music"
             if it is running then

@@ -115,6 +115,10 @@ private final class TactileCircleButton: NSView {
         iconLayer.contentsScale = scale
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef { removeTrackingArea(existing) }
@@ -261,12 +265,21 @@ private final class GlassIconCircleButton: NSView {
         badgeLayer.isHidden = !show
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef { removeTrackingArea(existing) }
         let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingAreaRef = area
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        return bounds.contains(local) ? self : nil
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -277,9 +290,57 @@ private final class GlassIconCircleButton: NSView {
         NSCursor.arrow.set()
     }
 
+    override func mouseDown(with event: NSEvent) {
+        iconLayer.opacity = 0.55
+    }
+
     override func mouseUp(with event: NSEvent) {
+        iconLayer.opacity = 1.0
         let pt = convert(event.locationInWindow, from: nil)
         if bounds.contains(pt) {
+            onClick?()
+        }
+    }
+}
+
+@MainActor
+private final class ClickableAreaView: NSView {
+    private var trackingAreaRef: NSTrackingArea?
+    var onClick: (() -> Void)?
+    var isClickEnabled: (() -> Bool)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        return bounds.contains(local) ? self : nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingAreaRef { removeTrackingArea(existing) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if isClickEnabled?() ?? true {
+            NSCursor.pointingHand.set()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        if bounds.contains(pt), (isClickEnabled?() ?? true) {
             onClick?()
         }
     }
@@ -516,6 +577,10 @@ private final class HUDUpdateModalOverlay: NSView {
         }
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func mouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
         if !cardEffect.frame.contains(pt) {
@@ -539,13 +604,13 @@ private final class HUDUpdateModalOverlay: NSView {
 final class HUDContentView: NSView {
     let lyricsView = HUDLyricsView(frame: NSRect(x: 176, y: 16, width: 286, height: 208))
 
-    private let artButton = NSView(frame: NSRect(x: 29, y: 102, width: 120, height: 120))
+    private let artButton = ClickableAreaView(frame: NSRect(x: 29, y: 102, width: 120, height: 120))
     private let artContentLayer = CALayer()
     private let artImageLayer = CALayer()
     private let artPlaceholderLayer = CALayer()
     private let artSymbolLayer = CALayer()
 
-    private let trackInfoButton = NSView(frame: NSRect(x: 18, y: 60, width: 142, height: 34))
+    private let trackInfoButton = ClickableAreaView(frame: NSRect(x: 18, y: 60, width: 142, height: 34))
     private let titleLabel = NSTextField(labelWithString: "No Music Playing")
     private let artistLabel = NSTextField(labelWithString: "Open Spotify or Apple Music")
 
@@ -559,8 +624,11 @@ final class HUDContentView: NSView {
     private var updateModal: HUDUpdateModalOverlay?
     private var lastArtworkRevision = -1
     private var lastIsPlaying = false
-    private var artTrackingArea: NSTrackingArea?
-    private var infoTrackingArea: NSTrackingArea?
+    private var hasInitializedPlayState = false
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -637,10 +705,11 @@ final class HUDContentView: NSView {
         addSubview(trackInfoButton)
 
         // Click handlers on art & track info
-        let artClick = NSClickGestureRecognizer(target: self, action: #selector(handleActivateMusicApp))
-        artButton.addGestureRecognizer(artClick)
-        let infoClick = NSClickGestureRecognizer(target: self, action: #selector(handleActivateMusicApp))
-        trackInfoButton.addGestureRecognizer(infoClick)
+        let hasTrackCheck: () -> Bool = { LyricsCoreEngine.shared.currentTrack != nil }
+        artButton.isClickEnabled = hasTrackCheck
+        artButton.onClick = { [weak self] in self?.handleActivateMusicApp() }
+        trackInfoButton.isClickEnabled = hasTrackCheck
+        trackInfoButton.onClick = { [weak self] in self?.handleActivateMusicApp() }
 
         // Playback Controls
         prevBtn.onClick = { MusicIPCBridge.shared.previousTrack() }
@@ -693,28 +762,6 @@ final class HUDContentView: NSView {
     @objc private func handleArtworkChanged() { refreshArtwork() }
     @objc private func handlePlayStateChanged() { refreshPlayState() }
     @objc private func handleUpdateStateChanged() { refreshUpdateModal() }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let a = artTrackingArea { artButton.removeTrackingArea(a) }
-        if let i = infoTrackingArea { trackInfoButton.removeTrackingArea(i) }
-        let ta = NSTrackingArea(rect: artButton.bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: ["kind": "art"])
-        let ti = NSTrackingArea(rect: trackInfoButton.bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: ["kind": "info"])
-        artButton.addTrackingArea(ta)
-        trackInfoButton.addTrackingArea(ti)
-        artTrackingArea = ta
-        infoTrackingArea = ti
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        if LyricsCoreEngine.shared.currentTrack != nil {
-            NSCursor.pointingHand.set()
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        NSCursor.arrow.set()
-    }
 
     @objc private func handleActivateMusicApp() {
         MusicIPCBridge.shared.activateMusicApp()
@@ -787,31 +834,39 @@ final class HUDContentView: NSView {
 
     private func refreshPlayState() {
         let playing = LyricsCoreEngine.shared.isPlaying
-        if playing != lastIsPlaying {
-            lastIsPlaying = playing
-            playPauseBtn.updateSymbol(playing ? "pause.fill" : "play.fill")
+        let animate = hasInitializedPlayState
+        guard !hasInitializedPlayState || playing != lastIsPlaying else { return }
+        hasInitializedPlayState = true
+        lastIsPlaying = playing
+        playPauseBtn.updateSymbol(playing ? "pause.fill" : "play.fill")
 
-            let targetScale: CGFloat = playing ? 1.0 : 0.92
-            let toTransform = CATransform3DMakeScale(targetScale, targetScale, 1.0)
-            if AppPerformance.isUltraLightMode {
-                let anim = CABasicAnimation(keyPath: "transform")
-                anim.duration = 0.22
-                anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                anim.fromValue = artContentLayer.presentation()?.transform ?? artContentLayer.transform
-                anim.toValue = toTransform
-                artContentLayer.transform = toTransform
-                artContentLayer.add(anim, forKey: "artScale")
-            } else {
-                let spring = CASpringAnimation(keyPath: "transform")
-                spring.mass = 1.0
-                spring.stiffness = 220
-                spring.damping = 24
-                spring.fromValue = artContentLayer.presentation()?.transform ?? artContentLayer.transform
-                spring.toValue = toTransform
-                spring.duration = spring.settlingDuration
-                artContentLayer.transform = toTransform
-                artContentLayer.add(spring, forKey: "artScale")
-            }
+        let targetScale: CGFloat = playing ? 1.0 : 0.92
+        let toTransform = CATransform3DMakeScale(targetScale, targetScale, 1.0)
+        if !animate {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            artContentLayer.transform = toTransform
+            CATransaction.commit()
+            return
+        }
+        if AppPerformance.isUltraLightMode {
+            let anim = CABasicAnimation(keyPath: "transform")
+            anim.duration = 0.22
+            anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            anim.fromValue = artContentLayer.presentation()?.transform ?? artContentLayer.transform
+            anim.toValue = toTransform
+            artContentLayer.transform = toTransform
+            artContentLayer.add(anim, forKey: "artScale")
+        } else {
+            let spring = CASpringAnimation(keyPath: "transform")
+            spring.mass = 1.0
+            spring.stiffness = 220
+            spring.damping = 24
+            spring.fromValue = artContentLayer.presentation()?.transform ?? artContentLayer.transform
+            spring.toValue = toTransform
+            spring.duration = spring.settlingDuration
+            artContentLayer.transform = toTransform
+            artContentLayer.add(spring, forKey: "artScale")
         }
     }
 

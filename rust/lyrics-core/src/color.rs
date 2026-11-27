@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -230,10 +229,7 @@ pub fn sanitize_artwork_url(url_str: &str) -> Option<String> {
 }
 
 pub fn download_url_bytes(url: &str, timeout_secs: u64, user_agent: &str) -> Option<Vec<u8>> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(timeout_secs))
-        .timeout_read(Duration::from_secs(timeout_secs))
-        .build();
+    let agent = crate::build_https_agent(timeout_secs, timeout_secs);
     let resp = agent.get(url).set("User-Agent", user_agent).call().ok()?;
     if resp.status() != 200 {
         return None;

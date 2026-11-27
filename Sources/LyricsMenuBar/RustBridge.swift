@@ -337,6 +337,7 @@ public final class LyricsCoreEngine {
     public static let lyricsDidChangeNotification = Notification.Name("RustCoreLyricsDidChange")
     public static let artworkDidChangeNotification = Notification.Name("RustCoreArtworkDidChange")
     public static let playStateDidChangeNotification = Notification.Name("RustCorePlayStateDidChange")
+    public static let playbackDidSeekNotification = Notification.Name("RustCorePlaybackDidSeek")
     public static let updateStateDidChangeNotification = Notification.Name("RustCoreUpdateStateDidChange")
 
     private var artworkGeneration: Int = 0
@@ -386,6 +387,7 @@ public final class LyricsCoreEngine {
 
     public func seekLocal(to time: Double) {
         lyrics_core_playback_seek_local(coreHandle, max(0, time), ProcessInfo.processInfo.systemUptime)
+        NotificationCenter.default.post(name: Self.playbackDidSeekNotification, object: self)
     }
 
     public func togglePlayStateLocal() {
@@ -872,6 +874,8 @@ public final class LyricsCoreEngine {
     }
 
     private func showUpToDateAlert() {
+        SettingsMenuController.isPresentingMenuOrAlert = true
+        defer { SettingsMenuController.isPresentingMenuOrAlert = false }
         let alert = NSAlert()
         alert.messageText = "Lyrics Menu Bar is Up to Date"
         alert.informativeText = "You are running the latest version (v\(currentVersion))."

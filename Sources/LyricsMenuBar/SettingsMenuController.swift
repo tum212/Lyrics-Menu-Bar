@@ -4,6 +4,7 @@ import AppKit
 @MainActor
 final class SettingsMenuController: NSObject {
     static let shared = SettingsMenuController()
+    static var isPresentingMenuOrAlert: Bool = false
 
     private override init() {
         super.init()
@@ -226,6 +227,8 @@ final class SettingsMenuController: NSObject {
         menu.addItem(quitItem)
 
         let pt = NSPoint(x: sender.bounds.minX, y: sender.bounds.minY - 5)
+        Self.isPresentingMenuOrAlert = true
+        defer { Self.isPresentingMenuOrAlert = false }
         menu.popUp(positioning: nil, at: pt, in: sender)
     }
 
@@ -243,6 +246,8 @@ final class SettingsMenuController: NSObject {
     }
 
     @objc private func showAbout() {
+        Self.isPresentingMenuOrAlert = true
+        defer { Self.isPresentingMenuOrAlert = false }
         let eng = LyricsCoreEngine.shared
         let alert = NSAlert()
         let modeLabel = AppPerformance.isUltraLightMode ? "60 FPS Lightweight" : "Standard Glass"
@@ -333,6 +338,8 @@ final class SettingsMenuController: NSObject {
     }
 
     @objc private func promptCustomWidth() {
+        Self.isPresentingMenuOrAlert = true
+        defer { Self.isPresentingMenuOrAlert = false }
         let current = UserDefaults.standard.object(forKey: AppSettingKey.lyricsMaxWidth) == nil ? 200 : UserDefaults.standard.integer(forKey: AppSettingKey.lyricsMaxWidth)
         let alert = NSAlert()
         alert.messageText = "Custom Lyrics Width"
@@ -351,6 +358,8 @@ final class SettingsMenuController: NSObject {
     }
 
     @objc private func promptCustomWaveform() {
+        Self.isPresentingMenuOrAlert = true
+        defer { Self.isPresentingMenuOrAlert = false }
         let current = UserDefaults.standard.object(forKey: AppSettingKey.waveformBars) == nil ? 14 : UserDefaults.standard.integer(forKey: AppSettingKey.waveformBars)
         let alert = NSAlert()
         alert.messageText = "Custom Waveform Bars"

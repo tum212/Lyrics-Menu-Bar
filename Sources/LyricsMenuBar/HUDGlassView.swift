@@ -135,6 +135,7 @@ final class HUDGlassView: NSView {
         
         CATransaction.commit()
         needsLayout = true
+        layout()
     }
     
     private func updateColorsForAppearance() {

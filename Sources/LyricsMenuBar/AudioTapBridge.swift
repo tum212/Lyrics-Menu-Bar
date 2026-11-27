@@ -206,6 +206,8 @@ public final class AudioTapBridge: NSObject {
     private func showPermissionAlert() {
         guard !hasShownAlert else { return }
         hasShownAlert = true
+        SettingsMenuController.isPresentingMenuOrAlert = true
+        defer { SettingsMenuController.isPresentingMenuOrAlert = false }
         let alert = NSAlert()
         alert.messageText = "System Audio Recording Access Required"
         alert.informativeText = "Lyrics Menu Bar needs access to capture system audio for the waveform visualizer. Please enable it in System Settings → Privacy & Security → System Audio Recording."
