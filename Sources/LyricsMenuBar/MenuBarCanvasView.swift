@@ -205,6 +205,7 @@ final class MenuBarCanvasView: NSView {
         layer?.masksToBounds = false
         
         stripLayer.anchorPoint = .zero
+        stripLayer.isGeometryFlipped = false
         stripLayer.masksToBounds = false
         layer?.addSublayer(stripLayer)
         
@@ -418,6 +419,11 @@ final class MenuBarCanvasView: NSView {
         
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        if stripLayer.superlayer == nil {
+            self.layer?.addSublayer(stripLayer)
+        }
+        let yCentered = floor((bounds.height - 20.0) / 2.0)
+        stripLayer.frame = CGRect(x: 0, y: max(0, yCentered), width: max(bounds.width, artX + 24), height: 20)
         
         // --- 1. LYRICS LAYER UPDATE ---
         if showLyrics && canvasWidth > 2 {

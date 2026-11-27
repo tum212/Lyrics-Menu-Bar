@@ -1,10 +1,52 @@
 import AppKit
 import QuartzCore
 
+private func rasterizeRetinaSymbol(
+    _ name: String,
+    pointSize: CGFloat,
+    weight: NSFont.Weight,
+    color: NSColor,
+    canvasSize: NSSize,
+    scale: CGFloat
+) -> CGImage? {
+    let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+    guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else {
+        return nil
+    }
+    let safeScale = max(1.0, scale)
+    let pxW = max(1, Int(ceil(canvasSize.width * safeScale)))
+    let pxH = max(1, Int(ceil(canvasSize.height * safeScale)))
+    guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(
+            data: nil, width: pxW, height: pxH, bitsPerComponent: 8, bytesPerRow: 0,
+            space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+          ) else { return nil }
+    ctx.scaleBy(x: safeScale, y: safeScale)
+    let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: false)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = nsCtx
+    let imgSz = sym.size
+    let fit = min(1.0, min(canvasSize.width / max(1.0, imgSz.width), canvasSize.height / max(1.0, imgSz.height)))
+    let drawW = imgSz.width * fit
+    let drawH = imgSz.height * fit
+    let rect = NSRect(
+        x: (canvasSize.width - drawW) / 2.0,
+        y: (canvasSize.height - drawH) / 2.0,
+        width: drawW,
+        height: drawH
+    )
+    sym.draw(in: rect, from: .zero, operation: .copy, fraction: 1.0)
+    color.setFill()
+    NSRect(origin: .zero, size: canvasSize).fill(using: .sourceIn)
+    NSGraphicsContext.restoreGraphicsState()
+    return ctx.makeImage()
+}
+
 // MARK: - Tactile Circular Control Button (AppKit + CASpringAnimation)
 
 @MainActor
 private final class TactileCircleButton: NSView {
+    private let contentLayer = CALayer()
     private let bgLayer = CALayer()
     private let iconLayer = CALayer()
     private let size: CGFloat
@@ -32,32 +74,45 @@ private final class TactileCircleButton: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
 
+        contentLayer.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        contentLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        contentLayer.position = CGPoint(x: size / 2.0, y: size / 2.0)
+        contentLayer.masksToBounds = false
+        layer?.addSublayer(contentLayer)
+
         bgLayer.bounds = CGRect(x: 0, y: 0, width: size, height: size)
         bgLayer.position = CGPoint(x: size / 2.0, y: size / 2.0)
         bgLayer.cornerRadius = size / 2.0
         bgLayer.borderWidth = 0.5
         bgLayer.borderColor = NSColor.clear.cgColor
         bgLayer.backgroundColor = NSColor.clear.cgColor
-        layer?.addSublayer(bgLayer)
+        contentLayer.addSublayer(bgLayer)
 
         iconLayer.bounds = CGRect(x: 0, y: 0, width: iconSize + 6, height: iconSize + 6)
         iconLayer.position = CGPoint(x: size / 2.0, y: size / 2.0)
         iconLayer.contentsGravity = .resizeAspect
-        layer?.addSublayer(iconLayer)
+        contentLayer.addSublayer(iconLayer)
 
         updateSymbol(symbolName)
         updateAppearance()
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateSymbol(symbolName)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateSymbol(symbolName)
+    }
+
     func updateSymbol(_ name: String) {
         self.symbolName = name
-        let cfg = NSImage.SymbolConfiguration(pointSize: iconSize, weight: .semibold)
-        if let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
-            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-            let sz = NSSize(width: iconSize + 6, height: iconSize + 6)
-            iconLayer.contents = rasterizeSymbol(sym, color: .white, size: sz, scale: scale)
-            iconLayer.contentsScale = scale
-        }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let sz = NSSize(width: iconSize + 6, height: iconSize + 6)
+        iconLayer.contents = rasterizeRetinaSymbol(name, pointSize: iconSize, weight: .semibold, color: .white, canvasSize: sz, scale: scale)
+        iconLayer.contentsScale = scale
     }
 
     override func updateTrackingAreas() {
@@ -106,56 +161,26 @@ private final class TactileCircleButton: NSView {
     }
 
     private func animateScale(_ target: CGFloat) {
-        guard let rootLayer = self.layer else { return }
-        rootLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        rootLayer.position = CGPoint(x: frame.origin.x + size / 2.0, y: frame.origin.y + size / 2.0)
-
         let toTransform = CATransform3DMakeScale(target, target, 1.0)
         if AppPerformance.isUltraLightMode {
             let anim = CABasicAnimation(keyPath: "transform")
             anim.duration = 0.12
             anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            anim.fromValue = rootLayer.presentation()?.transform ?? rootLayer.transform
+            anim.fromValue = contentLayer.presentation()?.transform ?? contentLayer.transform
             anim.toValue = toTransform
-            rootLayer.transform = toTransform
-            rootLayer.add(anim, forKey: "btnScale")
+            contentLayer.transform = toTransform
+            contentLayer.add(anim, forKey: "btnScale")
         } else {
             let spring = CASpringAnimation(keyPath: "transform")
             spring.mass = 1.0
             spring.stiffness = 420
             spring.damping = 24
-            spring.fromValue = rootLayer.presentation()?.transform ?? rootLayer.transform
+            spring.fromValue = contentLayer.presentation()?.transform ?? contentLayer.transform
             spring.toValue = toTransform
             spring.duration = spring.settlingDuration
-            rootLayer.transform = toTransform
-            rootLayer.add(spring, forKey: "btnScale")
+            contentLayer.transform = toTransform
+            contentLayer.add(spring, forKey: "btnScale")
         }
-    }
-
-    private func rasterizeSymbol(_ image: NSImage, color: NSColor, size: NSSize, scale: CGFloat) -> CGImage? {
-        let pxW = max(1, Int(ceil(size.width * scale)))
-        let pxH = max(1, Int(ceil(size.height * scale)))
-        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
-              let ctx = CGContext(
-                data: nil, width: pxW, height: pxH, bitsPerComponent: 8, bytesPerRow: 0,
-                space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-              ) else { return nil }
-        ctx.scaleBy(x: scale, y: scale)
-        let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: false)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = nsCtx
-        let imgSz = image.size
-        let rect = NSRect(
-            x: (size.width - imgSz.width) / 2.0,
-            y: (size.height - imgSz.height) / 2.0,
-            width: imgSz.width,
-            height: imgSz.height
-        )
-        image.draw(in: rect, from: .zero, operation: .copy, fraction: 1.0)
-        color.setFill()
-        NSRect(origin: .zero, size: size).fill(using: .sourceIn)
-        NSGraphicsContext.restoreGraphicsState()
-        return ctx.makeImage()
     }
 }
 
@@ -166,10 +191,17 @@ private final class GlassIconCircleButton: NSView {
     private let bg = NSVisualEffectView()
     private let iconLayer = CALayer()
     private let badgeLayer = CALayer()
+    private let symbolName: String
+    private let pointSize: CGFloat
+    private let weight: NSFont.Weight
+    private var backingScale: CGFloat = 2.0
     private var trackingAreaRef: NSTrackingArea?
     var onClick: (() -> Void)?
 
     init(frame: NSRect, symbolName: String, pointSize: CGFloat, weight: NSFont.Weight) {
+        self.symbolName = symbolName
+        self.pointSize = pointSize
+        self.weight = weight
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = false
@@ -186,24 +218,39 @@ private final class GlassIconCircleButton: NSView {
         addSubview(bg)
 
         iconLayer.frame = bounds
-        iconLayer.contentsGravity = .center
-        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
-        if let sym = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
-            let tinted = NSImage(size: sym.size)
-            tinted.lockFocus()
-            sym.draw(in: NSRect(origin: .zero, size: sym.size), from: .zero, operation: .copy, fraction: 1.0)
-            NSColor.white.withAlphaComponent(0.88).setFill()
-            NSRect(origin: .zero, size: sym.size).fill(using: .sourceIn)
-            tinted.unlockFocus()
-            iconLayer.contents = tinted
-        }
+        iconLayer.contentsGravity = .resizeAspect
         layer?.addSublayer(iconLayer)
+        updateSymbolTexture()
 
         badgeLayer.frame = CGRect(x: bounds.width - 6, y: bounds.height - 6, width: 7, height: 7)
         badgeLayer.cornerRadius = 3.5
         badgeLayer.backgroundColor = NSColor.systemOrange.cgColor
         badgeLayer.isHidden = true
         layer?.addSublayer(badgeLayer)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateSymbolTexture()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateSymbolTexture()
+    }
+
+    private func updateSymbolTexture() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        backingScale = scale
+        iconLayer.contents = rasterizeRetinaSymbol(
+            symbolName,
+            pointSize: pointSize,
+            weight: weight,
+            color: NSColor.white.withAlphaComponent(0.88),
+            canvasSize: bounds.size,
+            scale: scale
+        )
+        iconLayer.contentsScale = scale
     }
 
     required init?(coder: NSCoder) {
@@ -493,6 +540,7 @@ final class HUDContentView: NSView {
     let lyricsView = HUDLyricsView(frame: NSRect(x: 176, y: 16, width: 286, height: 208))
 
     private let artButton = NSView(frame: NSRect(x: 29, y: 102, width: 120, height: 120))
+    private let artContentLayer = CALayer()
     private let artImageLayer = CALayer()
     private let artPlaceholderLayer = CALayer()
     private let artSymbolLayer = CALayer()
@@ -505,8 +553,8 @@ final class HUDContentView: NSView {
     private let playPauseBtn = TactileCircleButton(frame: NSRect(x: 70, y: 15, width: 38, height: 38), symbolName: "play.fill", iconSize: 20)
     private let nextBtn = TactileCircleButton(frame: NSRect(x: 112, y: 18, width: 32, height: 32), symbolName: "forward.fill", iconSize: 15)
 
-    private let settingsBtn = GlassIconCircleButton(frame: NSRect(x: 406, y: 200, width: 26, height: 26), symbolName: "ellipsis", pointSize: 13, weight: .bold)
-    private let closeBtn = GlassIconCircleButton(frame: NSRect(x: 440, y: 200, width: 26, height: 26), symbolName: "chevron.up", pointSize: 11, weight: .bold)
+    private let settingsBtn = GlassIconCircleButton(frame: NSRect(x: 406, y: 200, width: 26, height: 26), symbolName: "ellipsis", pointSize: 12, weight: .bold)
+    private let closeBtn = GlassIconCircleButton(frame: NSRect(x: 440, y: 200, width: 26, height: 26), symbolName: "chevron.up", pointSize: 10, weight: .bold)
 
     private var updateModal: HUDUpdateModalOverlay?
     private var lastArtworkRevision = -1
@@ -530,13 +578,17 @@ final class HUDContentView: NSView {
 
         // 1. Left Column: Album Art (120 x 120)
         artButton.wantsLayer = true
-        artButton.layer?.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        artButton.layer?.position = CGPoint(x: 29 + 60, y: 102 + 60)
-        artButton.layer?.cornerRadius = 14
-        artButton.layer?.cornerCurve = .continuous
-        artButton.layer?.masksToBounds = true
-        artButton.layer?.borderWidth = 0.5
-        artButton.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        artButton.layer?.masksToBounds = false
+
+        artContentLayer.bounds = artButton.bounds
+        artContentLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        artContentLayer.position = CGPoint(x: artButton.bounds.width / 2.0, y: artButton.bounds.height / 2.0)
+        artContentLayer.cornerRadius = 14
+        artContentLayer.cornerCurve = .continuous
+        artContentLayer.masksToBounds = true
+        artContentLayer.borderWidth = 0.5
+        artContentLayer.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        artButton.layer?.addSublayer(artContentLayer)
 
         let grad = CAGradientLayer()
         grad.frame = artButton.bounds
@@ -546,25 +598,26 @@ final class HUDContentView: NSView {
         artPlaceholderLayer.frame = artButton.bounds
         artPlaceholderLayer.addSublayer(grad)
 
-        let symCfg = NSImage.SymbolConfiguration(pointSize: 38, weight: .regular)
-        if let sym = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)?.withSymbolConfiguration(symCfg) {
-            let tinted = NSImage(size: sym.size)
-            tinted.lockFocus()
-            sym.draw(in: NSRect(origin: .zero, size: sym.size), from: .zero, operation: .copy, fraction: 1.0)
-            NSColor.white.withAlphaComponent(0.45).setFill()
-            NSRect(origin: .zero, size: sym.size).fill(using: .sourceIn)
-            tinted.unlockFocus()
-            artSymbolLayer.frame = artButton.bounds
-            artSymbolLayer.contentsGravity = .center
-            artSymbolLayer.contents = tinted
-            artPlaceholderLayer.addSublayer(artSymbolLayer)
-        }
-        artButton.layer?.addSublayer(artPlaceholderLayer)
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        artSymbolLayer.frame = artButton.bounds
+        artSymbolLayer.contentsGravity = .resizeAspect
+        artSymbolLayer.contentsScale = scale
+        artSymbolLayer.contents = rasterizeRetinaSymbol(
+            "play.fill",
+            pointSize: 36,
+            weight: .regular,
+            color: NSColor.white.withAlphaComponent(0.45),
+            canvasSize: artButton.bounds.size,
+            scale: scale
+        )
+        artPlaceholderLayer.addSublayer(artSymbolLayer)
+        artContentLayer.addSublayer(artPlaceholderLayer)
 
         artImageLayer.frame = artButton.bounds
         artImageLayer.contentsGravity = .resizeAspectFill
+        artImageLayer.contentsScale = scale
         artImageLayer.isHidden = true
-        artButton.layer?.addSublayer(artImageLayer)
+        artContentLayer.addSublayer(artImageLayer)
         addSubview(artButton)
 
         // Clickable Track Info
@@ -687,15 +740,41 @@ final class HUDContentView: NSView {
         lyricsView.invalidateLyricsAndScrollReset()
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshBackingScaleTextures()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        refreshBackingScaleTextures()
+    }
+
+    private func refreshBackingScaleTextures() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        artSymbolLayer.contentsScale = scale
+        artImageLayer.contentsScale = scale
+        artSymbolLayer.contents = rasterizeRetinaSymbol(
+            "play.fill",
+            pointSize: 36,
+            weight: .regular,
+            color: NSColor.white.withAlphaComponent(0.45),
+            canvasSize: artButton.bounds.size,
+            scale: scale
+        )
+    }
+
     private func refreshArtwork() {
         let eng = LyricsCoreEngine.shared
         guard lastArtworkRevision != eng.artworkRevision else { return }
         lastArtworkRevision = eng.artworkRevision
 
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if let img = eng.artworkImage {
-            artImageLayer.contents = img
+            artImageLayer.contents = img.cgImage(forProposedRect: nil, context: nil, hints: nil) ?? img
+            artImageLayer.contentsScale = scale
             artImageLayer.isHidden = false
             artPlaceholderLayer.isHidden = true
         } else {
@@ -712,28 +791,26 @@ final class HUDContentView: NSView {
             lastIsPlaying = playing
             playPauseBtn.updateSymbol(playing ? "pause.fill" : "play.fill")
 
-            if let layer = artButton.layer {
-                let targetScale: CGFloat = playing ? 1.0 : 0.92
-                let toTransform = CATransform3DMakeScale(targetScale, targetScale, 1.0)
-                if AppPerformance.isUltraLightMode {
-                    let anim = CABasicAnimation(keyPath: "transform")
-                    anim.duration = 0.22
-                    anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    anim.fromValue = layer.presentation()?.transform ?? layer.transform
-                    anim.toValue = toTransform
-                    layer.transform = toTransform
-                    layer.add(anim, forKey: "artScale")
-                } else {
-                    let spring = CASpringAnimation(keyPath: "transform")
-                    spring.mass = 1.0
-                    spring.stiffness = 220
-                    spring.damping = 24
-                    spring.fromValue = layer.presentation()?.transform ?? layer.transform
-                    spring.toValue = toTransform
-                    spring.duration = spring.settlingDuration
-                    layer.transform = toTransform
-                    layer.add(spring, forKey: "artScale")
-                }
+            let targetScale: CGFloat = playing ? 1.0 : 0.92
+            let toTransform = CATransform3DMakeScale(targetScale, targetScale, 1.0)
+            if AppPerformance.isUltraLightMode {
+                let anim = CABasicAnimation(keyPath: "transform")
+                anim.duration = 0.22
+                anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                anim.fromValue = artContentLayer.presentation()?.transform ?? artContentLayer.transform
+                anim.toValue = toTransform
+                artContentLayer.transform = toTransform
+                artContentLayer.add(anim, forKey: "artScale")
+            } else {
+                let spring = CASpringAnimation(keyPath: "transform")
+                spring.mass = 1.0
+                spring.stiffness = 220
+                spring.damping = 24
+                spring.fromValue = artContentLayer.presentation()?.transform ?? artContentLayer.transform
+                spring.toValue = toTransform
+                spring.duration = spring.settlingDuration
+                artContentLayer.transform = toTransform
+                artContentLayer.add(spring, forKey: "artScale")
             }
         }
     }

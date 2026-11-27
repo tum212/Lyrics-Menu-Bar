@@ -609,6 +609,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 button.image = nil
                 menuBarCanvasView?.isHidden = false
                 isShowingIdleIcon = false
+            } else if menuBarCanvasView?.isHidden == true {
+                menuBarCanvasView?.isHidden = false
             }
             let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let currentLineText = step.text
@@ -767,6 +769,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             if let item = self.statusItem, abs(item.length - quantizedWidth) > 0.5 {
                 item.length = quantizedWidth
+            }
+            if let canvas = menuBarCanvasView {
+                let targetFrame = NSRect(x: 0, y: 0, width: quantizedWidth, height: max(22.0, button.bounds.height))
+                if abs(canvas.frame.width - targetFrame.width) > 0.5 || abs(canvas.frame.height - targetFrame.height) > 0.5 {
+                    canvas.frame = targetFrame
+                }
             }
 
             menuBarCanvasView?.renderFrame(

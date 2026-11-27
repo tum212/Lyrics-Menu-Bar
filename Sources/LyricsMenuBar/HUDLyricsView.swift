@@ -176,6 +176,14 @@ final class HUDLyricsView: NSView {
             clipLayer.addSublayer(slot.container)
             rowSlots.append(slot)
         }
+
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(handlePrefsChanged), name: UserDefaults.didChangeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handlePrefsChanged), name: Notification.Name("UltraLightModeChanged"), object: nil)
+    }
+
+    @objc private func handlePrefsChanged() {
+        renderNow()
     }
 
     override func viewDidMoveToWindow() {
@@ -516,6 +524,7 @@ final class HUDLyricsView: NSView {
             let isActive = (!isUnsynced && rIdx == activeRowIndex)
             let isPast = (!isUnsynced && activeRowIndex >= 0 && rIdx < activeRowIndex)
             let isRowHovered = (rIdx == hoveredRowIndex) || isViewportHovered
+            let focusMode = UserDefaults.standard.object(forKey: AppSettingKey.lyricsFocusMode) as? Bool ?? true
 
             let dimAlpha: Float
             if isUnsynced {
@@ -523,11 +532,11 @@ final class HUDLyricsView: NSView {
             } else if isActive {
                 dimAlpha = 0.35
             } else if isRowHovered {
-                dimAlpha = 0.75
+                dimAlpha = 0.78
             } else if isPast {
-                dimAlpha = 0.32
+                dimAlpha = focusMode ? 0.22 : 0.42
             } else {
-                dimAlpha = 0.60
+                dimAlpha = focusMode ? 0.42 : 0.68
             }
 
             slot.ensureSubSlots(row.subLines.count, scale: backingScale)
