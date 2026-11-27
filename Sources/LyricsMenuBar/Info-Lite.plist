@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LSUIElement</key>
+	<true/>
+	<key>CFBundleIdentifier</key>
+	<string>com.lyricsmenubar.macos.lite</string>
+	<key>CFBundleName</key>
+	<string>Lyrics Menu Bar Lite</string>
+	<key>CFBundleExecutable</key>
+	<string>LyricsMenuBar</string>
+	<key>CFBundleDisplayName</key>
+	<string>Lyrics Menu Bar Lite</string>
+	<key>CFBundleVersion</key>
+	<string>54</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.3.1</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Lyrics Menu Bar requires audio access to visualize live sound as a waveform</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Lyrics Menu Bar requires permission to control Spotify and Apple Music to display track info, synchronized lyrics, and playback controls in the menu bar.</string>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Puwadon. Released under the MIT License.</string>
+</dict>
+</plist>

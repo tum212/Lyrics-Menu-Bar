@@ -1,9 +1,10 @@
 {
   "version": "1.3.1",
   "build": 54,
-  "release_date": "2026-10-07",
-  "release_notes": "Apple Music Stability & Universal Cover Flow Physics: Eliminated source flip-flop between Apple Music and Spotify, unified Cover Flow transitions across all triggers (keyboard media keys, macOS Control Center, Bluetooth headphones, auto-play progression, and HUD buttons), authentic iPod Classic spring deceleration physics, and flicker-free stable card identity pipeline.",
+  "release_date": "2026-11-27",
+  "release_notes": "Clean Album Art & macOS 13 Lite Support: Removed 3D Cover Flow sliding for a clean static album cover, updated idle menu bar and placeholder icon from musical note to play symbol, added macOS 13 (Ventura) compatibility with new Version Lite edition.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-1.3.1.dmg",
+  "download_url_lite": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v1.3.1/LyricsMenuBar-Lite-1.3.1.dmg",
   "mandatory": false,
   "lyrics_endpoints": {
     "lrclib_search": "https://lrclib.net/api/search",

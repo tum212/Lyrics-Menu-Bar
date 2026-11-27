@@ -37,18 +37,6 @@ struct ContentView: View {
     @State private var displayedIndex: Int = 0
     @State private var isLyricsHovered: Bool = false
     
-    // Apple Cover Flow Carousel Animation State (Preset from ashishgogula/coverflow)
-    @State private var carouselSlide: CGFloat = 0.0 // -1.0 = sliding left to next, +1.0 = sliding right to prev
-    @State private var isTransitioning: Bool = false
-    @State private var isArtHovered: Bool = false
-    @State private var isActionTriggered: Bool = false
-    @State private var triggerWorkItem: DispatchWorkItem? = nil
-    @State private var lastObservedTrackId: String = ""
-
-    private var showCoverFlow: Bool {
-        isArtHovered || isActionTriggered || isTransitioning
-    }
-    
     // User preferences
     @AppStorage("showLyrics") private var showLyrics = true
     @AppStorage("waveformBars") private var waveformBars = 14
@@ -81,8 +69,7 @@ struct ContentView: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: updateManager.showUpdateModal)
-        .onChange(of: musicService.currentTrack?.id) { newId in
-            schedulePeekRetraction()
+        .onChange(of: musicService.currentTrack?.id) { _ in
             LyricLineLayoutCache.shared.clear()
             if let track = musicService.currentTrack {
                 lyricsService.fetchLyrics(trackName: track.name, artistName: track.artist, albumName: track.album)
@@ -90,23 +77,14 @@ struct ContentView: View {
                 lyricsService.lyrics = []
             }
             displayedIndex = 0
-            
-            let isGenuineTrackChange = !lastObservedTrackId.isEmpty && (newId != nil) && (lastObservedTrackId != (newId ?? ""))
-            lastObservedTrackId = newId ?? ""
-            
-            if isGenuineTrackChange {
-                triggerCoverFlowTransition(direction: musicService.navigationDirection)
-            }
         }
         .onChange(of: lyricsService.lyrics.count) { _ in
             LyricLineLayoutCache.shared.clear()
         }
         .onChange(of: musicService.isPlaying) { isPlaying in
-            schedulePeekRetraction()
             handlePlayStateChange(isPlaying)
         }
         .onAppear {
-            lastObservedTrackId = musicService.currentTrack?.id ?? ""
             handlePlayStateChange(musicService.isPlaying)
         }
         .onDisappear {
@@ -116,138 +94,18 @@ struct ContentView: View {
         }
     }
 
-    private var coverFlowDeck: (items: [CoverFlowItem], activeIndex: Int) {
-        var items: [CoverFlowItem] = []
-        var usedIds = Set<String>()
-        
-        func resolveUniqueId(prefix: String, trackId: String?) -> String {
-            guard let trackId = trackId, !trackId.isEmpty else {
-                return "\(prefix)_empty"
-            }
-            let base = "track_\(trackId)"
-            if !usedIds.contains(base) {
-                usedIds.insert(base)
-                return base
-            }
-            let fallback = "\(prefix)_\(trackId)"
-            usedIds.insert(fallback)
-            return fallback
-        }
-        
-        // Slot 0: Far Left (History 2 back)
-        let histCount = musicService.sessionHistory.count
-        if histCount >= 2 {
-            let t = musicService.sessionHistory[histCount - 2]
-            let img = ArtworkCache.shared.findImage(for: t)
-                ?? t.artworkData.flatMap { NSImage(data: $0) }
-            let id = resolveUniqueId(prefix: "h2", trackId: t.id)
-            items.append(CoverFlowItem(id: id, track: t, fallbackIcon: "backward.fill", image: img))
-        } else {
-            items.append(CoverFlowItem(id: "slot_0_empty", track: nil, fallbackIcon: "backward.fill", image: nil))
-        }
-        
-        // Slot 1: Left (Immediate previous track)
-        if let prevTrack = musicService.sessionHistory.last {
-            let img = ArtworkCache.shared.findImage(for: prevTrack)
-                ?? prevTrack.artworkData.flatMap { NSImage(data: $0) }
-            let id = resolveUniqueId(prefix: "h1", trackId: prevTrack.id)
-            items.append(CoverFlowItem(id: id, track: prevTrack, fallbackIcon: "backward.fill", image: img))
-        } else {
-            items.append(CoverFlowItem(id: "slot_1_empty", track: nil, fallbackIcon: "backward.fill", image: nil))
-        }
-        
-        // Slot 2: Center (Current track) -> FIXED activeIndex = 2
-        let activeIdx = 2
-        if let current = musicService.currentTrack {
-            let img = musicService.activeArtworkImage
-                ?? ArtworkCache.shared.findImage(for: current)
-                ?? current.artworkData.flatMap { NSImage(data: $0) }
-            let id = resolveUniqueId(prefix: "curr", trackId: current.id)
-            items.append(CoverFlowItem(id: id, track: current, isCurrent: true, fallbackIcon: "music.quarternote.3", image: img))
-        } else {
-            items.append(CoverFlowItem(id: "curr_none", track: nil, isCurrent: true, fallbackIcon: "music.quarternote.3", image: nil))
-        }
-        
-        // Slot 3: Right (Immediate next track)
-        if let nextTrack = musicService.upcomingQueue.first {
-            let img = ArtworkCache.shared.findImage(for: nextTrack)
-                ?? nextTrack.artworkData.flatMap { NSImage(data: $0) }
-            let id = resolveUniqueId(prefix: "u1", trackId: nextTrack.id)
-            items.append(CoverFlowItem(id: id, track: nextTrack, fallbackIcon: "forward.fill", image: img))
-        } else {
-            items.append(CoverFlowItem(id: "slot_3_empty", track: nil, fallbackIcon: "forward.fill", image: nil))
-        }
-        
-        // Slot 4: Far Right (Upcoming 2 ahead)
-        if musicService.upcomingQueue.count >= 2 {
-            let t = musicService.upcomingQueue[1]
-            let img = ArtworkCache.shared.findImage(for: t)
-                ?? t.artworkData.flatMap { NSImage(data: $0) }
-            let id = resolveUniqueId(prefix: "u2", trackId: t.id)
-            items.append(CoverFlowItem(id: id, track: t, fallbackIcon: "forward.fill", image: img))
-        } else {
-            items.append(CoverFlowItem(id: "slot_4_empty", track: nil, fallbackIcon: "forward.fill", image: nil))
-        }
-        
-        return (items, activeIdx)
-    }
-
-    private func triggerCoverFlowTransition(direction: Int) {
-        guard direction != 0 else { return }
-        schedulePeekRetraction()
-        
-        let initialSlide: CGFloat = (direction > 0) ? 1.0 : -1.0
-        
-        // Step 1: Instantly stage carousel slide without animation
-        var stageTransaction = Transaction()
-        stageTransaction.disablesAnimations = true
-        withTransaction(stageTransaction) {
-            carouselSlide = initialSlide
-            isTransitioning = true
-        }
-        
-        // Step 2: Next frame, glide smoothly to 0.0 with authentic iPod spring physics
-        DispatchQueue.main.async {
-            withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
-                carouselSlide = 0.0
-            }
-        }
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
-            isTransitioning = false
-        }
-    }
-
     private func skipToNext() {
-        guard !isTransitioning else { return }
         musicService.nextTrack()
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-        schedulePeekRetraction()
     }
 
     private func skipToPrevious(force: Bool = false) {
-        guard !isTransitioning else { return }
         if force {
             musicService.forcePreviousTrack()
         } else {
             musicService.previousTrack()
         }
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-        schedulePeekRetraction()
-    }
-
-    private func schedulePeekRetraction() {
-        triggerWorkItem?.cancel()
-        withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
-            isActionTriggered = true
-        }
-        let work = DispatchWorkItem {
-            withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
-                isActionTriggered = false
-            }
-        }
-        triggerWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)
     }
 
     private func handlePlayStateChange(_ isPlaying: Bool) {
@@ -305,33 +163,7 @@ struct ContentView: View {
     @ViewBuilder
     private var playerLeftColumn: some View {
         VStack(spacing: 0) {
-            // Apple Cover Flow (Preset from ashishgogula/coverflow, No Reflection)
-            let deck = coverFlowDeck
-            AppleCoverFlowView(
-                items: deck.items,
-                activeIndex: deck.activeIndex,
-                scrollPosition: Double(deck.activeIndex) - Double(carouselSlide),
-                showCoverFlow: showCoverFlow,
-                isPlaying: musicService.isPlaying,
-                cardSize: 120,
-                cornerRadius: 14,
-                onCardTap: { index, item in
-                    if index < deck.activeIndex {
-                        skipToPrevious(force: true)
-                    } else if index > deck.activeIndex {
-                        skipToNext()
-                    } else {
-                        musicService.activateMusicApp()
-                        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-                    }
-                }
-            )
-            .animation(.spring(response: 0.68, dampingFraction: 0.86), value: showCoverFlow)
-            .onHover { hovering in
-                withAnimation(.spring(response: 0.68, dampingFraction: 0.86)) {
-                    isArtHovered = hovering
-                }
-            }
+            albumArtView
 
             Spacer().frame(height: 8)
 
@@ -387,7 +219,6 @@ struct ContentView: View {
                     frameSize: 38
                 ) {
                     musicService.playPause()
-                    schedulePeekRetraction()
                 }
 
                 AppleMusicControlButton(systemName: "forward.fill", size: 15, frameSize: 32) {
@@ -465,6 +296,45 @@ struct ContentView: View {
         }
     }
 
+    private var albumArtView: some View {
+        Button(action: {
+            musicService.activateMusicApp()
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+        }) {
+            ZStack {
+                if let track = musicService.currentTrack,
+                   let img = musicService.activeArtworkImage
+                       ?? ArtworkCache.shared.findImage(for: track)
+                       ?? track.artworkData.flatMap({ NSImage(data: $0) }) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 120, height: 120)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                } else {
+                    placeholderArt
+                }
+            }
+            .frame(width: 120, height: 120)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+            )
+            .scaleEffect(musicService.isPlaying ? 1.0 : 0.92)
+            .animation(.spring(response: 0.45, dampingFraction: 0.80), value: musicService.isPlaying)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .onHover { isHovered in
+            if isHovered && musicService.currentTrack != nil {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .help("Click to open in \(musicService.activeSource == .appleMusic ? "Apple Music" : "Spotify")")
+    }
+
     private var placeholderArt: some View {
         ZStack {
             LinearGradient(
@@ -472,11 +342,12 @@ struct ContentView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Image(systemName: "music.quarternote.3")
+            Image(systemName: "play.fill")
                 .font(.system(size: 38, weight: .regular))
                 .foregroundStyle(.white.opacity(0.45))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
+        .frame(width: 120, height: 120)
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)

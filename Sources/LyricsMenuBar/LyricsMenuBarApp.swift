@@ -191,7 +191,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = self.statusItem.button {
-            let img = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: "Lyrics Menu Bar")
+            let img = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Lyrics Menu Bar")
             img?.isTemplate = true
             button.image = img
             button.imagePosition = .imageOnly
@@ -982,7 +982,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.cachedAlbumArtImage = roundedImage
                 self.cachedWaveformTheme = theme
             } else {
-                let fallback = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: nil)
+                let fallback = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)
                 fallback?.isTemplate = true
                 self.cachedAlbumArtImage = fallback
                 self.cachedWaveformTheme = .fallback
@@ -1232,7 +1232,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // No track playing
         if !isShowingIdleIcon {
             if let button = self.statusItem?.button {
-                let img = NSImage(systemSymbolName: "music.quarternote.3", accessibilityDescription: "Lyrics Menu Bar")
+                let img = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Lyrics Menu Bar")
                 img?.isTemplate = true
                 button.image = img
                 button.imagePosition = .imageOnly

@@ -81,15 +81,19 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         let config = await RemoteConfigManager.shared.fetchRemoteConfig()
         lastCheckDate = Date()
 
-        if let config = config, let downloadUrlStr = config.downloadUrl, let downloadUrl = URL(string: downloadUrlStr) {
-            let isNewerVersion = Self.isVersion(config.version, greaterThan: currentVersion)
-            let isNewerBuild = config.build > currentBuild && config.version == currentVersion
+        if let config = config {
+            let isLite = (Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String)?.contains("lite") == true
+            let chosenUrlStr = (isLite ? config.downloadUrlLite : config.downloadUrl) ?? config.downloadUrl
+            if let chosenUrlStr = chosenUrlStr, let downloadUrl = URL(string: chosenUrlStr) {
+                let isNewerVersion = Self.isVersion(config.version, greaterThan: currentVersion)
+                let isNewerBuild = config.build > currentBuild && config.version == currentVersion
 
-            if isNewerVersion || isNewerBuild {
-                let notes = config.releaseNotes ?? "A new update for Lyrics Menu Bar is ready."
-                state = .updateAvailable(version: config.version, releaseNotes: notes, downloadUrl: downloadUrl)
-                showUpdateModal = true
-                return
+                if isNewerVersion || isNewerBuild {
+                    let notes = config.releaseNotes ?? "A new update for Lyrics Menu Bar is ready."
+                    state = .updateAvailable(version: config.version, releaseNotes: notes, downloadUrl: downloadUrl)
+                    showUpdateModal = true
+                    return
+                }
             }
         }
 

@@ -31,6 +31,7 @@ public struct RemoteConfig: Codable, Equatable, Sendable {
     public let releaseDate: String?
     public let releaseNotes: String?
     public let downloadUrl: String?
+    public let downloadUrlLite: String?
     public let mandatory: Bool?
     public let lyricsEndpoints: LyricsEndpointsConfig?
     public let announcement: AnnouncementConfig?
@@ -40,6 +41,7 @@ public struct RemoteConfig: Codable, Equatable, Sendable {
         case releaseDate = "release_date"
         case releaseNotes = "release_notes"
         case downloadUrl = "download_url"
+        case downloadUrlLite = "download_url_lite"
         case mandatory
         case lyricsEndpoints = "lyrics_endpoints"
         case announcement
