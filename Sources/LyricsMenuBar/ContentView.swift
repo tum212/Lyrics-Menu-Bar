@@ -296,7 +296,6 @@ struct ContentView: View {
                     NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                 }
             )
-            .id(ultraLightMode)
         }
     }
 
@@ -413,7 +412,7 @@ struct LyricsStreamView: View {
     @State private var activeLineId: UUID? = nil
     @State private var isLyricsHovered: Bool = false
     
-    // Ultra-Light uses ~6.6 Hz clock with tolerance; Standard uses 60 Hz; both idle at 0% when HUD is closed
+    // Decoupled line-switch clock (~12.5 Hz); active karaoke sweeps at 60 FPS in TimelineView, 0% when HUD closed
     private let clock: Publishers.Autoconnect<Timer.TimerPublisher>
     
     init(
@@ -435,8 +434,8 @@ struct LyricsStreamView: View {
         self.ultraLightMode = ultraLightMode
         self.onSeek = onSeek
         self.clock = Timer.publish(
-            every: ultraLightMode ? 0.15 : (1.0 / 60.0),
-            tolerance: ultraLightMode ? 0.05 : 0.005,
+            every: 0.08,
+            tolerance: 0.02,
             on: .main,
             in: .common
         ).autoconnect()
@@ -461,7 +460,7 @@ struct LyricsStreamView: View {
         
         if targetId != activeLineId {
             let anim: Animation? = animated
-                ? (ultraLightMode ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86))
+                ? .spring(response: 0.65, dampingFraction: 0.86)
                 : nil
             if let anim = anim {
                 withAnimation(anim) {
@@ -551,6 +550,22 @@ struct LyricsStreamView: View {
 }
 
 // MARK: - Zero-Cost Main Thread Layout Cache (Eliminates frame stutters at 60 FPS)
+struct KaraokeWordSpan {
+    let text: String
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let startX: CGFloat
+    let endX: CGFloat
+}
+
+struct WrappedKaraokeLine {
+    let text: String
+    let width: CGFloat
+    let spans: [KaraokeWordSpan]
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+}
+
 @MainActor
 final class LyricLineLayoutCache {
     static let shared = LyricLineLayoutCache()
@@ -563,6 +578,7 @@ final class LyricLineLayoutCache {
     
     private var wordsCache: [CacheKey: [[LyricWord]]] = [:]
     private var linesCache: [CacheKey: [String]] = [:]
+    private var karaokeCache: [CacheKey: [WrappedKaraokeLine]] = [:]
     
     func wrappedWords(for line: LyricLine, width: CGFloat, font: NSFont) -> [[LyricWord]] {
         let key = CacheKey(lineID: line.id, width: Int(width), fontSize: Int(font.pointSize))
@@ -580,9 +596,46 @@ final class LyricLineLayoutCache {
         return result
     }
     
+    func wrappedKaraokeLines(for line: LyricLine, width: CGFloat, font: NSFont) -> [WrappedKaraokeLine] {
+        let key = CacheKey(lineID: line.id, width: Int(width), fontSize: Int(font.pointSize))
+        if let cached = karaokeCache[key] { return cached }
+        let rows = wrappedWords(for: line, width: width, font: font)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let result: [WrappedKaraokeLine] = rows.compactMap { rowWords in
+            guard !rowWords.isEmpty else { return nil }
+            var built = ""
+            var spans: [KaraokeWordSpan] = []
+            spans.reserveCapacity(rowWords.count)
+            for (idx, word) in rowWords.enumerated() {
+                let prefix = idx == 0 ? "" : built + " "
+                let startX = prefix.isEmpty ? 0 : prefix.size(withAttributes: attrs).width
+                built = prefix + word.text
+                let endX = built.size(withAttributes: attrs).width
+                spans.append(KaraokeWordSpan(
+                    text: word.text,
+                    startTime: word.startTime,
+                    endTime: word.endTime,
+                    startX: startX,
+                    endX: endX
+                ))
+            }
+            let rowWidth = max(1.0, built.size(withAttributes: attrs).width)
+            return WrappedKaraokeLine(
+                text: built,
+                width: rowWidth,
+                spans: spans,
+                startTime: rowWords.first?.startTime ?? 0,
+                endTime: rowWords.last?.endTime ?? 0
+            )
+        }
+        karaokeCache[key] = result
+        return result
+    }
+    
     func clear() {
         wordsCache.removeAll(keepingCapacity: true)
         linesCache.removeAll(keepingCapacity: true)
+        karaokeCache.removeAll(keepingCapacity: true)
     }
     
     private func computeWrappedWords(words: [LyricWord], width: CGFloat, font: NSFont) -> [[LyricWord]] {
@@ -662,26 +715,10 @@ struct LyricLineRowView: View {
                 unsyncedView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
             } else if isActive {
                 let shouldAnimate = musicService.isPanelVisible && musicService.isPlaying
-                if !shouldAnimate {
+                TimelineView(.animation(paused: !shouldAnimate)) { _ in
                     if !line.words.isEmpty {
-                        wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                        lineKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
                     } else {
-                        fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
-                    }
-                } else if ultraLightMode {
-                    TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { _ in
-                        if !line.words.isEmpty {
-                            wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
-                        } else {
-                            fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
-                        }
-                    }
-                } else if !line.words.isEmpty {
-                    TimelineView(.animation(paused: !shouldAnimate)) { _ in
-                        wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
-                    }
-                } else {
-                    TimelineView(.animation(paused: !shouldAnimate)) { _ in
                         fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
                     }
                 }
@@ -752,30 +789,101 @@ struct LyricLineRowView: View {
         .frame(width: effectiveWidth, alignment: .leading)
     }
     
+    private func karaokeMaskStops(leadX: CGFloat, lineWidth: CGFloat, fadeWidth: CGFloat) -> [Gradient.Stop] {
+        if leadX + fadeWidth <= 0 {
+            return [.init(color: .clear, location: 0.0)]
+        }
+        if leadX >= lineWidth {
+            return [.init(color: .black, location: 0.0), .init(color: .black, location: 1.0)]
+        }
+        let fadeStart = max(0.0, min(1.0, leadX / max(1.0, lineWidth)))
+        let fadeEnd = max(fadeStart, min(1.0, (leadX + fadeWidth) / max(1.0, lineWidth)))
+        return [
+            .init(color: .black, location: 0.0),
+            .init(color: .black, location: fadeStart),
+            .init(color: .clear, location: fadeEnd)
+        ]
+    }
+    
     @ViewBuilder
-    private func wordKaraokeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
+    private func maskedKaraokeRow(
+        text: String,
+        fontSize: CGFloat,
+        fontWeight: Font.Weight,
+        isBgVocal: Bool,
+        stops: [Gradient.Stop],
+        isLitVisible: Bool,
+        glowOpacity: Double,
+        glowRadius: CGFloat
+    ) -> some View {
+        ZStack(alignment: .leading) {
+            Text(text)
+                .font(.system(size: fontSize, weight: fontWeight))
+                .italic(isBgVocal)
+                .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
+                .animation(.easeInOut(duration: 0.38), value: isActive)
+            
+            Text(text)
+                .font(.system(size: fontSize, weight: fontWeight))
+                .italic(isBgVocal)
+                .foregroundColor(.white)
+                .mask(
+                    LinearGradient(
+                        stops: stops,
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .shadow(color: .white.opacity(ultraLightMode ? 0 : glowOpacity), radius: ultraLightMode ? 0 : glowRadius)
+                .opacity((isActive && isLitVisible) ? 1.0 : 0.0)
+                .animation(.easeInOut(duration: 0.38), value: isActive)
+        }
+        .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
+    }
+    
+    @ViewBuilder
+    private func lineKaraokeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
         let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
-        let wrappedLines = LyricLineLayoutCache.shared.wrappedWords(for: line, width: effectiveWidth, font: font)
+        let kLines = LyricLineLayoutCache.shared.wrappedKaraokeLines(for: line, width: effectiveWidth, font: font)
+        let fadeWidth: CGFloat = 20.0
+        
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(0..<wrappedLines.count, id: \.self) { lineIdx in
-                let rowWords = wrappedLines[lineIdx]
-                HStack(spacing: 5) {
-                    ForEach(rowWords) { word in
-                        WordLyricItemView(
-                            word: word,
-                            isActive: isActive,
-                            isPast: isPast,
-                            isHovered: isHovered,
-                            lyricsFocusMode: lyricsFocusMode,
-                            ultraLightMode: ultraLightMode,
-                            currentTime: currentTime,
-                            fontSize: fontSize,
-                            fontWeight: fontWeight,
-                            isItalic: isBgVocal
-                        )
+            ForEach(0..<kLines.count, id: \.self) { idx in
+                let kLine = kLines[idx]
+                let leadX: CGFloat = {
+                    if currentTime < kLine.startTime {
+                        return -fadeWidth
+                    } else if currentTime >= kLine.endTime {
+                        return kLine.width + fadeWidth
                     }
-                }
-                .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
+                    for span in kLine.spans {
+                        if currentTime >= span.startTime && currentTime < span.endTime {
+                            let dur = max(0.05, span.endTime - span.startTime)
+                            let wp = CGFloat((currentTime - span.startTime) / dur)
+                            return span.startX + (span.endX - span.startX) * wp
+                        } else if currentTime < span.startTime {
+                            return span.startX
+                        }
+                    }
+                    return kLine.width + fadeWidth
+                }()
+                
+                let isRowSinging = currentTime >= kLine.startTime && currentTime < kLine.endTime
+                let isRowSung = currentTime >= kLine.endTime
+                let glowOpacity: Double = isRowSinging ? 0.65 : (isRowSung ? 0.32 : 0.0)
+                let glowRadius: CGFloat = isRowSinging ? 5.0 : (isRowSung ? 2.8 : 0.0)
+                let stops = karaokeMaskStops(leadX: leadX, lineWidth: kLine.width, fadeWidth: fadeWidth)
+                
+                maskedKaraokeRow(
+                    text: kLine.text,
+                    fontSize: fontSize,
+                    fontWeight: fontWeight,
+                    isBgVocal: isBgVocal,
+                    stops: stops,
+                    isLitVisible: leadX + fadeWidth > 0,
+                    glowOpacity: glowOpacity,
+                    glowRadius: glowRadius
+                )
             }
         }
         .frame(width: effectiveWidth, alignment: .leading)
@@ -785,18 +893,6 @@ struct LyricLineRowView: View {
     private func fallbackWipeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
         let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
         let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
-        if ultraLightMode {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(0..<lines.count, id: \.self) { i in
-                    Text(lines[i])
-                        .font(.system(size: fontSize, weight: fontWeight))
-                        .italic(isBgVocal)
-                        .foregroundColor(.white)
-                        .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
-                }
-            }
-            .frame(width: effectiveWidth, alignment: .leading)
-        } else {
         let totalChars = max(1, lines.reduce(0) { $0 + $1.count })
         
         let activeDuration = max(0.1, line.endTime - line.time)
@@ -813,7 +909,7 @@ struct LyricLineRowView: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(0..<lines.count, id: \.self) { i in
                 let lineText = lines[i]
-                let lineWidth = lineText.size(withAttributes: [.font: font]).width
+                let lineWidth = max(1.0, lineText.size(withAttributes: [.font: font]).width)
                 let ls = lineTiming[i].ls
                 let le = lineTiming[i].le
                 
@@ -822,145 +918,27 @@ struct LyricLineRowView: View {
                 
                 let fadeWidth: CGFloat = 24
                 let currentX = (lineWidth + fadeWidth) * lp - fadeWidth
-                let fadeStart = max(0.0, min(1.0, currentX / max(1.0, lineWidth)))
-                let fadeEnd = max(0.0, min(1.0, (currentX + fadeWidth) / max(1.0, lineWidth)))
                 
                 let isLineSinging = lp > 0.0 && lp < 1.0
                 let isLineFullySung = lp >= 1.0
                 
                 let glowOpacity: Double = isLineSinging ? 0.65 : (isLineFullySung ? 0.35 : 0.0)
                 let glowRadius: CGFloat = isLineSinging ? 5.0 : (isLineFullySung ? 3.0 : 0.0)
+                let stops = karaokeMaskStops(leadX: currentX, lineWidth: lineWidth, fadeWidth: fadeWidth)
                 
-                ZStack(alignment: .leading) {
-                    Text(lineText)
-                        .font(.system(size: fontSize, weight: fontWeight))
-                        .italic(isBgVocal)
-                        .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
-                        .animation(.easeInOut(duration: 0.38), value: isActive)
-                    
-                    Text(lineText)
-                        .font(.system(size: fontSize, weight: fontWeight))
-                        .italic(isBgVocal)
-                        .foregroundColor(.white)
-                        .mask(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .black, location: 0),
-                                    .init(color: .black, location: fadeStart),
-                                    .init(color: .clear, location: fadeEnd)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .shadow(color: .white.opacity(glowOpacity), radius: glowRadius)
-                        .opacity(lp > 0.0 ? (isActive ? 1.0 : 0.0) : 0.0)
-                        .animation(.easeInOut(duration: 0.38), value: isActive)
-                }
-                .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
+                maskedKaraokeRow(
+                    text: lineText,
+                    fontSize: fontSize,
+                    fontWeight: fontWeight,
+                    isBgVocal: isBgVocal,
+                    stops: stops,
+                    isLitVisible: lp > 0.0,
+                    glowOpacity: glowOpacity,
+                    glowRadius: glowRadius
+                )
             }
         }
         .frame(width: effectiveWidth, alignment: .leading)
-        }
-    }
-}
-
-// MARK: - Single Word Lyric Item (Apple Music Continuous Glow Decay & Seamless Flow)
-struct WordLyricItemView: View {
-    let word: LyricWord
-    let isActive: Bool
-    let isPast: Bool
-    let isHovered: Bool
-    let lyricsFocusMode: Bool
-    let ultraLightMode: Bool
-    let currentTime: TimeInterval
-    var fontSize: CGFloat = 20
-    var fontWeight: Font.Weight = .bold
-    var isItalic: Bool = false
-    
-    var body: some View {
-        let font = Font.system(size: fontSize, weight: fontWeight)
-        let wordStart = word.startTime
-        let wordEnd = word.endTime
-        let hasStarted = currentTime >= wordStart
-
-        if ultraLightMode {
-            // Ultra-lightweight word-by-word karaoke for Lite: zero GeometryReader, zero mask, zero blur shadow
-            Text(word.text)
-                .font(font)
-                .italic(isItalic)
-                .foregroundColor(
-                    isActive
-                        ? (hasStarted ? .white : .white.opacity(0.38))
-                        : .white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60))
-                )
-        } else {
-            let wordDuration = max(0.06, wordEnd - wordStart)
-            
-            // Continuous wipe progress: 0.0 before start, 0.0->1.0 while singing, 1.0 when sung
-            let rawProgress = (currentTime - wordStart) / wordDuration
-            let progress: CGFloat = CGFloat(max(0.0, min(1.0, rawProgress)))
-            
-            let isActivelySinging = isActive && (currentTime >= wordStart && currentTime < wordEnd)
-            
-            let glow = computeGlow(hasStarted: hasStarted, isActivelySinging: isActivelySinging, wordEnd: wordEnd)
-            let emphasis: CGFloat = (isActivelySinging && lyricsFocusMode) ? CGFloat(1.0 + 0.025 * sin(Double(progress) * .pi)) : 1.0
-            
-            ZStack(alignment: .leading) {
-                // Base layer: unlit typography with smooth opacity transition
-                Text(word.text)
-                    .font(font)
-                    .italic(isItalic)
-                    .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
-                    .animation(.easeInOut(duration: 0.38), value: isActive)
-                
-                // Illuminated layer: SINGLE stable view that never unmounts while active
-                Text(word.text)
-                    .font(font)
-                    .italic(isItalic)
-                    .foregroundColor(.white)
-                    .mask(
-                        GeometryReader { geo in
-                            let w = geo.size.width
-                            let fadeWidth: CGFloat = 16.0
-                            let leadX = (w + fadeWidth) * progress - fadeWidth
-                            let fadeStart = max(0.0, min(1.0, leadX / max(1.0, w)))
-                            let fadeEnd = max(0.0, min(1.0, (leadX + fadeWidth) / max(1.0, w)))
-                            
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .black, location: 0.0),
-                                    .init(color: .black, location: fadeStart),
-                                    .init(color: .clear, location: fadeEnd)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        }
-                    )
-                    .shadow(color: .white.opacity(glow.opacity), radius: glow.radius)
-                    .opacity(isActive ? (hasStarted ? 1.0 : 0.0) : 0.0)
-                    .animation(.easeInOut(duration: 0.38), value: isActive)
-            }
-            .scaleEffect(emphasis, anchor: .bottomLeading)
-        }
-    }
-    
-    private func computeGlow(hasStarted: Bool, isActivelySinging: Bool, wordEnd: TimeInterval) -> (opacity: Double, radius: CGFloat) {
-        if isActivelySinging {
-            return (0.85, 6.0)
-        } else if hasStarted {
-            let timeSinceEnd = max(0.0, currentTime - wordEnd)
-            let decayDuration: Double = 0.32
-            let decayT = min(1.0, timeSinceEnd / decayDuration)
-            // Cosine easing: starts with 0 derivative at peak, decays smoothly down to 0
-            let decayFactor = 0.5 * (1.0 + cos(decayT * .pi)) // 1.0 -> 0.0
-            let opacity = 0.35 + 0.40 * decayFactor
-            let radius = 2.8 + 2.7 * CGFloat(decayFactor)
-            return (opacity, radius)
-        } else {
-            return (0.0, 0.0)
-        }
     }
 }
 
@@ -1096,7 +1074,7 @@ struct NativeSettingsMenu: NSViewRepresentable {
             let appearanceMenu = NSMenu(title: "Appearance & Performance")
             
             let isUltraLight = AppPerformance.isUltraLightMode
-            let ultraLightItem = NSMenuItem(title: "Ultra-Light Mode (Best for Intel / Battery)", action: #selector(toggleUltraLightMode), keyEquivalent: "")
+            let ultraLightItem = NSMenuItem(title: "Reduce Glass & Blur Effects (60 FPS Lightweight)", action: #selector(toggleUltraLightMode), keyEquivalent: "")
             ultraLightItem.target = self
             ultraLightItem.state = isUltraLight ? .on : .off
             appearanceMenu.addItem(ultraLightItem)

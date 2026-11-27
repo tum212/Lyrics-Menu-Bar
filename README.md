@@ -82,21 +82,19 @@
 
 ## Ultra-Light Mode & Performance Architecture
 
-One universal app (**`LyricsMenuBar-1.3.1.dmg`**) runs smoothly on everything from Apple Silicon MacBooks to fanless Intel Macs such as the **MacBook 12" (2017 Core m3)** using a two-layer architecture:
+One universal app (**`LyricsMenuBar-1.3.1.dmg`**) delivers **locked 60 FPS VSync smoothness** on everything from Apple Silicon MacBooks to fanless Intel Macs such as the **MacBook 12" (2017 Core m3)** — without ever throttling frame rates down — using a hardware-respecting two-layer design:
 
-### Layer 1: Universal Always-On Optimizations (All Macs)
-- **0% Idle & Paused CPU**: Menu bar timers shut down (`0 Hz`) whenever playback is paused or idle, waking instantly via `DistributedNotificationCenter` and Combine publishers on track or state changes.
-- **Hidden HUD Freeze**: `LyricsStreamView` and `TimelineView` animations pause immediately when the HUD panel closes and resynchronize on open.
-- **Virtualized `LazyVStack` Lyrics**: Only visible rows are instantiated instead of laying out an entire song at once.
-- **Pre-cached Metrics & Compact Artwork**: Caches `UserDefaults`, `NSFont` attributes, measured string widths, and downscales cached album artwork to 240–300px (`@2x` Retina sharp at 120pt) to minimize RAM.
+### Layer 1: GPU-Native 60 FPS Architecture (All Macs)
+- **Zero-Redraw `CALayer` Menu Bar Canvas (`MenuBarCanvasView`)**: Each lyric line is rasterized **once** into a Retina `CGImage`, while marquee sliding, syllable wipe masking (`CAGradientLayer`), equalizer bar heights (`CAShapeLayer` / `CALayer` mask), and album artwork crossfades run directly on the GPU compositor with zero per-frame `NSImage.lockFocus()` CPU rasterization or WindowServer bitmap uploads.
+- **`CVDisplayLink` VSync + 0% CPU Idle/Paused**: Driven at locked 60 FPS (capped from 120 Hz on ProMotion) only during active playback or short pause-settle transitions, sleeping at **`0 Hz`** whenever playback is paused or idle.
+- **Zero-`GeometryReader`, 1-Mask-Per-Row HUD Karaoke**: Caches wrapped row widths and word x-offsets (`LyricLineLayoutCache`) so HUD word-by-word karaoke runs at full **60 FPS** using one `LinearGradient` mask per wrapped row instead of per-word layout passes and offscreen blur trees.
+- **Precompiled Background IPC**: Compiles Spotify and Apple Music `NSAppleScript` instances once on a `.utility` background serial queue (`2.0s` coalesced polling + instant `DistributedNotificationCenter` events) instead of recompiling scripts from source every tick.
 
-### Layer 2: Adaptive `Ultra-Light Mode` *(Auto-ON on Intel Macs, macOS 13 & Low Power Mode)*
-- **Automatic Hardware Detection**: Automatically enabled on `x86_64` Intel Macs, macOS 13 Ventura, or when macOS Low Power Mode is active — and **toggleable anytime** under **Settings → Appearance & Performance → Ultra-Light Mode**.
-- **Low-Overhead Rendering**:
-  - Caps active menu bar updates to **12 FPS** with macOS timer coalescing (`tolerance = 25ms`).
-  - Uses direct `NSBezierPath.clip` highlighting instead of offscreen mask buffers, and skips CPU Gaussian `NSShadow` blurs and 18-star sparkle animations.
-  - Uses a single-pass native `NSVisualEffectView` HUD backdrop (eliminating dual-backdrop `CABackdropLayer` saturation passes and per-line GPU blur filters on older integrated GPUs) with snappy 2D open/close transitions.
-  - Preserves all core features: full Menu Bar lyrics, word-by-word karaoke highlighting, click-to-seek, playback controls, and OTA updates.
+### Layer 2: Reduce Glass & Blur Effects *(Auto-ON on Intel Macs, macOS 13 & Low Power Mode)*
+- **Automatic Hardware Detection**: Automatically enabled on `x86_64` Intel Macs, macOS 13 Ventura, or when macOS Low Power Mode is active — and **toggleable anytime** under **Settings → Appearance & Performance → Reduce Glass & Blur Effects (60 FPS Lightweight)**.
+- **GPU Bandwidth Savings at Full 60 FPS**:
+  - Uses a single-pass native `NSVisualEffectView` HUD backdrop (eliminating multi-pass `CABackdropLayer` saturation compositing and specular strokes on older integrated GPUs such as Intel HD 615) alongside crisp 60 FPS 2D `CASpringAnimation` panel transitions.
+  - Skips Gaussian `NSShadow` glow blurs and menu bar sparkle particles while keeping full **60 FPS** karaoke wipes, marquee scrolling, album art transitions, click-to-seek, and OTA updates.
 
 ---
 
@@ -106,11 +104,11 @@ Unsupported system-tap features on macOS 13 Ventura are **automatically greyed o
 
 | Feature | macOS 13.0+ (Ventura) | macOS 14.2+ (Sonoma / Sequoia+) |
 |---|:---:|:---:|
-| Menu Bar Synchronized Lyrics & Marquee | Supported | Supported |
-| Floating HUD Window & Word Karaoke | Supported | Supported |
+| 60 FPS GPU-Native Menu Bar Lyrics & Marquee | Supported | Supported |
+| 60 FPS Floating HUD Window & Word Karaoke | Supported | Supported |
 | Click-to-Seek & Playback Controls | Supported | Supported |
-| Ultra-Light Mode (Settings Toggle) | Auto-ON | Auto on Intel / Low Power |
-| Full Multi-Layer Glass & 3D Genie | Optional (via Toggle) | Supported |
+| Reduce Glass & Blur Effects (60 FPS Lightweight) | Auto-ON (Toggleable) | Auto on Intel / Low Power |
+| Full Multi-Pass `CABackdropLayer` Glass & 3D Genie | Optional (via Toggle) | Supported |
 | Live CoreAudio Process Tap Visualizer | Greyed out (`Requires macOS 14.2+`) | Supported |
 | Force Touch Beat-Synced Haptics | Greyed out (`Requires macOS 14.2+`) | Supported |
 
@@ -124,8 +122,8 @@ Unsupported system-tap features on macOS 13 Ventura are **automatically greyed o
 ### 2. Force Touch Actuator Driver (`MultitouchSupport.framework`)
 - Communicates with the trackpad actuator via Apple's private `MultitouchSupport.framework` (`MTActuatorCreateFromDeviceID`, `MTActuatorOpen`, `MTActuatorActuate`) matched through `IOKit`, compensating for mechanical rise time ($T_{\text{haptic}} = T_{\text{dac}} - 5\,\text{ms}$).
 
-### 3. Event-Driven IPC & Monotonic Clock Interpolation
-- Subscribes to `DistributedNotificationCenter` events from Spotify and Apple Music alongside low-priority coalesced AppleScript polling (`1.5s` Standard / `3.0s` Ultra-Light) and monotonic clock interpolation:
+### 3. Precompiled Event-Driven IPC & Monotonic Clock Interpolation
+- Subscribes to `DistributedNotificationCenter` events from Spotify and Apple Music alongside precompiled `NSAppleScript` polling (`2.0s`, `tolerance = 0.4s` on a dedicated `.utility` serial queue) and monotonic clock interpolation:
   $$t_{\text{current}} = t_{\text{polled}} + (t_{\text{now}} - t_{\text{poll}})$$
 
 ### 4. Audio Spectrum Analysis (`vDSP` FFT)
@@ -188,10 +186,11 @@ SpoticatMenuBar/
 │   └── LyricsMenuBar/
 │       ├── Info.plist                  # Universal bundle metadata (LSMinimumSystemVersion 13.0)
 │       ├── AppSettings.swift           # Capability detection, Ultra-Light Mode & defaults
-│       ├── LyricsMenuBarApp.swift      # App entry point, adaptive menu bar engine & HUD panel
-│       ├── ContentView.swift           # Floating HUD, LazyVStack lyrics stream & settings menu
+│       ├── LyricsMenuBarApp.swift      # App entry point, 60 FPS CVDisplayLink & HUD panel
+│       ├── MenuBarCanvasView.swift     # GPU-native CALayer menu bar renderer (0 per-frame redraws)
+│       ├── ContentView.swift           # Floating HUD, 1-mask 60 FPS karaoke & settings menu
 │       ├── HUDGlassView.swift          # Adaptive AppKit / CABackdropLayer glass backdrop
-│       ├── MusicService.swift          # Event-driven Spotify & Apple Music IPC bridge
+│       ├── MusicService.swift          # Precompiled AppleScript & notification IPC bridge
 │       ├── LyricsService.swift         # Lyrics fetching, LRU cache & syllable timing calculator
 │       ├── ArtworkLoader.swift         # URL sanitizer, compact downscaler & NSCache artwork store
 │       ├── AudioAnalyzer.swift         # CoreAudio Process Tap & vDSP FFT analyzer (macOS 14.2+)

@@ -2,6 +2,203 @@ import Foundation
 import Combine
 import AppKit
 
+// MARK: - Precompiled AppleScript Runner (Compiles once lazily on dedicated serial utility queue)
+private final class CompiledAppleScriptRunner: @unchecked Sendable {
+    static let shared = CompiledAppleScriptRunner()
+    
+    private let queue = DispatchQueue(label: "com.lyricsmenubar.applescript", qos: .utility)
+    private var spotifyScript: NSAppleScript?
+    private var appleMusicScript: NSAppleScript?
+    
+    private static let spotifySource = """
+    if application "Spotify" is running then
+        tell application "Spotify"
+            set trackName to name of current track
+            set trackArtist to artist of current track
+            set trackAlbum to album of current track
+            set trackId to id of current track
+            set trackDuration to duration of current track
+            try
+                set trackArtworkURL to artwork url of current track
+            on error
+                set trackArtworkURL to ""
+            end try
+            set playerState to player state as string
+            set playerPosition to player position
+            return {trackName, trackArtist, trackAlbum, trackId, trackDuration, trackArtworkURL, playerState, playerPosition}
+        end tell
+    else
+        return "NOT_RUNNING"
+    end if
+    """
+    
+    private static let appleMusicSource = """
+    if application "Music" is running then
+        tell application "Music"
+            try
+                set pState to player state as string
+                if pState is not "stopped" then
+                    set t to current track
+                    set tName to name of t
+                    set tArtist to artist of t
+                    set tAlbum to album of t
+                    try
+                        set tId to persistent ID of t
+                    on error
+                        set tId to ""
+                    end try
+                    set tDur to duration of t
+                    try
+                        set tPos to player position
+                    on error
+                        set tPos to 0
+                    end try
+                    return {tName, tArtist, tAlbum, tId, tDur, tPos, pState}
+                else
+                    return "STOPPED"
+                end if
+            on error
+                return "NOT_PLAYING"
+            end try
+        end tell
+    else
+        return "NOT_RUNNING"
+    end if
+    """
+    
+    func poll(
+        mode: MusicSourceMode,
+        activeSource: MusicSourceMode
+    ) async -> (track: MusicTrack?, isPlaying: Bool, position: Double, source: MusicSourceMode, isNotRunning: Bool) {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                switch mode {
+                case .spotify:
+                    let s = self.runSpotify()
+                    continuation.resume(returning: (s.track, s.isPlaying, s.position, .spotify, s.isNotRunning))
+                case .appleMusic:
+                    let m = self.runAppleMusic()
+                    continuation.resume(returning: (m.track, m.isPlaying, m.position, .appleMusic, m.isNotRunning))
+                case .auto:
+                    let isSpotifyRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").contains { !$0.isTerminated }
+                    let isMusicRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").contains { !$0.isTerminated }
+                    
+                    if isMusicRunning && !isSpotifyRunning {
+                        let m = self.runAppleMusic()
+                        continuation.resume(returning: (m.track, m.isPlaying, m.position, .appleMusic, m.isNotRunning))
+                    } else if isSpotifyRunning && !isMusicRunning {
+                        let s = self.runSpotify()
+                        continuation.resume(returning: (s.track, s.isPlaying, s.position, .spotify, s.isNotRunning))
+                    } else if !isSpotifyRunning && !isMusicRunning {
+                        continuation.resume(returning: (nil, false, 0, activeSource, true))
+                    } else if activeSource == .appleMusic {
+                        let m = self.runAppleMusic()
+                        if m.isPlaying {
+                            continuation.resume(returning: (m.track, true, m.position, .appleMusic, false))
+                            return
+                        }
+                        let s = self.runSpotify()
+                        if s.isPlaying {
+                            continuation.resume(returning: (s.track, true, s.position, .spotify, false))
+                            return
+                        }
+                        continuation.resume(returning: (m.track, false, m.position, .appleMusic, m.isNotRunning))
+                    } else {
+                        let s = self.runSpotify()
+                        if s.isPlaying {
+                            continuation.resume(returning: (s.track, true, s.position, .spotify, false))
+                            return
+                        }
+                        let m = self.runAppleMusic()
+                        if m.isPlaying {
+                            continuation.resume(returning: (m.track, true, m.position, .appleMusic, false))
+                            return
+                        }
+                        continuation.resume(returning: (s.track, false, s.position, .spotify, s.isNotRunning))
+                    }
+                }
+            }
+        }
+    }
+    
+    private func runSpotify() -> (track: MusicTrack?, isPlaying: Bool, position: Double, isNotRunning: Bool) {
+        if spotifyScript == nil, let s = NSAppleScript(source: Self.spotifySource) {
+            var err: NSDictionary?
+            s.compileAndReturnError(&err)
+            spotifyScript = s
+        }
+        guard let script = spotifyScript else { return (nil, false, 0, false) }
+        var error: NSDictionary?
+        let output = script.executeAndReturnError(&error)
+        if output.stringValue == "NOT_RUNNING" {
+            return (nil, false, 0, true)
+        }
+        if output.numberOfItems >= 8 {
+            let name = output.atIndex(1)?.stringValue ?? ""
+            let artist = output.atIndex(2)?.stringValue ?? ""
+            let album = output.atIndex(3)?.stringValue ?? ""
+            let id = output.atIndex(4)?.stringValue ?? ""
+            let durRaw = output.atIndex(5)?.doubleValue ?? Double(output.atIndex(5)?.int32Value ?? 0)
+            let duration = durRaw / 1000.0
+            let artworkURL = output.atIndex(6)?.stringValue ?? ""
+            let state = output.atIndex(7)?.stringValue ?? ""
+            let position = output.atIndex(8)?.doubleValue ?? 0.0
+            
+            let track = MusicTrack(
+                id: id,
+                name: name,
+                artist: artist,
+                album: album,
+                artworkURL: artworkURL.isEmpty ? nil : artworkURL,
+                artworkData: nil,
+                duration: duration,
+                source: .spotify
+            )
+            return (track, state == "playing", position, false)
+        }
+        return (nil, false, 0, false)
+    }
+    
+    private func runAppleMusic() -> (track: MusicTrack?, isPlaying: Bool, position: Double, isNotRunning: Bool) {
+        if appleMusicScript == nil, let s = NSAppleScript(source: Self.appleMusicSource) {
+            var err: NSDictionary?
+            s.compileAndReturnError(&err)
+            appleMusicScript = s
+        }
+        guard let script = appleMusicScript else { return (nil, false, 0, false) }
+        var error: NSDictionary?
+        let output = script.executeAndReturnError(&error)
+        if output.stringValue == "NOT_RUNNING" {
+            return (nil, false, 0, true)
+        }
+        if output.stringValue == "STOPPED" || output.stringValue == "NOT_PLAYING" {
+            return (nil, false, 0, false)
+        }
+        if output.numberOfItems >= 7 {
+            let name = output.atIndex(1)?.stringValue ?? ""
+            let artist = output.atIndex(2)?.stringValue ?? ""
+            let album = output.atIndex(3)?.stringValue ?? ""
+            let id = "apple:\(name)-\(artist)"
+            let duration = output.atIndex(5)?.doubleValue ?? 0.0
+            let position = output.atIndex(6)?.doubleValue ?? 0.0
+            let state = output.atIndex(7)?.stringValue ?? ""
+            
+            let track = MusicTrack(
+                id: id,
+                name: name,
+                artist: artist,
+                album: album,
+                artworkURL: nil,
+                artworkData: nil,
+                duration: duration,
+                source: .appleMusic
+            )
+            return (track, state == "playing", position, false)
+        }
+        return (nil, false, 0, false)
+    }
+}
+
 public enum MusicSourceMode: String, CaseIterable, Identifiable, Sendable {
     case auto = "Auto"
     case spotify = "Spotify"
@@ -295,14 +492,12 @@ public final class MusicService: NSObject, ObservableObject {
     public func startPolling() {
         timer?.invalidate()
         timer = nil
-        let isUltraLight = AppPerformance.isUltraLightMode
-        let interval: TimeInterval = isUltraLight ? 3.0 : 1.5
-        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollActivePlayer()
             }
         }
-        t.tolerance = isUltraLight ? 0.5 : 0.25
+        t.tolerance = 0.4
         timer = t
         RunLoop.main.add(t, forMode: .common)
         pollActivePlayer()
@@ -325,20 +520,9 @@ public final class MusicService: NSObject, ObservableObject {
         
         let mode = self.sourceMode
         let active = self.activeSource
-        Task.detached(priority: .utility) { [weak self] in
-            let res: (track: MusicTrack?, isPlaying: Bool, position: Double, source: MusicSourceMode, isNotRunning: Bool)
-            switch mode {
-            case .spotify:
-                let s = Self.executeSpotifyScript()
-                res = (s.track, s.isPlaying, s.position, .spotify, s.isNotRunning)
-            case .appleMusic:
-                let m = Self.executeAppleMusicScript()
-                res = (m.track, m.isPlaying, m.position, .appleMusic, m.isNotRunning)
-            case .auto:
-                let a = Self.executeAutoDetectScript(activeSource: active)
-                res = (a.track, a.isPlaying, a.position, a.source, a.isNotRunning)
-            }
-            await self?.applyPollResult(res)
+        Task { [weak self] in
+            let res = await CompiledAppleScriptRunner.shared.poll(mode: mode, activeSource: active)
+            self?.applyPollResult(res)
         }
     }
     
@@ -369,163 +553,7 @@ public final class MusicService: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Standalone AppleScript Helpers (Zero Self Capture)
-    
-    nonisolated private static func executeSpotifyScript() -> (track: MusicTrack?, isPlaying: Bool, position: Double, isNotRunning: Bool) {
-        let script = """
-        if application "Spotify" is running then
-            tell application "Spotify"
-                set trackName to name of current track
-                set trackArtist to artist of current track
-                set trackAlbum to album of current track
-                set trackId to id of current track
-                set trackDuration to duration of current track
-                try
-                    set trackArtworkURL to artwork url of current track
-                on error
-                    set trackArtworkURL to ""
-                end try
-                set playerState to player state as string
-                set playerPosition to player position
-                return {trackName, trackArtist, trackAlbum, trackId, trackDuration, trackArtworkURL, playerState, playerPosition}
-            end tell
-        else
-            return "NOT_RUNNING"
-        end if
-        """
-        
-        var error: NSDictionary?
-        guard let appleScript = NSAppleScript(source: script) else { return (nil, false, 0, false) }
-        let output = appleScript.executeAndReturnError(&error)
-        if output.stringValue == "NOT_RUNNING" {
-            return (nil, false, 0, true)
-        }
-        if output.numberOfItems >= 8 {
-            let name = output.atIndex(1)?.stringValue ?? ""
-            let artist = output.atIndex(2)?.stringValue ?? ""
-            let album = output.atIndex(3)?.stringValue ?? ""
-            let id = output.atIndex(4)?.stringValue ?? ""
-            let durRaw = output.atIndex(5)?.doubleValue ?? Double(output.atIndex(5)?.int32Value ?? 0)
-            let duration = durRaw / 1000.0
-            let artworkURL = output.atIndex(6)?.stringValue ?? ""
-            let state = output.atIndex(7)?.stringValue ?? ""
-            let position = output.atIndex(8)?.doubleValue ?? 0.0
-            
-            let track = MusicTrack(
-                id: id,
-                name: name,
-                artist: artist,
-                album: album,
-                artworkURL: artworkURL.isEmpty ? nil : artworkURL,
-                artworkData: nil,
-                duration: duration,
-                source: .spotify
-            )
-            return (track, state == "playing", position, false)
-        }
-        return (nil, false, 0, false)
-    }
-    
-    nonisolated private static func executeAppleMusicScript() -> (track: MusicTrack?, isPlaying: Bool, position: Double, isNotRunning: Bool) {
-        let script = """
-        if application "Music" is running then
-            tell application "Music"
-                try
-                    set pState to player state as string
-                    if pState is not "stopped" then
-                        set t to current track
-                        set tName to name of t
-                        set tArtist to artist of t
-                        set tAlbum to album of t
-                        try
-                            set tId to persistent ID of t
-                        on error
-                            set tId to ""
-                        end try
-                        set tDur to duration of t
-                        try
-                            set tPos to player position
-                        on error
-                            set tPos to 0
-                        end try
-                        return {tName, tArtist, tAlbum, tId, tDur, tPos, pState}
-                    else
-                        return "STOPPED"
-                    end if
-                on error
-                    return "NOT_PLAYING"
-                end try
-            end tell
-        else
-            return "NOT_RUNNING"
-        end if
-        """
-        
-        var error: NSDictionary?
-        guard let appleScript = NSAppleScript(source: script) else { return (nil, false, 0, false) }
-        let output = appleScript.executeAndReturnError(&error)
-        if output.stringValue == "NOT_RUNNING" {
-            return (nil, false, 0, true)
-        }
-        if output.stringValue == "STOPPED" || output.stringValue == "NOT_PLAYING" {
-            return (nil, false, 0, false)
-        }
-        if output.numberOfItems >= 7 {
-            let name = output.atIndex(1)?.stringValue ?? ""
-            let artist = output.atIndex(2)?.stringValue ?? ""
-            let album = output.atIndex(3)?.stringValue ?? ""
-            let id = "apple:\(name)-\(artist)"
-            let duration = output.atIndex(5)?.doubleValue ?? 0.0
-            let position = output.atIndex(6)?.doubleValue ?? 0.0
-            let state = output.atIndex(7)?.stringValue ?? ""
-            
-            let track = MusicTrack(
-                id: id,
-                name: name,
-                artist: artist,
-                album: album,
-                artworkURL: nil,
-                artworkData: nil,
-                duration: duration,
-                source: .appleMusic
-            )
-            return (track, state == "playing", position, false)
-        }
-        return (nil, false, 0, false)
-    }
-    
-    nonisolated private static func executeAutoDetectScript(activeSource: MusicSourceMode) -> (track: MusicTrack?, isPlaying: Bool, position: Double, source: MusicSourceMode, isNotRunning: Bool) {
-        let isSpotifyRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").contains { !$0.isTerminated }
-        let isMusicRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").contains { !$0.isTerminated }
-        
-        if isMusicRunning && !isSpotifyRunning {
-            let m = executeAppleMusicScript()
-            return (m.track, m.isPlaying, m.position, .appleMusic, m.isNotRunning)
-        }
-        if isSpotifyRunning && !isMusicRunning {
-            let s = executeSpotifyScript()
-            return (s.track, s.isPlaying, s.position, .spotify, s.isNotRunning)
-        }
-        if !isSpotifyRunning && !isMusicRunning {
-            return (nil, false, 0, activeSource, true)
-        }
-        
-        if activeSource == .appleMusic {
-            let m = executeAppleMusicScript()
-            if m.isPlaying { return (m.track, true, m.position, .appleMusic, false) }
-            let s = executeSpotifyScript()
-            if s.isPlaying { return (s.track, true, s.position, .spotify, false) }
-            // Neither is actively playing: stay on activeSource (Apple Music), NEVER fall back to Spotify
-            return (m.track, false, m.position, .appleMusic, m.isNotRunning)
-        } else {
-            let s = executeSpotifyScript()
-            if s.isPlaying { return (s.track, true, s.position, .spotify, false) }
-            let m = executeAppleMusicScript()
-            if m.isPlaying { return (m.track, true, m.position, .appleMusic, false) }
-            // Neither is actively playing: stay on activeSource (Spotify), NEVER fall back to Apple Music
-            return (s.track, false, s.position, .spotify, s.isNotRunning)
-        }
-    }
+    // MARK: - Apple Music Artwork Helper
     
     nonisolated private static func fetchAppleMusicArtworkData(expectedID: String) -> (persistentID: String, data: Data?) {
         let escapedID = expectedID.replacingOccurrences(of: "\"", with: "\\\"")
