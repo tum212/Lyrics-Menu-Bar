@@ -108,9 +108,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var currentMenuBarArtScale: CGFloat = 1.0
     private var currentMenuBarArtOpacity: CGFloat = 1.0
     
-    private var lastShowWaveform = true
+    private var lastWaveformBarsCount: Int = -1
     private var lastShowAlbumArt = true
     private var lastShowLyrics = true
+    private var cachedWaveformBars: Int = 14
+    private var cachedShowAlbumArt: Bool = true
+    private var cachedShowLyrics: Bool = true
+    private var cachedLyricsMaxWidth: Int = 200
+    private var currentTimerInterval: TimeInterval = 0
+    private var lastMeasuredText: String = ""
+    private var lastMeasuredSize: NSSize = .zero
+    private let menuBarFont = NSFont.systemFont(ofSize: 14, weight: .regular)
+    private lazy var menuBarAttributes: [NSAttributedString.Key: Any] = {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .left
+        paragraphStyle.lineBreakMode = .byTruncatingTail
+        return [.font: menuBarFont, .paragraphStyle: paragraphStyle]
+    }()
     var cancellables = Set<AnyCancellable>()
     // Lyrics Animation State
     var lastLyricsId: UUID?
@@ -147,6 +161,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.accessory)
         
         AppDefaults.register()
+        refreshCachedPrefs()
+        NotificationCenter.default.addObserver(self, selector: #selector(handleUserDefaultsChanged), name: UserDefaults.didChangeNotification, object: nil)
         
         let contentView = ContentView(
             musicService: spotify,
@@ -210,6 +226,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     self.lyricsService.lyrics = []
                     self.audioAnalyzer.stop()
                 }
+                self.syncMenuBarTimerState()
+                self.updateMenuBar()
             }
             .store(in: &cancellables)
             
@@ -217,18 +235,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isPlaying in
                 guard let self = self else { return }
-                let waveformBars = UserDefaults.standard.integer(forKey: "waveformBars")
-                let featuresEnabled = UserDefaults.standard.bool(forKey: "audioFeaturesEnabled")
-                if isPlaying && waveformBars > 0 && featuresEnabled {
-                    self.audioAnalyzer.start()
-                } else {
-                    self.audioAnalyzer.stop()
+                if !AppEdition.isLite {
+                    let waveformBars = self.cachedWaveformBars
+                    let featuresEnabled = UserDefaults.standard.bool(forKey: "audioFeaturesEnabled")
+                    if isPlaying && waveformBars > 0 && featuresEnabled {
+                        self.audioAnalyzer.start()
+                    } else {
+                        self.audioAnalyzer.stop()
+                    }
                 }
+                self.syncMenuBarTimerState()
+                self.updateMenuBar()
             }
             .store(in: &cancellables)
         
-        // Start live updating the Menu Bar at 60fps / CVDisplayLink
-        startMenuBarUpdater()
+        spotify.$artworkRevision
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateMenuBar()
+            }
+            .store(in: &cancellables)
+        
+        lyricsService.$lyrics
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.forceRedrawLyrics = true
+                self?.updateMenuBar()
+            }
+            .store(in: &cancellables)
+        
+        // Start adaptive Menu Bar updater (12 FPS playing / 0 FPS idle in Lite; 60 FPS in Standard)
+        syncMenuBarTimerState()
+        updateMenuBar()
     }
     
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -273,6 +311,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let geom = computeButtonGeometry()
         panel.setFrame(NSRect(x: geom.xPos, y: geom.yPos, width: 480, height: 240), display: true)
         panel.invalidateShadow()
+        
+        if AppEdition.isLite {
+            // Ultra-lightweight snappy 2D open animation for Intel iGPU (zero 3D perspective / spring cost)
+            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.position = CGPoint(x: 240, y: 120)
+            let startTransform = CATransform3DMakeScale(0.97, 0.97, 1.0)
+            layer.transform = startTransform
+            layer.opacity = 0.0
+            
+            spotify.isPanelVisible = true
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            
+            let scaleAnim = CABasicAnimation(keyPath: "transform")
+            scaleAnim.fromValue = NSValue(caTransform3D: startTransform)
+            scaleAnim.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+            scaleAnim.duration = 0.13
+            scaleAnim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            
+            let fadeAnim = CABasicAnimation(keyPath: "opacity")
+            fadeAnim.fromValue = 0.0
+            fadeAnim.toValue = 1.0
+            fadeAnim.duration = 0.13
+            fadeAnim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            
+            CATransaction.begin()
+            CATransaction.setCompletionBlock { [weak self] in
+                layer.transform = CATransform3DIdentity
+                layer.opacity = 1.0
+                self?.isGenieAnimating = false
+            }
+            layer.add(scaleAnim, forKey: "liteOpenTransform")
+            layer.add(fadeAnim, forKey: "liteOpenOpacity")
+            layer.transform = CATransform3DIdentity
+            layer.opacity = 1.0
+            CATransaction.commit()
+            return
+        }
         
         // 1. Setup Layer Geometry for Top Anchor Point directly beneath Menu Bar Item
         let anchor = CGPoint(x: geom.anchorX, y: 1.0)
@@ -324,6 +400,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func animateGenieClose() {
         guard self.panel != nil, let glassView = self.glassView, let layer = glassView.layer else { return }
         isGenieAnimating = true
+        
+        if AppEdition.isLite {
+            let fadeAnim = CABasicAnimation(keyPath: "opacity")
+            fadeAnim.fromValue = 1.0
+            fadeAnim.toValue = 0.0
+            fadeAnim.duration = 0.10
+            fadeAnim.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            
+            CATransaction.begin()
+            CATransaction.setCompletionBlock { [weak self] in
+                guard let self = self else { return }
+                self.spotify.isPanelVisible = false
+                self.panel.orderOut(nil)
+                layer.opacity = 1.0
+                self.isGenieAnimating = false
+            }
+            layer.add(fadeAnim, forKey: "liteCloseOpacity")
+            layer.opacity = 0.0
+            CATransaction.commit()
+            return
+        }
         
         let geom = computeButtonGeometry()
         let anchor = CGPoint(x: geom.anchorX, y: 1.0)
@@ -378,7 +475,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         stopMenuBarUpdater()
         audioAnalyzer.stop()
-        HapticManager.shared.teardown()
+        if !AppEdition.isLite {
+            HapticManager.shared.teardown()
+        }
         spotify.cleanup()
     }
     
@@ -410,14 +509,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     
-    func startMenuBarUpdater() {
-        stopMenuBarUpdater()
+    private func refreshCachedPrefs() {
+        let ud = UserDefaults.standard
+        if ud.object(forKey: "waveformBars") != nil {
+            cachedWaveformBars = min(128, max(0, ud.integer(forKey: "waveformBars")))
+        } else {
+            cachedWaveformBars = AppEdition.isLite ? 0 : 14
+        }
+        cachedShowAlbumArt = ud.object(forKey: "showAlbumArt") != nil ? ud.bool(forKey: "showAlbumArt") : true
+        cachedShowLyrics = ud.object(forKey: "showLyrics") != nil ? ud.bool(forKey: "showLyrics") : true
+        if ud.object(forKey: "lyricsMaxWidth") != nil {
+            cachedLyricsMaxWidth = ud.integer(forKey: "lyricsMaxWidth")
+        } else {
+            cachedLyricsMaxWidth = 200
+        }
+    }
+    
+    @objc private func handleUserDefaultsChanged() {
+        refreshCachedPrefs()
+        forceRedrawLyrics = true
+        updateMenuBar()
+    }
+    
+    func syncMenuBarTimerState() {
+        let desiredInterval: TimeInterval
+        if AppEdition.isLite {
+            // Lite mode: 0 Hz when idle or paused (zero CPU wakeups), 12 FPS when playing
+            if spotify.currentTrack != nil && spotify.isPlaying {
+                desiredInterval = 1.0 / 12.0
+            } else {
+                desiredInterval = 0
+            }
+        } else {
+            // Standard mode: 2 Hz idle check when no track, 60 FPS when track present
+            desiredInterval = (spotify.currentTrack == nil) ? 0.5 : (1.0 / 60.0)
+        }
         
-        // 60 FPS menu bar timer on .common RunLoop (Silky smooth 60 FPS)
-        let timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
-        timer.tolerance = 0.001
+        if desiredInterval == currentTimerInterval && (desiredInterval == 0 ? updateTimer == nil : updateTimer != nil) {
+            return
+        }
+        
+        stopMenuBarUpdater()
+        currentTimerInterval = desiredInterval
+        
+        guard desiredInterval > 0 else { return }
+        let timer = Timer.scheduledTimer(timeInterval: desiredInterval, target: self, selector: #selector(timerTick), userInfo: nil, repeats: true)
+        timer.tolerance = AppEdition.isLite ? 0.025 : (desiredInterval >= 0.5 ? 0.2 : 0.002)
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
+    }
+    
+    func startMenuBarUpdater() {
+        syncMenuBarTimerState()
     }
     
     func stopMenuBarUpdater() {
@@ -427,6 +570,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         updateTimer?.invalidate()
         updateTimer = nil
+        currentTimerInterval = 0
     }
     
     @objc private func timerTick() {
@@ -462,24 +606,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         var deltaTime = now.timeIntervalSince(lastFrameTime)
         lastFrameTime = now
-        if deltaTime > 0.1 || deltaTime <= 0 { deltaTime = 0.016 }
+        if deltaTime > 0.25 || deltaTime <= 0 { deltaTime = AppEdition.isLite ? (1.0 / 12.0) : 0.016 }
         
-        var waveformBars = 14
-        if UserDefaults.standard.object(forKey: "waveformBars") != nil {
-            waveformBars = min(128, max(0, UserDefaults.standard.integer(forKey: "waveformBars")))
-        }
-        let showAlbumArt = UserDefaults.standard.bool(forKey: "showAlbumArt")
-        let showLyrics = UserDefaults.standard.bool(forKey: "showLyrics")
+        let waveformBars = cachedWaveformBars
+        let showAlbumArt = cachedShowAlbumArt
+        let showLyrics = cachedShowLyrics
         
         // Pass dynamic band count to audio analyzer
-        if waveformBars > 0 {
+        if waveformBars > 0 && !AppEdition.isLite {
             audioAnalyzer.updateBandCount(waveformBars)
         }
         
         // Check for state changes to force redraw
-        let prefsChanged = (waveformBars != UserDefaults.standard.integer(forKey: "lastWaveformBars") || showAlbumArt != lastShowAlbumArt || showLyrics != lastShowLyrics)
+        let prefsChanged = (waveformBars != lastWaveformBarsCount || showAlbumArt != lastShowAlbumArt || showLyrics != lastShowLyrics)
         if prefsChanged {
-            UserDefaults.standard.set(waveformBars, forKey: "lastWaveformBars")
+            lastWaveformBarsCount = waveformBars
             lastShowAlbumArt = showAlbumArt
             lastShowLyrics = showLyrics
         }
@@ -496,7 +637,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let primaryTextColor = isDark ? NSColor.white : NSColor(white: 0.1, alpha: 1.0)
             
             let sparkleTime = now.timeIntervalSince(trackChangedTime)
-            let isSparkling = lyricsService.isLoading || sparkleTime < 5.5
+            let isSparkling = !AppEdition.isLite && (lyricsService.isLoading || sparkleTime < 5.5)
             
             if lastTrackIdForSparkle != track.id {
                 lastTrackIdForSparkle = track.id
@@ -566,12 +707,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             
             lastLyricsId = (allLyrics.isEmpty || isIntro) ? nil : allLyrics[currentIndex].id
             
-            let font = NSFont.systemFont(ofSize: 14, weight: .regular)
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.alignment = .left
-            paragraphStyle.lineBreakMode = .byTruncatingTail
-            let attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: paragraphStyle]
-            let textSize = currentLineText.size(withAttributes: attributes)
+            let attributes = menuBarAttributes
+            let textSize: NSSize
+            if currentLineText == lastMeasuredText {
+                textSize = lastMeasuredSize
+            } else {
+                textSize = currentLineText.size(withAttributes: attributes)
+                lastMeasuredText = currentLineText
+                lastMeasuredSize = textSize
+            }
             
             var progress = 0.0
             var wordLeadX: CGFloat? = nil
@@ -660,10 +804,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             
             let glowPad: CGFloat = 6
             
-            var lyricsMaxWidth = 200
-            if UserDefaults.standard.object(forKey: "lyricsMaxWidth") != nil {
-                lyricsMaxWidth = UserDefaults.standard.integer(forKey: "lyricsMaxWidth")
-            }
+            let lyricsMaxWidth = cachedLyricsMaxWidth
             let maxW = CGFloat(lyricsMaxWidth)
             let safeCap = getNotchSafeMaxWidth()
             let effectiveMaxW = min(maxW, safeCap)
@@ -769,13 +910,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     text: currentLineText,
                     canvasWidth: canvasWidth,
                     isDark: isDark,
-                    marqueeOffsetQuantized: Int(marqueeOffset * 2.0),
-                    wordLeadXQuantized: Int((wordLeadX ?? -100.0) * 2.0),
-                    transitionProgressQuantized: Int(transitionProgress * 100.0),
+                    marqueeOffsetQuantized: AppEdition.isLite ? Int(marqueeOffset) : Int(marqueeOffset * 2.0),
+                    wordLeadXQuantized: AppEdition.isLite ? Int((wordLeadX ?? -100.0) / 3.0) : Int((wordLeadX ?? -100.0) * 2.0),
+                    transitionProgressQuantized: AppEdition.isLite ? Int(transitionProgress * 20.0) : Int(transitionProgress * 100.0),
                     isSparkling: isSparkling,
                     sparkleFrame: isSparkling ? Int(sparkleTime * 60.0) : 0,
                     isInterlude: isInterlude,
-                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 60.0) : 0
+                    interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * (AppEdition.isLite ? 10.0 : 60.0)) : 0
                 )
                 
                 if currentLyricsKey == lastLyricsRenderKey, let cached = cachedLyricsImage {
@@ -828,11 +969,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         let center = NSPoint(x: startX + CGFloat(sIdx) * spacing, y: centerY)
                         
                         NSGraphicsContext.current?.saveGraphicsState()
-                        let shadow = NSShadow()
-                        shadow.shadowColor = primaryTextColor.withAlphaComponent(alpha * 0.85)
-                        shadow.shadowBlurRadius = 5.0
-                        shadow.shadowOffset = .zero
-                        shadow.set()
+                        if !AppEdition.isLite {
+                            let shadow = NSShadow()
+                            shadow.shadowColor = primaryTextColor.withAlphaComponent(alpha * 0.85)
+                            shadow.shadowBlurRadius = 5.0
+                            shadow.shadowOffset = .zero
+                            shadow.set()
+                        }
                         
                         let path = NSBezierPath()
                         path.move(to: NSPoint(x: center.x, y: center.y + s))
@@ -865,34 +1008,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         } else {
                             leadX = (safeSize.width + fadeWidth) * CGFloat(progress) - fadeWidth
                         }
-                        let leadStart = max(0, leadX)
-                        let leadEnd = min(safeSize.width, leadX + fadeWidth)
-                        
-                        let highlightedImg = NSImage(size: safeSize)
-                        highlightedImg.lockFocus()
-                        currentWhite.draw(at: .zero, from: NSRect(origin: .zero, size: safeSize), operation: .copy, fraction: 1.0)
-                        
-                        NSGraphicsContext.current?.compositingOperation = .destinationIn
-                        if leadStart > 0 {
-                            primaryTextColor.setFill()
-                            NSRect(x: 0, y: 0, width: leadStart, height: safeSize.height).fill()
-                        }
-                        if leadEnd > leadStart, let grad = NSGradient(colors: [primaryTextColor, NSColor.clear]) {
-                            grad.draw(from: NSPoint(x: leadStart, y: 0), to: NSPoint(x: leadEnd, y: 0), options: [])
-                        }
-                        if leadEnd < safeSize.width {
-                            NSColor.clear.setFill()
-                            NSRect(x: leadEnd, y: 0, width: safeSize.width - leadEnd, height: safeSize.height).fill()
-                        }
-                        highlightedImg.unlockFocus()
-                        
                         let textPoint1 = NSPoint(x: glowPad + marqueeOffset, y: yOffsetNew)
-                        highlightedImg.draw(at: textPoint1, from: .zero, operation: .sourceOver, fraction: alphaNew)
-                        self.lastRenderedHighlightedImage = highlightedImg
+                        
+                        if AppEdition.isLite {
+                            // Zero-allocation clipped highlight draw for Lite (no temporary NSImage or NSGradient)
+                            let clipWidth = max(0, min(safeSize.width, leadX + fadeWidth * 0.5))
+                            if clipWidth > 0 {
+                                NSGraphicsContext.current?.saveGraphicsState()
+                                NSBezierPath.clip(NSRect(x: textPoint1.x, y: 0, width: clipWidth, height: 20))
+                                currentWhite.draw(at: textPoint1, from: .zero, operation: .sourceOver, fraction: alphaNew)
+                                NSGraphicsContext.current?.restoreGraphicsState()
+                            }
+                        } else {
+                            let leadStart = max(0, leadX)
+                            let leadEnd = min(safeSize.width, leadX + fadeWidth)
+                            
+                            let highlightedImg = NSImage(size: safeSize)
+                            highlightedImg.lockFocus()
+                            currentWhite.draw(at: .zero, from: NSRect(origin: .zero, size: safeSize), operation: .copy, fraction: 1.0)
+                            
+                            NSGraphicsContext.current?.compositingOperation = .destinationIn
+                            if leadStart > 0 {
+                                primaryTextColor.setFill()
+                                NSRect(x: 0, y: 0, width: leadStart, height: safeSize.height).fill()
+                            }
+                            if leadEnd > leadStart, let grad = NSGradient(colors: [primaryTextColor, NSColor.clear]) {
+                                grad.draw(from: NSPoint(x: leadStart, y: 0), to: NSPoint(x: leadEnd, y: 0), options: [])
+                            }
+                            if leadEnd < safeSize.width {
+                                NSColor.clear.setFill()
+                                NSRect(x: leadEnd, y: 0, width: safeSize.width - leadEnd, height: safeSize.height).fill()
+                            }
+                            highlightedImg.unlockFocus()
+                            
+                            highlightedImg.draw(at: textPoint1, from: .zero, operation: .sourceOver, fraction: alphaNew)
+                            self.lastRenderedHighlightedImage = highlightedImg
+                        }
                     }
                 }
                 let totalSparkleDuration = 5.5
-                let isSparkling = lyricsService.isLoading || (sparkleTime < totalSparkleDuration && currentLineText == trackName)
+                let isSparkling = !AppEdition.isLite && (lyricsService.isLoading || (sparkleTime < totalSparkleDuration && currentLineText == trackName))
                 
                 if isSparkling {
                     let cycleTime = lyricsService.isLoading ? sparkleTime.truncatingRemainder(dividingBy: totalSparkleDuration) : sparkleTime
@@ -978,9 +1133,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             
             if let directImage = spotify.activeArtworkImage {
                 let roundedImage = self.roundCorners(of: directImage, size: NSSize(width: 20, height: 20), radius: 4)
-                let theme = ColorExtractor.extractWaveformTheme(from: directImage)
                 self.cachedAlbumArtImage = roundedImage
-                self.cachedWaveformTheme = theme
+                if cachedWaveformBars > 0 {
+                    self.cachedWaveformTheme = ColorExtractor.extractWaveformTheme(from: directImage)
+                } else {
+                    self.cachedWaveformTheme = .fallback
+                }
             } else {
                 let fallback = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)
                 fallback?.isTemplate = true
@@ -989,11 +1147,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         
-        var waveformBars = 14
-        if UserDefaults.standard.object(forKey: "waveformBars") != nil {
-            waveformBars = min(128, max(0, UserDefaults.standard.integer(forKey: "waveformBars")))
-        }
-        let barCount = waveformBars
+        let barCount = cachedWaveformBars
         let barW: CGFloat = 2.0
         let barSp: CGFloat = 1.5
         let vizWidth: CGFloat = (barCount > 0 && spotify.isPlaying) ? CGFloat(barCount) * (barW + barSp) : 0
@@ -1108,15 +1262,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             quantizedWidth: quantizedWidth,
             lyricsX: lyricsX,
             lyricsWidth: lyricsWidth,
-            marqueeOffsetQuantized: Int(marqueeOffset * 2.0),
-            wordLeadXQuantized: Int((wordLeadX ?? -100.0) * 2.0),
-            transitionProgressQuantized: Int(transitionProgress * 100.0),
+            marqueeOffsetQuantized: AppEdition.isLite ? Int(marqueeOffset) : Int(marqueeOffset * 2.0),
+            wordLeadXQuantized: AppEdition.isLite ? Int((wordLeadX ?? -100.0) / 3.0) : Int((wordLeadX ?? -100.0) * 2.0),
+            transitionProgressQuantized: AppEdition.isLite ? Int(transitionProgress * 20.0) : Int(transitionProgress * 100.0),
             isSparkling: isSparkling,
             sparkleFrame: isSparkling ? Int(sparkleTime * 60.0) : 0,
             isInterlude: isInterlude,
-            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * 60.0) : 0,
+            interludeFrame: isInterlude ? Int(now.timeIntervalSinceReferenceDate * (AppEdition.isLite ? 10.0 : 60.0)) : 0,
             vizWidth: vizWidth,
-            barHeightsQuantized: barHeights.map { Int($0 * 2.0) }
+            barHeightsQuantized: barHeights.map { AppEdition.isLite ? Int($0) : Int($0 * 2.0) }
         )
 
         if currentKey == lastMenuBarRenderKey && !prefsChanged && !forceRedrawLyrics {
@@ -1146,17 +1300,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 clipPath.append(NSBezierPath(roundedRect: barRect, xRadius: barW / 2.0, yRadius: barW / 2.0))
             }
             
-            // 1. Apple Music subtle bloom behind bars
+            // 1. Apple Music subtle bloom behind bars (skipped in Lite to avoid CPU Gaussian blur)
             let theme = cachedWaveformTheme
-            NSGraphicsContext.current?.saveGraphicsState()
-            let outerGlow = NSShadow()
-            outerGlow.shadowColor = theme.glowColor.withAlphaComponent(0.35)
-            outerGlow.shadowOffset = .zero
-            outerGlow.shadowBlurRadius = 3.0
-            outerGlow.set()
-            theme.glowColor.withAlphaComponent(0.15).setFill()
-            clipPath.fill()
-            NSGraphicsContext.current?.restoreGraphicsState()
+            if !AppEdition.isLite {
+                NSGraphicsContext.current?.saveGraphicsState()
+                let outerGlow = NSShadow()
+                outerGlow.shadowColor = theme.glowColor.withAlphaComponent(0.35)
+                outerGlow.shadowOffset = .zero
+                outerGlow.shadowBlurRadius = 3.0
+                outerGlow.set()
+                theme.glowColor.withAlphaComponent(0.15).setFill()
+                clipPath.fill()
+                NSGraphicsContext.current?.restoreGraphicsState()
+            }
             
             // 2. Vector gradient fill with TRUE-TONE album colors (no washed-out white wash)
             NSGraphicsContext.current?.saveGraphicsState()
@@ -1171,54 +1327,67 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSGraphicsContext.current?.restoreGraphicsState()
         }
         
-        // 3. Draw album art with iPhone Dynamic Island Spring Pop & Breathe Morph
+        // 3. Draw album art (Static clean scale in Lite / Dynamic Island Spring Pop in Standard)
         if showAlbumArt, let currentArt = cachedAlbumArtImage {
-            // Morph scale & opacity smoothly between playing (1.0) and paused (0.80) with slow, organic breathe
-            let targetScale: CGFloat = spotify.isPlaying ? 1.0 : 0.80
-            let targetOpacity: CGFloat = spotify.isPlaying ? 1.0 : 0.72
-            currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.08
-            currentMenuBarArtOpacity += (targetOpacity - currentMenuBarArtOpacity) * 0.08
-            
-            let now = CACurrentMediaTime()
-            let elapsed = now - dynamicIslandPopStartTime
-            let popDuration: TimeInterval = 0.75
-            let isPopping = (elapsed < popDuration) && (previousAlbumArtImage != nil)
-            
-            // Dynamic Island damped spring: slow, organic, luxurious pop (0.75s)
-            var popScale: CGFloat = 1.0
-            if isPopping {
-                let t = CGFloat(elapsed / popDuration)
-                let decay = exp(-4.2 * t)
-                let oscillation = cos(8.5 * t)
-                popScale = 1.0 - (decay * oscillation * 0.42)
-            }
-            
-            let effectiveScale = currentMenuBarArtScale * popScale
-            let artW: CGFloat = 20.0 * effectiveScale
-            let artH: CGFloat = 20.0 * effectiveScale
-            let yOffset: CGFloat = (20.0 - artH) / 2.0
-            let xOffset: CGFloat = (20.0 - artW) / 2.0
-            
-            if isPopping, let prevArt = previousAlbumArtImage {
-                let t = CGFloat(elapsed / popDuration)
-                let outAlpha = max(0.0, 1.0 - t * 1.5) * currentMenuBarArtOpacity
-                let inAlpha = min(1.0, t * 1.3) * currentMenuBarArtOpacity
-                
-                if outAlpha > 0.01 {
-                    prevArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
-                                 from: NSRect(origin: .zero, size: prevArt.size),
-                                 operation: .sourceOver,
-                                 fraction: outAlpha)
-                }
+            if AppEdition.isLite {
+                let effectiveScale: CGFloat = spotify.isPlaying ? 1.0 : 0.86
+                let effectiveOpacity: CGFloat = spotify.isPlaying ? 1.0 : 0.78
+                let artW: CGFloat = 20.0 * effectiveScale
+                let artH: CGFloat = 20.0 * effectiveScale
+                let yOffset: CGFloat = (20.0 - artH) / 2.0
+                let xOffset: CGFloat = (20.0 - artW) / 2.0
                 currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
                                 from: NSRect(origin: .zero, size: currentArt.size),
                                 operation: .sourceOver,
-                                fraction: inAlpha)
+                                fraction: effectiveOpacity)
             } else {
-                currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
-                                from: NSRect(origin: .zero, size: currentArt.size),
-                                operation: .sourceOver,
-                                fraction: currentMenuBarArtOpacity)
+                // Morph scale & opacity smoothly between playing (1.0) and paused (0.80) with slow, organic breathe
+                let targetScale: CGFloat = spotify.isPlaying ? 1.0 : 0.80
+                let targetOpacity: CGFloat = spotify.isPlaying ? 1.0 : 0.72
+                currentMenuBarArtScale += (targetScale - currentMenuBarArtScale) * 0.08
+                currentMenuBarArtOpacity += (targetOpacity - currentMenuBarArtOpacity) * 0.08
+                
+                let now = CACurrentMediaTime()
+                let elapsed = now - dynamicIslandPopStartTime
+                let popDuration: TimeInterval = 0.75
+                let isPopping = (elapsed < popDuration) && (previousAlbumArtImage != nil)
+                
+                // Dynamic Island damped spring: slow, organic, luxurious pop (0.75s)
+                var popScale: CGFloat = 1.0
+                if isPopping {
+                    let t = CGFloat(elapsed / popDuration)
+                    let decay = exp(-4.2 * t)
+                    let oscillation = cos(8.5 * t)
+                    popScale = 1.0 - (decay * oscillation * 0.42)
+                }
+                
+                let effectiveScale = currentMenuBarArtScale * popScale
+                let artW: CGFloat = 20.0 * effectiveScale
+                let artH: CGFloat = 20.0 * effectiveScale
+                let yOffset: CGFloat = (20.0 - artH) / 2.0
+                let xOffset: CGFloat = (20.0 - artW) / 2.0
+                
+                if isPopping, let prevArt = previousAlbumArtImage {
+                    let t = CGFloat(elapsed / popDuration)
+                    let outAlpha = max(0.0, 1.0 - t * 1.5) * currentMenuBarArtOpacity
+                    let inAlpha = min(1.0, t * 1.3) * currentMenuBarArtOpacity
+                    
+                    if outAlpha > 0.01 {
+                        prevArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
+                                     from: NSRect(origin: .zero, size: prevArt.size),
+                                     operation: .sourceOver,
+                                     fraction: outAlpha)
+                    }
+                    currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
+                                    from: NSRect(origin: .zero, size: currentArt.size),
+                                    operation: .sourceOver,
+                                    fraction: inAlpha)
+                } else {
+                    currentArt.draw(in: NSRect(x: artX + xOffset, y: yOffset, width: artW, height: artH),
+                                    from: NSRect(origin: .zero, size: currentArt.size),
+                                    operation: .sourceOver,
+                                    fraction: currentMenuBarArtOpacity)
+                }
             }
         }
         combinedImage.unlockFocus()

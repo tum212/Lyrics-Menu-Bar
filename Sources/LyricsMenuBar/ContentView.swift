@@ -39,11 +39,11 @@ struct ContentView: View {
     
     // User preferences
     @AppStorage("showLyrics") private var showLyrics = true
-    @AppStorage("waveformBars") private var waveformBars = 14
+    @AppStorage("waveformBars") private var waveformBars = AppEdition.isLite ? 0 : 14
     @AppStorage("showAlbumArt") private var showAlbumArt = true
     @AppStorage("hapticEnabled") private var hapticEnabled = false
     @AppStorage("lyricsFocusMode") private var lyricsFocusMode = true
-    @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = true
+    @AppStorage("specularEdgeEnabled") private var specularEdgeEnabled = !AppEdition.isLite
     @ObservedObject private var updateManager = UpdateManager.shared
 
     var body: some View {
@@ -395,7 +395,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - 60 FPS High-Precision Apple Physics Lyrics Stream
+// MARK: - Adaptive Lyrics Stream (60 FPS Standard / Ultra-Lightweight Lite, Paused When Hidden)
 struct LyricsStreamView: View {
     let allLyrics: [LyricLine]
     let containerWidth: CGFloat
@@ -408,15 +408,59 @@ struct LyricsStreamView: View {
     @State private var activeLineId: UUID? = nil
     @State private var isLyricsHovered: Bool = false
     
-    // High-precision 60 FPS clock for instantaneous, jitter-free lyric line tracking
-    private let clock = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+    // Lite uses ~6.6 Hz clock with tolerance; Standard uses 60 Hz; both idle at 0% when HUD is closed
+    private let clock = Timer.publish(
+        every: AppEdition.isLite ? 0.15 : (1.0 / 60.0),
+        tolerance: AppEdition.isLite ? 0.05 : 0.005,
+        on: .main,
+        in: .common
+    ).autoconnect()
+    
+    private func syncActiveLine(proxy: ScrollViewProxy, animated: Bool) {
+        let time = musicService.currentTime
+        var targetId: UUID? = nil
+        if isUnsynced {
+            let duration = musicService.currentTrack?.duration ?? 100.0
+            let progress = max(0, min(1, time / duration))
+            var currentIndex = Int(progress * Double(allLyrics.count))
+            if currentIndex >= allLyrics.count { currentIndex = allLyrics.count - 1 }
+            targetId = allLyrics[currentIndex].id
+        } else {
+            if let firstTime = allLyrics.first?.time, time >= firstTime {
+                for line in allLyrics {
+                    if line.time <= time { targetId = line.id } else { break }
+                }
+            }
+        }
+        
+        if targetId != activeLineId {
+            let anim: Animation? = animated
+                ? (AppEdition.isLite ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86))
+                : nil
+            if let anim = anim {
+                withAnimation(anim) {
+                    activeLineId = targetId
+                }
+                if let newId = targetId {
+                    withAnimation(anim) {
+                        proxy.scrollTo(newId, anchor: UnitPoint(x: 0, y: 0.38))
+                    }
+                }
+            } else {
+                activeLineId = targetId
+                if let newId = targetId {
+                    proxy.scrollTo(newId, anchor: UnitPoint(x: 0, y: 0.38))
+                }
+            }
+        }
+    }
     
     var body: some View {
         let activeIdx = allLyrics.firstIndex(where: { $0.id == activeLineId }) ?? 0
         
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 6) {
+                LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(allLyrics.enumerated()), id: \.element.id) { idx, line in
                         let isActive = line.id == activeLineId
                         let isPast = idx < activeIdx
@@ -440,39 +484,23 @@ struct LyricsStreamView: View {
                 .padding(.horizontal, 4)
             }
             .onHover { hovering in
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    isLyricsHovered = hovering
+                if AppEdition.isLite {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isLyricsHovered = hovering
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        isLyricsHovered = hovering
+                    }
                 }
             }
             .onReceive(clock) { _ in
-                guard musicService.isPlaying else { return }
-                let time = musicService.currentTime
-                
-                var targetId: UUID? = nil
-                if isUnsynced {
-                    let duration = musicService.currentTrack?.duration ?? 100.0
-                    let progress = max(0, min(1, time / duration))
-                    var currentIndex = Int(progress * Double(allLyrics.count))
-                    if currentIndex >= allLyrics.count { currentIndex = allLyrics.count - 1 }
-                    targetId = allLyrics[currentIndex].id
-                } else {
-                    if let firstTime = allLyrics.first?.time, time >= firstTime {
-                        for line in allLyrics {
-                            if line.time <= time { targetId = line.id } else { break }
-                        }
-                    }
-                }
-                
-                if targetId != activeLineId {
-                    // Apple Music pure physics spring: response 0.65, dampingFraction 0.86
-                    withAnimation(.spring(response: 0.65, dampingFraction: 0.86)) {
-                        activeLineId = targetId
-                    }
-                    if let newId = targetId {
-                        withAnimation(.spring(response: 0.65, dampingFraction: 0.86)) {
-                            proxy.scrollTo(newId, anchor: UnitPoint(x: 0, y: 0.38))
-                        }
-                    }
+                guard musicService.isPanelVisible && musicService.isPlaying else { return }
+                syncActiveLine(proxy: proxy, animated: true)
+            }
+            .onChange(of: musicService.isPanelVisible) { visible in
+                if visible {
+                    syncActiveLine(proxy: proxy, animated: false)
                 }
             }
             .onChange(of: musicService.currentTrack?.id) { _ in
@@ -605,12 +633,27 @@ struct LyricLineRowView: View {
             if isUnsynced {
                 unsyncedView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal)
             } else if isActive {
-                if !line.words.isEmpty {
-                    TimelineView(.animation(paused: !musicService.isPlaying)) { context in
+                let shouldAnimate = musicService.isPanelVisible && musicService.isPlaying
+                if !shouldAnimate {
+                    if !line.words.isEmpty {
+                        wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                    } else {
+                        fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                    }
+                } else if AppEdition.isLite {
+                    TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { _ in
+                        if !line.words.isEmpty {
+                            wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                        } else {
+                            fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
+                        }
+                    }
+                } else if !line.words.isEmpty {
+                    TimelineView(.animation(paused: !shouldAnimate)) { _ in
                         wordKaraokeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
                     }
                 } else {
-                    TimelineView(.animation(paused: !musicService.isPlaying)) { context in
+                    TimelineView(.animation(paused: !shouldAnimate)) { _ in
                         fallbackWipeView(containerWidth: containerWidth, font: font, fontSize: fontSize, fontWeight: fontWeight, isBgVocal: isBgVocal, currentTime: musicService.currentTime)
                     }
                 }
@@ -627,12 +670,12 @@ struct LyricLineRowView: View {
                 .fill(isHovered && !isActive ? Color.white.opacity(0.08) : Color.clear)
         )
         .contentShape(Rectangle())
-        .blur(radius: (lyricsFocusMode && !isActive && !effectiveHover) ? 2.5 : 0.0)
-        .opacity(lyricsFocusMode ? (isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40))) : (isActive ? 1.0 : 0.85))
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: lyricsFocusMode)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
-        .animation(.spring(response: 0.65, dampingFraction: 0.86), value: isActive)
+        .blur(radius: (!AppEdition.isLite && lyricsFocusMode && !isActive && !effectiveHover) ? 2.5 : 0.0)
+        .opacity(lyricsFocusMode ? (isActive ? 1.0 : (effectiveHover ? 0.85 : (isPast ? 0.32 : 0.38))) : (isActive ? 1.0 : 0.85))
+        .animation(AppEdition.isLite ? .easeOut(duration: 0.20) : .spring(response: 0.35, dampingFraction: 0.8), value: lyricsFocusMode)
+        .animation(AppEdition.isLite ? .easeOut(duration: 0.18) : .spring(response: 0.35, dampingFraction: 0.8), value: isLyricsHovered)
+        .animation(AppEdition.isLite ? .easeOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 0.8), value: isHovered)
+        .animation(AppEdition.isLite ? .easeOut(duration: 0.22) : .spring(response: 0.65, dampingFraction: 0.86), value: isActive)
         .onTapGesture {
             onSeek()
         }
@@ -656,7 +699,7 @@ struct LyricLineRowView: View {
                     .font(.system(size: fontSize, weight: fontWeight))
                     .italic(isBgVocal)
                     .foregroundColor(.white.opacity(effectiveHover ? 0.85 : (isPast ? 0.35 : 0.40)))
-                    .shadow(color: Color.black.opacity(0.35), radius: 2, x: 0, y: 1)
+                    .shadow(color: AppEdition.isLite ? .clear : Color.black.opacity(0.35), radius: AppEdition.isLite ? 0 : 2, x: 0, y: 1)
                     .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
             }
         }
@@ -713,6 +756,18 @@ struct LyricLineRowView: View {
     private func fallbackWipeView(containerWidth: CGFloat, font: NSFont, fontSize: CGFloat, fontWeight: Font.Weight, isBgVocal: Bool, currentTime: TimeInterval) -> some View {
         let effectiveWidth = containerWidth - (isBgVocal ? 24 : 0)
         let lines = LyricLineLayoutCache.shared.wrappedLines(for: line, width: effectiveWidth, font: font)
+        if AppEdition.isLite {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(0..<lines.count, id: \.self) { i in
+                    Text(lines[i])
+                        .font(.system(size: fontSize, weight: fontWeight))
+                        .italic(isBgVocal)
+                        .foregroundColor(.white)
+                        .frame(height: isBgVocal ? 22 : 28, alignment: .leading)
+                }
+            }
+            .frame(width: effectiveWidth, alignment: .leading)
+        } else {
         let totalChars = max(1, lines.reduce(0) { $0 + $1.count })
         
         let activeDuration = max(0.1, line.endTime - line.time)
@@ -777,6 +832,7 @@ struct LyricLineRowView: View {
             }
         }
         .frame(width: effectiveWidth, alignment: .leading)
+        }
     }
 }
 
@@ -796,55 +852,68 @@ struct WordLyricItemView: View {
         let font = Font.system(size: fontSize, weight: fontWeight)
         let wordStart = word.startTime
         let wordEnd = word.endTime
-        let wordDuration = max(0.06, wordEnd - wordStart)
-        
-        // Continuous wipe progress: 0.0 before start, 0.0->1.0 while singing, 1.0 when sung
-        let rawProgress = (currentTime - wordStart) / wordDuration
-        let progress: CGFloat = CGFloat(max(0.0, min(1.0, rawProgress)))
-        
         let hasStarted = currentTime >= wordStart
-        let isActivelySinging = isActive && (currentTime >= wordStart && currentTime < wordEnd)
-        
-        let glow = computeGlow(hasStarted: hasStarted, isActivelySinging: isActivelySinging, wordEnd: wordEnd)
-        let emphasis: CGFloat = (isActivelySinging && lyricsFocusMode) ? CGFloat(1.0 + 0.025 * sin(Double(progress) * .pi)) : 1.0
-        
-        ZStack(alignment: .leading) {
-            // Base layer: unlit typography with smooth opacity transition
+
+        if AppEdition.isLite {
+            // Ultra-lightweight word-by-word karaoke for Lite: zero GeometryReader, zero mask, zero blur shadow
             Text(word.text)
                 .font(font)
                 .italic(isItalic)
-                .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
-                .animation(.easeInOut(duration: 0.38), value: isActive)
-            
-            // Illuminated layer: SINGLE stable view that never unmounts while active
-            Text(word.text)
-                .font(font)
-                .italic(isItalic)
-                .foregroundColor(.white)
-                .mask(
-                    GeometryReader { geo in
-                        let w = geo.size.width
-                        let fadeWidth: CGFloat = 16.0
-                        let leadX = (w + fadeWidth) * progress - fadeWidth
-                        let fadeStart = max(0.0, min(1.0, leadX / max(1.0, w)))
-                        let fadeEnd = max(0.0, min(1.0, (leadX + fadeWidth) / max(1.0, w)))
-                        
-                        LinearGradient(
-                            stops: [
-                                .init(color: .black, location: 0.0),
-                                .init(color: .black, location: fadeStart),
-                                .init(color: .clear, location: fadeEnd)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    }
+                .foregroundColor(
+                    isActive
+                        ? (hasStarted ? .white : .white.opacity(0.38))
+                        : .white.opacity(isHovered ? 0.75 : (isPast ? 0.32 : 0.60))
                 )
-                .shadow(color: .white.opacity(glow.opacity), radius: glow.radius)
-                .opacity(isActive ? (hasStarted ? 1.0 : 0.0) : 0.0)
-                .animation(.easeInOut(duration: 0.38), value: isActive)
+        } else {
+            let wordDuration = max(0.06, wordEnd - wordStart)
+            
+            // Continuous wipe progress: 0.0 before start, 0.0->1.0 while singing, 1.0 when sung
+            let rawProgress = (currentTime - wordStart) / wordDuration
+            let progress: CGFloat = CGFloat(max(0.0, min(1.0, rawProgress)))
+            
+            let isActivelySinging = isActive && (currentTime >= wordStart && currentTime < wordEnd)
+            
+            let glow = computeGlow(hasStarted: hasStarted, isActivelySinging: isActivelySinging, wordEnd: wordEnd)
+            let emphasis: CGFloat = (isActivelySinging && lyricsFocusMode) ? CGFloat(1.0 + 0.025 * sin(Double(progress) * .pi)) : 1.0
+            
+            ZStack(alignment: .leading) {
+                // Base layer: unlit typography with smooth opacity transition
+                Text(word.text)
+                    .font(font)
+                    .italic(isItalic)
+                    .foregroundColor(.white.opacity(isHovered ? 0.75 : (isActive ? 0.35 : (isPast ? 0.32 : 0.60))))
+                    .animation(.easeInOut(duration: 0.38), value: isActive)
+                
+                // Illuminated layer: SINGLE stable view that never unmounts while active
+                Text(word.text)
+                    .font(font)
+                    .italic(isItalic)
+                    .foregroundColor(.white)
+                    .mask(
+                        GeometryReader { geo in
+                            let w = geo.size.width
+                            let fadeWidth: CGFloat = 16.0
+                            let leadX = (w + fadeWidth) * progress - fadeWidth
+                            let fadeStart = max(0.0, min(1.0, leadX / max(1.0, w)))
+                            let fadeEnd = max(0.0, min(1.0, (leadX + fadeWidth) / max(1.0, w)))
+                            
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: 0.0),
+                                    .init(color: .black, location: fadeStart),
+                                    .init(color: .clear, location: fadeEnd)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        }
+                    )
+                    .shadow(color: .white.opacity(glow.opacity), radius: glow.radius)
+                    .opacity(isActive ? (hasStarted ? 1.0 : 0.0) : 0.0)
+                    .animation(.easeInOut(duration: 0.38), value: isActive)
+            }
+            .scaleEffect(emphasis, anchor: .bottomLeading)
         }
-        .scaleEffect(emphasis, anchor: .bottomLeading)
     }
     
     private func computeGlow(hasStarted: Bool, isActivelySinging: Bool, wordEnd: TimeInterval) -> (opacity: Double, radius: CGFloat) {
@@ -870,13 +939,13 @@ struct WordLyricItemView: View {
 struct NativeSettingsMenu: NSViewRepresentable {
     @AppStorage("showLyrics") var showLyrics = true
     @AppStorage("showAlbumArt") var showAlbumArt = true
-    @AppStorage("audioFeaturesEnabled") var audioFeaturesEnabled = true
+    @AppStorage("audioFeaturesEnabled") var audioFeaturesEnabled = !AppEdition.isLite
     @AppStorage("musicSourceMode") var musicSourceMode = "Auto"
     @AppStorage("lyricsFocusMode") var lyricsFocusMode = true
-    @AppStorage("specularEdgeEnabled") var specularEdgeEnabled = true
+    @AppStorage("specularEdgeEnabled") var specularEdgeEnabled = !AppEdition.isLite
     @AppStorage("hapticIntensity") var hapticIntensity = 0
     @AppStorage("hapticActuatorType") var hapticActuatorType = 0  // 0 = Auto
-    @AppStorage("waveformBars") var waveformBars = 14
+    @AppStorage("waveformBars") var waveformBars = AppEdition.isLite ? 0 : 14
     @AppStorage("lyricsMaxWidth") var lyricsMaxWidth: Int = 200
     
     func makeNSView(context: Context) -> NSButton {
@@ -1054,9 +1123,15 @@ struct NativeSettingsMenu: NSViewRepresentable {
             let audioSectionItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
             let audioSectionMenu = NSMenu(title: "Audio")
             
-            let audioItem = NSMenuItem(title: "Audio Visualizer (Tap)", action: #selector(toggleAudioFeatures), keyEquivalent: "")
-            audioItem.target = self
-            audioItem.state = parent.audioFeaturesEnabled ? .on : .off
+            let audioItem: NSMenuItem
+            if AppEdition.isLite {
+                audioItem = NSMenuItem(title: "Audio Visualizer Tap (Standard Edition)", action: nil, keyEquivalent: "")
+                audioItem.isEnabled = false
+            } else {
+                audioItem = NSMenuItem(title: "Audio Visualizer (Tap)", action: #selector(toggleAudioFeatures), keyEquivalent: "")
+                audioItem.target = self
+                audioItem.state = parent.audioFeaturesEnabled ? .on : .off
+            }
             audioSectionMenu.addItem(audioItem)
             
             let waveItem = NSMenuItem(title: "Waveform Bars", action: nil, keyEquivalent: "")
@@ -1122,8 +1197,11 @@ struct NativeSettingsMenu: NSViewRepresentable {
         
         @objc func showAbout() {
             let alert = NSAlert()
-            alert.messageText = "Lyrics Menu Bar \(UpdateManager.shared.currentVersion)"
-            alert.informativeText = "Native Glass HUD for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
+            let title = AppEdition.isLite ? "Lyrics Menu Bar Lite" : "Lyrics Menu Bar"
+            alert.messageText = "\(title) \(UpdateManager.shared.currentVersion) (Build \(UpdateManager.shared.currentBuild))"
+            alert.informativeText = AppEdition.isLite
+                ? "Ultra-Lightweight HUD for Spotify & Apple Music (macOS 13+ Edition)\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
+                : "Native Glass HUD for Spotify & Apple Music\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
@@ -1521,43 +1599,6 @@ struct UpdateModalView: View {
     }
 }
 
-// MARK: - iPod Cover Flow 3D Transition
-struct CoverFlowTransform: ViewModifier {
-    let angle: Double
-    let xOffset: CGFloat
-    let scale: CGFloat
-    let opacity: Double
-
-    func body(content: Content) -> some View {
-        content
-            .rotation3DEffect(
-                .degrees(angle),
-                axis: (x: 0, y: 1, z: 0),
-                anchor: .center,
-                perspective: 0.45
-            )
-            .offset(x: xOffset)
-            .scaleEffect(scale)
-            .opacity(opacity)
-    }
-}
-
-extension AnyTransition {
-    static func coverFlow(direction: Int) -> AnyTransition {
-        let dir = CGFloat(direction >= 0 ? 1 : -1)
-        return .asymmetric(
-            insertion: .modifier(
-                active: CoverFlowTransform(angle: 45 * dir, xOffset: 35 * dir, scale: 0.84, opacity: 0.0),
-                identity: CoverFlowTransform(angle: 0, xOffset: 0, scale: 1.0, opacity: 1.0)
-            ),
-            removal: .modifier(
-                active: CoverFlowTransform(angle: -45 * dir, xOffset: -35 * dir, scale: 0.84, opacity: 0.0),
-                identity: CoverFlowTransform(angle: 0, xOffset: 0, scale: 1.0, opacity: 1.0)
-            )
-        )
-    }
-}
-
 // MARK: - Apple Music Tactile Control Button
 struct AppleMusicControlButton: View {
     let systemName: String
@@ -1588,8 +1629,8 @@ struct AppleMusicControlButton: View {
                     .foregroundColor(.white.opacity(isHovered ? 1.0 : 0.88))
             }
             .scaleEffect(isPressed ? 0.86 : (isHovered ? 1.06 : 1.0))
-            .animation(.spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
-            .animation(.easeInOut(duration: 0.16), value: isHovered)
+            .animation(AppEdition.isLite ? .easeOut(duration: 0.12) : .spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
+            .animation(.easeInOut(duration: 0.14), value: isHovered)
             .contentShape(Circle())
         }
         .buttonStyle(PlainButtonStyle())

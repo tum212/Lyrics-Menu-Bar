@@ -295,14 +295,15 @@ public final class MusicService: NSObject, ObservableObject {
     public func startPolling() {
         timer?.invalidate()
         timer = nil
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let interval: TimeInterval = AppEdition.isLite ? 3.0 : 1.0
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollActivePlayer()
             }
         }
-        if let timer = timer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
+        t.tolerance = AppEdition.isLite ? 0.5 : 0.15
+        timer = t
+        RunLoop.main.add(t, forMode: .common)
         pollActivePlayer()
     }
     
@@ -323,7 +324,8 @@ public final class MusicService: NSObject, ObservableObject {
         
         let mode = self.sourceMode
         let active = self.activeSource
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let priority: TaskPriority = AppEdition.isLite ? .utility : .userInitiated
+        Task.detached(priority: priority) { [weak self] in
             let res: (track: MusicTrack?, isPlaying: Bool, position: Double, source: MusicSourceMode, isNotRunning: Bool)
             switch mode {
             case .spotify:
@@ -605,9 +607,12 @@ public final class MusicService: NSObject, ObservableObject {
                     Self.fetchAppleMusicArtworkData(expectedID: trackId)
                 }.value
                 
-                if let data = result.data, let image = NSImage(data: data) {
+                if let data = result.data, var image = NSImage(data: data) {
+                    if AppEdition.isLite {
+                        image = ArtworkLoader.downscaleIfNeeded(image, maxDimension: 240)
+                    }
                     loadedImage = image
-                    if self.currentTrack?.id == trackId {
+                    if self.currentTrack?.id == trackId && !AppEdition.isLite {
                         self.currentTrack?.artworkData = data
                     }
                 }
@@ -700,78 +705,9 @@ public final class MusicService: NSObject, ObservableObject {
                 updatedTrack.artworkURL = self.currentTrack?.artworkURL
             }
         }
-        let previousTrackBeforeChange = self.currentTrack
-        let previousImageBeforeChange = self.artworkImage
-        
         let shouldRetryArtwork = (self.artworkImage == nil && self.artworkRetryCount < self.retryIntervals.count && now >= self.nextArtworkRetryDate)
         
         if isTrackChanged {
-            // Auto-detect navigation direction: if not manually forced by previous button, check history
-            let navDir: Int
-            if self.navigationDirection == -1 {
-                navDir = -1
-            } else if let lastHist = self.sessionHistory.last,
-                      lastHist.name.lowercased() == updatedTrack.name.lowercased() &&
-                      lastHist.artist.lowercased() == updatedTrack.artist.lowercased() {
-                navDir = -1
-            } else {
-                navDir = 1
-            }
-            self.navigationDirection = navDir
-            
-            // Manage queue & history according to navigation direction
-            if navDir == -1 {
-                // Moving backwards: the track we just came from goes back to upcomingQueue!
-                if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
-                    var savedTrack = oldTrack
-                    if let prevImg = previousImageBeforeChange {
-                        ArtworkCache.shared.storeImage(prevImg, for: oldTrack)
-                        if savedTrack.artworkData == nil {
-                            savedTrack.artworkData = prevImg.tiffRepresentation
-                        }
-                    }
-                    self.upcomingQueue.insert(savedTrack, at: 0)
-                }
-                // Pop current track from sessionHistory if it was at the top
-                if let lastHistory = self.sessionHistory.last,
-                   lastHistory.name.lowercased() == updatedTrack.name.lowercased() {
-                    self.sessionHistory.removeLast()
-                }
-            } else {
-                // Moving forwards: the track we just came from goes to sessionHistory
-                if let oldTrack = previousTrackBeforeChange, !oldTrack.name.isEmpty {
-                    var savedTrack = oldTrack
-                    if let prevImg = previousImageBeforeChange {
-                        ArtworkCache.shared.storeImage(prevImg, for: oldTrack)
-                        if savedTrack.artworkData == nil {
-                            savedTrack.artworkData = prevImg.tiffRepresentation
-                        }
-                    }
-                    if self.sessionHistory.last?.name != savedTrack.name || self.sessionHistory.last?.artist != savedTrack.artist {
-                        self.sessionHistory.append(savedTrack)
-                        if self.sessionHistory.count > 15 {
-                            self.sessionHistory.removeFirst()
-                        }
-                    }
-                }
-                // If upcomingQueue has the track that just started playing, advance queue!
-                if let first = self.upcomingQueue.first,
-                   first.name.lowercased() == updatedTrack.name.lowercased() {
-                    self.upcomingQueue.removeFirst()
-                }
-            }
-            
-            // Check sessionHistory and upcomingQueue for existing artwork
-            if updatedTrack.artworkData == nil {
-                if let match = self.sessionHistory.last(where: { $0.name.lowercased() == updatedTrack.name.lowercased() && $0.artist.lowercased() == updatedTrack.artist.lowercased() }) {
-                    updatedTrack.artworkData = match.artworkData
-                    if updatedTrack.artworkURL == nil { updatedTrack.artworkURL = match.artworkURL }
-                } else if let match = self.upcomingQueue.first(where: { $0.name.lowercased() == updatedTrack.name.lowercased() && $0.artist.lowercased() == updatedTrack.artist.lowercased() }) {
-                    updatedTrack.artworkData = match.artworkData
-                    if updatedTrack.artworkURL == nil { updatedTrack.artworkURL = match.artworkURL }
-                }
-            }
-            
             // Zero-flicker artwork resolution: check cache synchronously before setting loading state
             let cached = ArtworkCache.shared.findImage(for: updatedTrack)
                 ?? updatedTrack.artworkData.flatMap { NSImage(data: $0) }
@@ -792,10 +728,6 @@ public final class MusicService: NSObject, ObservableObject {
             self.currentTrack = updatedTrack
             
             loadArtwork(for: updatedTrack)
-            
-            if self.upcomingQueue.isEmpty {
-                fetchUpcomingQueue(for: updatedTrack)
-            }
         } else {
             self.currentTrack = updatedTrack
             if isArtworkChanged || shouldRetryArtwork {

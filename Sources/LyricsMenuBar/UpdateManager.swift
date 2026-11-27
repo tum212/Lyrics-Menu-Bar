@@ -82,7 +82,7 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         lastCheckDate = Date()
 
         if let config = config {
-            let isLite = (Bundle.main.infoDictionary?["CFBundleIdentifier"] as? String)?.contains("lite") == true
+            let isLite = AppEdition.isLite
             let chosenUrlStr = (isLite ? config.downloadUrlLite : config.downloadUrl) ?? config.downloadUrl
             if let chosenUrlStr = chosenUrlStr, let downloadUrl = URL(string: chosenUrlStr) {
                 let isNewerVersion = Self.isVersion(config.version, greaterThan: currentVersion)
@@ -100,7 +100,7 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         // 2. Fallback to GitHub Releases API if remote config wasn't newer
         if let release = await fetchLatestGitHubRelease() {
             let releaseTag = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
-            if Self.isVersion(releaseTag, greaterThan: currentVersion), let assetUrl = release.dmgDownloadUrl {
+            if Self.isVersion(releaseTag, greaterThan: currentVersion), let assetUrl = release.dmgDownloadUrl(isLite: AppEdition.isLite) {
                 state = .updateAvailable(version: releaseTag, releaseNotes: release.body, downloadUrl: assetUrl)
                 showUpdateModal = true
                 return
@@ -173,7 +173,8 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         state = .installing
 
         let currentAppPath = Bundle.main.bundlePath
-        let targetAppPath = currentAppPath.hasPrefix("/Applications") ? currentAppPath : "/Applications/Lyrics Menu Bar.app"
+        let defaultAppName = AppEdition.isLite ? "Lyrics Menu Bar Lite.app" : "Lyrics Menu Bar.app"
+        let targetAppPath = currentAppPath.hasPrefix("/Applications") ? currentAppPath : "/Applications/\(defaultAppName)"
         let scriptPath = "/tmp/update_lyricsmenubar.sh"
         let mountPoint = "/tmp/LyricsMenuBarMount"
 
@@ -187,9 +188,10 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
         hdiutil attach "\(targetDmgPath)" -nobrowse -mountpoint "\(mountPoint)" -quiet
         sleep 0.6
 
-        if [ -d "\(mountPoint)/Lyrics Menu Bar.app" ]; then
+        APP_SRC=$(find "\(mountPoint)" -maxdepth 1 -name "*.app" | head -n 1)
+        if [ -n "$APP_SRC" ] && [ -d "$APP_SRC" ]; then
             rm -rf "\(targetAppPath)"
-            cp -R "\(mountPoint)/Lyrics Menu Bar.app" "/Applications/"
+            cp -R "$APP_SRC" "\(targetAppPath)"
             xattr -cr "\(targetAppPath)" 2>/dev/null || true
         fi
 
@@ -242,7 +244,13 @@ public final class UpdateManager: NSObject, ObservableObject, URLSessionDownload
             case name, body, assets
         }
 
-        var dmgDownloadUrl: URL? {
+        func dmgDownloadUrl(isLite: Bool) -> URL? {
+            if isLite, let asset = assets.first(where: { $0.name.lowercased().contains("lite") && $0.name.hasSuffix(".dmg") }) {
+                return URL(string: asset.browserDownloadUrl)
+            }
+            if !isLite, let asset = assets.first(where: { !$0.name.lowercased().contains("lite") && $0.name.hasSuffix(".dmg") }) {
+                return URL(string: asset.browserDownloadUrl)
+            }
             if let asset = assets.first(where: { $0.name.hasSuffix(".dmg") }) {
                 return URL(string: asset.browserDownloadUrl)
             }

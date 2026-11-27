@@ -17,8 +17,13 @@ public final class ArtworkCache {
     private let cache = NSCache<NSString, NSImage>()
     
     private init() {
-        cache.countLimit = 200
-        cache.totalCostLimit = 60 * 1024 * 1024 // 60MB
+        if AppEdition.isLite {
+            cache.countLimit = 30
+            cache.totalCostLimit = 12 * 1024 * 1024 // 12MB lightweight limit for older Macs
+        } else {
+            cache.countLimit = 200
+            cache.totalCostLimit = 60 * 1024 * 1024 // 60MB
+        }
     }
     
     public func image(forKey key: String) -> NSImage? {
@@ -105,14 +110,36 @@ public enum ArtworkLoader {
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                 return nil
             }
-            guard !data.isEmpty, let image = NSImage(data: data) else {
+            guard !data.isEmpty, var image = NSImage(data: data) else {
                 return nil
+            }
+            if AppEdition.isLite {
+                image = downscaleIfNeeded(image, maxDimension: 240)
             }
             ArtworkCache.shared.setImage(image, forKey: cacheKey)
             return image
         } catch {
             return nil
         }
+    }
+
+    /// Downscales oversized artwork in Lite edition to reduce RAM and Intel iGPU texture upload cost
+    public static func downscaleIfNeeded(_ image: NSImage, maxDimension: CGFloat) -> NSImage {
+        let size = image.size
+        guard size.width > maxDimension || size.height > maxDimension else { return image }
+        let aspect = size.width / max(1, size.height)
+        let targetSize: NSSize
+        if aspect >= 1 {
+            targetSize = NSSize(width: maxDimension, height: maxDimension / aspect)
+        } else {
+            targetSize = NSSize(width: maxDimension * aspect, height: maxDimension)
+        }
+        let resized = NSImage(size: targetSize)
+        resized.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .medium
+        image.draw(in: NSRect(origin: .zero, size: targetSize), from: NSRect(origin: .zero, size: size), operation: .copy, fraction: 1.0)
+        resized.unlockFocus()
+        return resized
     }
     
     /// Fallback fetcher: Searches Apple Music / iTunes Search API for high-resolution cover art (600x600)

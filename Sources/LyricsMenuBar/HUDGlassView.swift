@@ -32,7 +32,7 @@ final class HUDGlassView: NSView {
         self.layer?.cornerCurve = .continuous
         
         // 1. Native macOS Popover Glass (Zero fake tint - 100% optical clarity)
-        visualEffect.material = .popover
+        visualEffect.material = AppEdition.isLite ? .hudWindow : .popover
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
@@ -40,6 +40,13 @@ final class HUDGlassView: NSView {
         visualEffect.layer?.cornerRadius = cornerRadiusValue
         visualEffect.layer?.cornerCurve = .continuous
         self.addSubview(visualEffect)
+        
+        // In Lite mode, stop at single-pass native AppKit vibrancy to avoid dual-backdrop GPU overhead on Intel HD 615
+        if AppEdition.isLite {
+            self.layer?.borderWidth = 0.75
+            self.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            return
+        }
         
         // 2. Hardware CABackdropLayer for Vibrant Saturation boost
         if let cls = NSClassFromString("CABackdropLayer") as? CALayer.Type {
@@ -132,7 +139,9 @@ final class HUDGlassView: NSView {
     }
     
     deinit {
-        self.removeObserver(self, forKeyPath: "effectiveAppearance")
+        if !AppEdition.isLite {
+            self.removeObserver(self, forKeyPath: "effectiveAppearance")
+        }
     }
     
     override func layout() {
@@ -141,6 +150,10 @@ final class HUDGlassView: NSView {
         CATransaction.setDisableActions(true)
         
         visualEffect.frame = bounds
+        if AppEdition.isLite {
+            CATransaction.commit()
+            return
+        }
         topRefractionSheen.frame = bounds
         rimGradientLayer.frame = bounds
         

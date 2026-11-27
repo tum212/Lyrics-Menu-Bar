@@ -11,7 +11,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "LyricsMenuBar",
-            exclude: ["Info.plist"],
+            exclude: ["Info.plist", "Info-Lite.plist"],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Sources/LyricsMenuBar/Info.plist"])
             ]
