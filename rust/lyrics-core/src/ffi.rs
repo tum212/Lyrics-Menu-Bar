@@ -13,7 +13,7 @@ use crate::color::{
 use crate::dsp::{AudioDspEngine, MAX_BANDS};
 use crate::haptics::{CHHapticFallbackFn, HapticEngine};
 use crate::lyrics::{LyricsEngine, LyricsReadyCallback};
-use crate::playback::{MusicSource, PlaybackDelta, PlaybackEngine, PlaybackTrack};
+use crate::playback::{PlaybackDelta, PlaybackEngine, PlaybackTrack};
 use crate::updater::{check_updates, download_dmg_streaming, is_version_greater};
 
 pub struct LyricsAudioHandle {
@@ -27,7 +27,21 @@ pub struct LyricsHapticsHandle {
 pub struct LyricsCoreHandle {
     pub lyrics: Arc<LyricsEngine>,
     pub playback: Mutex<PlaybackEngine>,
-    pub download_cancel: Arc<AtomicBool>,
+    pub active_download_cancel: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+impl Drop for LyricsCoreHandle {
+    fn drop(&mut self) {
+        self.lyrics.clear();
+        if let Some(flag) = self
+            .active_download_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            flag.store(true, Ordering::Release);
+        }
+    }
 }
 
 #[repr(C)]
@@ -92,10 +106,28 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
 }
 
 fn to_cstring_raw(s: &str) -> *mut c_char {
+    if !s.as_bytes().contains(&0) {
+        return CString::new(s)
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut());
+    }
     let cleaned = s.replace('\0', "");
     CString::new(cleaned)
         .map(CString::into_raw)
         .unwrap_or(ptr::null_mut())
+}
+
+fn vec_to_ffi_bytes(v: Vec<u8>) -> CFfiByteBuffer {
+    if v.is_empty() {
+        return CFfiByteBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+    }
+    let boxed: Box<[u8]> = v.into_boxed_slice();
+    let len = boxed.len();
+    let ptr = Box::into_raw(boxed) as *mut u8;
+    CFfiByteBuffer { data: ptr, len }
 }
 
 // MARK: - Memory Management
@@ -113,7 +145,7 @@ pub extern "C" fn lyrics_core_free_string(ptr: *mut c_char) {
 pub extern "C" fn lyrics_core_free_bytes(buf: CFfiByteBuffer) {
     if !buf.data.is_null() && buf.len > 0 {
         unsafe {
-            let _ = Vec::from_raw_parts(buf.data, buf.len, buf.len);
+            let _ = Box::from_raw(ptr::slice_from_raw_parts_mut(buf.data, buf.len));
         }
     }
 }
@@ -126,7 +158,7 @@ pub extern "C" fn lyrics_core_create() -> *mut LyricsCoreHandle {
         Box::into_raw(Box::new(LyricsCoreHandle {
             lyrics: Arc::new(LyricsEngine::new()),
             playback: Mutex::new(PlaybackEngine::new()),
-            download_cancel: Arc::new(AtomicBool::new(false)),
+            active_download_cancel: Mutex::new(None),
         }))
     })
     .unwrap_or(ptr::null_mut())
@@ -199,7 +231,8 @@ pub extern "C" fn lyrics_core_audio_process_pcm(
         let Some(audio) = (unsafe { handle.as_ref() }) else {
             return;
         };
-        if left.is_null() || frame_or_float_len == 0 {
+        const MAX_FLOATS: usize = 1024 * 1024;
+        if left.is_null() || frame_or_float_len == 0 || frame_or_float_len > MAX_FLOATS {
             return;
         }
         let left_slice = unsafe { slice::from_raw_parts(left, frame_or_float_len) };
@@ -368,7 +401,7 @@ pub extern "C" fn lyrics_core_lyrics_fetch(
     artist: *const c_char,
     album: *const c_char,
     ctx: usize,
-    callback: LyricsReadyCallback,
+    callback: Option<LyricsReadyCallback>,
 ) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
         let Some(core) = (unsafe { handle.as_ref() }) else {
@@ -407,7 +440,7 @@ pub extern "C" fn lyrics_core_lyrics_get_json(handle: *const LyricsCoreHandle) -
     .unwrap_or(ptr::null_mut())
 }
 
-// MARK: - Playback & Menu Bar State Machine
+// MARK: - Playback & Menu Bar State Machine (String source_id for Universal Streaming Support)
 
 #[no_mangle]
 pub extern "C" fn lyrics_core_playback_update(
@@ -420,7 +453,7 @@ pub extern "C" fn lyrics_core_playback_update(
     duration: f64,
     position: f64,
     is_playing: bool,
-    source: i32,
+    source_id: *const c_char,
     now_mono: f64,
     now_unix: f64,
 ) -> CFfiPlaybackDelta {
@@ -433,6 +466,7 @@ pub extern "C" fn lyrics_core_playback_update(
                 source_changed: false,
             };
         };
+        let src = unsafe { cstr_to_string(source_id) };
         let track = PlaybackTrack {
             id: unsafe { cstr_to_string(id) },
             name: unsafe { cstr_to_string(name) },
@@ -440,22 +474,11 @@ pub extern "C" fn lyrics_core_playback_update(
             album: unsafe { cstr_to_string(album) },
             artwork_url: unsafe { cstr_to_string(artwork_url) },
             duration,
-            source: MusicSource::from_i32(source),
+            source_id: src.clone(),
         };
-        let delta: PlaybackDelta = core
-            .playback
-            .lock()
-            .map(|mut pb| {
-                pb.update_playback_state(
-                    track,
-                    position,
-                    is_playing,
-                    MusicSource::from_i32(source),
-                    now_mono,
-                    now_unix,
-                )
-            })
-            .unwrap_or_default();
+        let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
+        let delta: PlaybackDelta =
+            pb.update_playback_state(track, position, is_playing, src, now_mono, now_unix);
 
         CFfiPlaybackDelta {
             track_changed: delta.track_changed,
@@ -475,7 +498,7 @@ pub extern "C" fn lyrics_core_playback_update(
 #[no_mangle]
 pub extern "C" fn lyrics_core_playback_mark_stopped(
     handle: *mut LyricsCoreHandle,
-    source: i32,
+    source_id: *const c_char,
     threshold: i32,
     is_not_running: bool,
 ) -> bool {
@@ -483,10 +506,9 @@ pub extern "C" fn lyrics_core_playback_mark_stopped(
         let Some(core) = (unsafe { handle.as_ref() }) else {
             return false;
         };
-        core.playback
-            .lock()
-            .map(|mut pb| pb.mark_stopped(MusicSource::from_i32(source), threshold, is_not_running))
-            .unwrap_or(false)
+        let src = unsafe { cstr_to_string(source_id) };
+        let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
+        pb.mark_stopped(&src, threshold, is_not_running)
     }))
     .unwrap_or(false)
 }
@@ -500,10 +522,8 @@ pub extern "C" fn lyrics_core_playback_current_time(
         let Some(core) = (unsafe { handle.as_ref() }) else {
             return 0.0;
         };
-        core.playback
-            .lock()
-            .map(|mut pb| pb.current_time(now_mono))
-            .unwrap_or(0.0)
+        let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
+        pb.current_time(now_mono)
     }))
     .unwrap_or(0.0)
 }
@@ -516,9 +536,8 @@ pub extern "C" fn lyrics_core_playback_seek_local(
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(core) = unsafe { handle.as_ref() } {
-            if let Ok(mut pb) = core.playback.lock() {
-                pb.seek_local(target_time, now_mono);
-            }
+            let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
+            pb.seek_local(target_time, now_mono);
         }
     }));
 }
@@ -531,14 +550,13 @@ pub extern "C" fn lyrics_core_playback_set_playing_local(
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(core) = unsafe { handle.as_ref() } {
-            if let Ok(mut pb) = core.playback.lock() {
-                let cur = pb.current_time(now_mono);
-                pb.playback_position = cur;
-                pb.last_update_mono = now_mono;
-                pb.is_playing = is_playing;
-                if !is_playing {
-                    pb.transition_progress = 1.0;
-                }
+            let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
+            let cur = pb.current_time(now_mono);
+            pb.playback_position = cur;
+            pb.last_update_mono = now_mono;
+            pb.is_playing = is_playing;
+            if !is_playing {
+                pb.transition_progress = 1.0;
             }
         }
     }));
@@ -555,15 +573,12 @@ pub extern "C" fn lyrics_core_playback_hud_active_index(
             return -1;
         };
         let lines = core.lyrics.snapshot();
-        let (time, dur) = core
-            .playback
-            .lock()
-            .map(|mut pb| {
-                let d = pb.current_track.as_ref().map(|t| t.duration).unwrap_or(100.0);
-                let t = pb.current_time(now_mono);
-                (t, d)
-            })
-            .unwrap_or((0.0, 100.0));
+        let (time, dur) = {
+            let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
+            let d = pb.current_track.as_ref().map(|t| t.duration).unwrap_or(100.0);
+            let t = pb.current_time(now_mono);
+            (t, d)
+        };
         let (idx, unsynced) = PlaybackEngine::resolve_hud_active_index(&lines, time, dur);
         if !out_is_unsynced.is_null() {
             unsafe {
@@ -583,37 +598,36 @@ pub extern "C" fn lyrics_core_menubar_step(
     now_unix: f64,
     is_ultra_light: bool,
 ) -> CFfiMenuBarFrame {
+    let empty = CFfiMenuBarFrame {
+        has_track: false,
+        text_ptr: ptr::null_mut(),
+        line_id: 0,
+        progress: 0.0,
+        is_intro: false,
+        is_unsynced: false,
+        is_interlude: false,
+        peeked_ahead: false,
+        active_word_index: -1,
+        active_word_progress: 0.0,
+        active_word_before_start: false,
+        active_word_after_end: false,
+        line_changed: false,
+        transition_progress: 1.0,
+        animated_orb_alpha: 0.0,
+        art_scale: 1.0,
+        art_opacity: 1.0,
+        needs_active_frames: false,
+        is_sparkling_candidate: false,
+        sparkle_cycle_time: 0.0,
+    };
+
     catch_unwind(AssertUnwindSafe(|| {
-        let empty = CFfiMenuBarFrame {
-            has_track: false,
-            text_ptr: ptr::null_mut(),
-            line_id: 0,
-            progress: 0.0,
-            is_intro: false,
-            is_unsynced: false,
-            is_interlude: false,
-            peeked_ahead: false,
-            active_word_index: -1,
-            active_word_progress: 0.0,
-            active_word_before_start: false,
-            active_word_after_end: false,
-            line_changed: false,
-            transition_progress: 1.0,
-            animated_orb_alpha: 0.0,
-            art_scale: 1.0,
-            art_opacity: 1.0,
-            needs_active_frames: false,
-            is_sparkling_candidate: false,
-            sparkle_cycle_time: 0.0,
-        };
         let Some(core) = (unsafe { handle.as_ref() }) else {
             return empty;
         };
         let lines = core.lyrics.snapshot();
         let is_loading = core.lyrics.is_loading.load(Ordering::Acquire);
-        let Ok(mut pb) = core.playback.lock() else {
-            return empty;
-        };
+        let mut pb = core.playback.lock().unwrap_or_else(|e| e.into_inner());
         let Some(res) =
             pb.step_menubar_frame(&lines, dt, now_mono, now_unix, is_loading, is_ultra_light)
         else {
@@ -675,10 +689,16 @@ pub extern "C" fn lyrics_core_extract_waveform_theme_rgba(
     height: usize,
 ) -> CFfiWaveformTheme {
     let theme = catch_unwind(AssertUnwindSafe(|| {
-        if rgba_ptr.is_null() || width == 0 || height == 0 {
+        const MAX_DIM: usize = 4096;
+        if rgba_ptr.is_null() || width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
             return WaveformTheme::default();
         }
-        let len = width.saturating_mul(height).saturating_mul(4);
+        let Some(len) = width.checked_mul(height).and_then(|n| n.checked_mul(4)) else {
+            return WaveformTheme::default();
+        };
+        if len > isize::MAX as usize {
+            return WaveformTheme::default();
+        }
         let slice = unsafe { slice::from_raw_parts(rgba_ptr, len) };
         extract_waveform_theme_rgba(slice, width, height)
     }))
@@ -730,22 +750,16 @@ pub extern "C" fn lyrics_core_download_bytes(
 ) -> CFfiByteBuffer {
     catch_unwind(AssertUnwindSafe(|| {
         let s = unsafe { cstr_to_string(url) };
-        if let Some(mut v) = download_url_bytes(
+        download_url_bytes(
             &s,
             timeout_secs,
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        ) {
-            v.shrink_to_fit();
-            let len = v.len();
-            let ptr = v.as_mut_ptr();
-            std::mem::forget(v);
-            CFfiByteBuffer { data: ptr, len }
-        } else {
-            CFfiByteBuffer {
-                data: ptr::null_mut(),
-                len: 0,
-            }
-        }
+        )
+        .map(vec_to_ffi_bytes)
+        .unwrap_or(CFfiByteBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        })
     }))
     .unwrap_or(CFfiByteBuffer {
         data: ptr::null_mut(),
@@ -761,18 +775,12 @@ pub extern "C" fn lyrics_core_fetch_itunes_artwork(
     catch_unwind(AssertUnwindSafe(|| {
         let t = unsafe { cstr_to_string(track) };
         let a = unsafe { cstr_to_string(artist) };
-        if let Some(mut v) = fetch_itunes_artwork_bytes(&t, &a) {
-            v.shrink_to_fit();
-            let len = v.len();
-            let ptr = v.as_mut_ptr();
-            std::mem::forget(v);
-            CFfiByteBuffer { data: ptr, len }
-        } else {
-            CFfiByteBuffer {
+        fetch_itunes_artwork_bytes(&t, &a)
+            .map(vec_to_ffi_bytes)
+            .unwrap_or(CFfiByteBuffer {
                 data: ptr::null_mut(),
                 len: 0,
-            }
-        }
+            })
     }))
     .unwrap_or(CFfiByteBuffer {
         data: ptr::null_mut(),
@@ -805,7 +813,7 @@ pub extern "C" fn lyrics_core_check_updates_async(
     current_version: *const c_char,
     current_build: i32,
     ctx: usize,
-    callback: UpdateCheckCallback,
+    callback: Option<UpdateCheckCallback>,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let ver = unsafe { cstr_to_string(current_version) };
@@ -814,7 +822,9 @@ pub extern "C" fn lyrics_core_check_updates_async(
             .spawn(move || {
                 let outcome = check_updates(&ver, current_build);
                 let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
-                callback(ctx, to_cstring_raw(&json));
+                if let Some(cb) = callback {
+                    cb(ctx, to_cstring_raw(&json));
+                }
             });
     }));
 }
@@ -825,29 +835,56 @@ pub extern "C" fn lyrics_core_download_dmg_async(
     url: *const c_char,
     dest_path: *const c_char,
     ctx: usize,
-    progress_cb: DownloadProgressCallback,
-    complete_cb: DownloadCompleteCallback,
+    progress_cb: Option<DownloadProgressCallback>,
+    complete_cb: Option<DownloadCompleteCallback>,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let Some(core) = (unsafe { handle.as_ref() }) else {
-            complete_cb(ctx, false, to_cstring_raw("Invalid core handle"));
+            if let Some(cb) = complete_cb {
+                cb(ctx, false, to_cstring_raw("Invalid core handle"));
+            }
             return;
         };
-        core.download_cancel.store(false, Ordering::Release);
-        let cancel = core.download_cancel.clone();
+
+        // Cancel any previous download cleanly with per-transfer token
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = core
+                .active_download_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(prev) = slot.replace(cancel.clone()) {
+                prev.store(true, Ordering::Release);
+            }
+        }
+
         let url_str = unsafe { cstr_to_string(url) };
         let dest_str = unsafe { cstr_to_string(dest_path) };
 
-        let _ = thread::Builder::new()
+        let spawn_res = thread::Builder::new()
             .name("lyrics-dmg-download".into())
-            .spawn(move || {
-                match download_dmg_streaming(&url_str, &dest_str, &cancel, |p| {
-                    progress_cb(ctx, p);
-                }) {
-                    Ok(()) => complete_cb(ctx, true, ptr::null_mut()),
-                    Err(e) => complete_cb(ctx, false, to_cstring_raw(&e)),
+            .spawn(move || match download_dmg_streaming(&url_str, &dest_str, &cancel, |p| {
+                if let Some(pcb) = progress_cb {
+                    pcb(ctx, p);
+                }
+            }) {
+                Ok(()) => {
+                    if let Some(ccb) = complete_cb {
+                        ccb(ctx, true, ptr::null_mut());
+                    }
+                }
+                Err(e) => {
+                    if let Some(ccb) = complete_cb {
+                        ccb(ctx, false, to_cstring_raw(&e));
+                    }
                 }
             });
+
+        if spawn_res.is_err() {
+            if let Some(ccb) = complete_cb {
+                ccb(ctx, false, to_cstring_raw("Failed to spawn download thread"));
+            }
+        }
     }));
 }
 
@@ -855,7 +892,14 @@ pub extern "C" fn lyrics_core_download_dmg_async(
 pub extern "C" fn lyrics_core_cancel_download(handle: *mut LyricsCoreHandle) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if let Some(core) = unsafe { handle.as_ref() } {
-            core.download_cancel.store(true, Ordering::Release);
+            if let Some(flag) = core
+                .active_download_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                flag.store(true, Ordering::Release);
+            }
         }
     }));
 }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ServiceManagement
 
@@ -5,9 +6,10 @@ public enum LaunchAtLoginManager {
     public static var isEnabled: Bool {
         get {
             if #available(macOS 13.0, *) {
-                return SMAppService.mainApp.status == .enabled
+                let status = SMAppService.mainApp.status
+                return status == .enabled || status == .requiresApproval
             }
-            return UserDefaults.standard.bool(forKey: "launchAtLogin")
+            return UserDefaults.standard.bool(forKey: AppSettingKey.launchAtLogin)
         }
         set {
             if #available(macOS 13.0, *) {
@@ -16,16 +18,21 @@ public enum LaunchAtLoginManager {
                         if SMAppService.mainApp.status != .enabled {
                             try SMAppService.mainApp.register()
                         }
+                        if SMAppService.mainApp.status == .requiresApproval {
+                            SMAppService.openSystemSettingsLoginItems()
+                        }
                     } else {
-                        if SMAppService.mainApp.status == .enabled {
+                        if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
                             try SMAppService.mainApp.unregister()
                         }
                     }
+                    UserDefaults.standard.set(isEnabled, forKey: AppSettingKey.launchAtLogin)
                 } catch {
-                    print("Error setting launch at login: \(error)")
+                    logDebug("Error setting launch at login: \(error)")
                 }
+            } else {
+                UserDefaults.standard.set(newValue, forKey: AppSettingKey.launchAtLogin)
             }
-            UserDefaults.standard.set(newValue, forKey: "launchAtLogin")
         }
     }
 }

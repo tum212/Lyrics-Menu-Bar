@@ -1,13 +1,33 @@
 import AppKit
 
-// MARK: - Native NSMenu for Settings (100% Parity with v1.3.1)
+// MARK: - Native NSMenu for Settings (Universal Multi-App Support + Full Parity)
 @MainActor
 final class SettingsMenuController: NSObject {
     static let shared = SettingsMenuController()
-    static var isPresentingMenuOrAlert: Bool = false
+
+    private static var modalPresentationDepth: Int = 0
+    static var isPresentingModal: Bool { modalPresentationDepth > 0 }
+    static let modalPresentationDidEndNotification = Notification.Name("ModalPresentationDidEnd")
+
+    static func beginModalPresentation() {
+        modalPresentationDepth += 1
+    }
+
+    static func endModalPresentation() {
+        modalPresentationDepth = max(0, modalPresentationDepth - 1)
+        if modalPresentationDepth == 0 {
+            NotificationCenter.default.post(name: modalPresentationDidEndNotification, object: nil)
+        }
+    }
 
     private override init() {
         super.init()
+    }
+
+    private func makeMenu(title: String = "") -> NSMenu {
+        let m = NSMenu(title: title)
+        m.autoenablesItems = false
+        return m
     }
 
     func showMenu(anchoredTo sender: NSView) {
@@ -16,7 +36,8 @@ final class SettingsMenuController: NSObject {
         let showAlbumArt = ud.object(forKey: AppSettingKey.showAlbumArt) == nil ? true : ud.bool(forKey: AppSettingKey.showAlbumArt)
         let lyricsFocusMode = ud.object(forKey: AppSettingKey.lyricsFocusMode) == nil ? true : ud.bool(forKey: AppSettingKey.lyricsFocusMode)
         let lyricsMaxWidth = ud.object(forKey: AppSettingKey.lyricsMaxWidth) == nil ? 200 : ud.integer(forKey: AppSettingKey.lyricsMaxWidth)
-        let musicSourceMode = ud.string(forKey: AppSettingKey.musicSourceMode) ?? "Auto"
+        let sourceSelection = MusicIPCBridge.shared.sourceSelection
+        let universalEnabled = MusicIPCBridge.shared.universalNowPlayingEnabled
         let isUltraLight = AppPerformance.isUltraLightMode
         let specularEdgeEnabled = ud.object(forKey: AppSettingKey.specularEdgeEnabled) == nil ? !AppPerformance.defaultUltraLightMode : ud.bool(forKey: AppSettingKey.specularEdgeEnabled)
         let hapticIntensity = ud.integer(forKey: AppSettingKey.hapticIntensity)
@@ -24,12 +45,11 @@ final class SettingsMenuController: NSObject {
         let audioFeaturesEnabled = ud.object(forKey: AppSettingKey.audioFeaturesEnabled) == nil ? (AppCapabilities.supportsAudioTap && !AppPerformance.defaultUltraLightMode) : ud.bool(forKey: AppSettingKey.audioFeaturesEnabled)
         let waveformBars = ud.object(forKey: AppSettingKey.waveformBars) == nil ? ((AppPerformance.defaultUltraLightMode || !AppCapabilities.supportsAudioTap) ? 0 : 14) : ud.integer(forKey: AppSettingKey.waveformBars)
 
-        let menu = NSMenu()
-        menu.autoenablesItems = false
+        let menu = makeMenu()
 
         // ── 1. General Submenu ─────────────────────────────────────────────
         let generalItem = NSMenuItem(title: "General", action: nil, keyEquivalent: "")
-        let generalMenu = NSMenu(title: "General")
+        let generalMenu = makeMenu(title: "General")
 
         let lyricsItem = NSMenuItem(title: "Lyrics in Menu Bar", action: #selector(toggleLyrics), keyEquivalent: "")
         lyricsItem.target = self
@@ -48,20 +68,58 @@ final class SettingsMenuController: NSObject {
 
         generalMenu.addItem(.separator())
 
+        // Dynamic Universal Music Source Submenu
         let sourceItem = NSMenuItem(title: "Music Source", action: nil, keyEquivalent: "")
-        let sourceMenu = NSMenu(title: "Music Source")
-        let sources = [
-            ("Auto", "Auto (Detect Active Player)"),
-            ("Spotify", "Spotify"),
-            ("Apple Music", "Apple Music")
-        ]
-        for (key, title) in sources {
-            let item = NSMenuItem(title: title, action: #selector(setMusicSource(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = key
-            item.state = musicSourceMode == key ? .on : .off
-            sourceMenu.addItem(item)
+        let sourceMenu = makeMenu(title: "Music Source")
+
+        let activeLabel = LyricsCoreEngine.shared.currentTrack?.sourceDisplayName
+        let autoTitle = activeLabel.map { "Auto (Active: \($0))" } ?? "Auto (Detect Any Player)"
+        let autoItem = NSMenuItem(title: autoTitle, action: #selector(setMusicSource(_:)), keyEquivalent: "")
+        autoItem.target = self
+        autoItem.representedObject = "Auto"
+        autoItem.state = (sourceSelection == .auto) ? .on : .off
+        sourceMenu.addItem(autoItem)
+
+        let universalItem = NSMenuItem(title: "Universal Streaming & Web Players", action: #selector(toggleUniversalNowPlaying), keyEquivalent: "")
+        universalItem.target = self
+        universalItem.state = universalEnabled ? .on : .off
+        sourceMenu.addItem(universalItem)
+
+        let registry = MusicSourceRegistry.shared
+        let installed = registry.installedPlayers()
+        let appPlayers = installed.filter { $0.category != .browser }
+        let browsers = installed.filter { $0.category == .browser }
+
+        if !appPlayers.isEmpty {
+            sourceMenu.addItem(.separator())
+            for desc in appPlayers {
+                let running = registry.isRunning(desc)
+                let title = running ? "\(desc.displayName)  ●" : desc.displayName
+                let item = NSMenuItem(title: title, action: #selector(setMusicSource(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = desc.id
+                item.state = (sourceSelection == .specific(bundleID: desc.id)) ? .on : .off
+                sourceMenu.addItem(item)
+            }
         }
+
+        if !browsers.isEmpty {
+            sourceMenu.addItem(.separator())
+            let browserParent = NSMenuItem(title: "Web Browsers (YouTube Music, Spotify Web, ...)", action: nil, keyEquivalent: "")
+            let browserMenu = makeMenu(title: "Web Browsers")
+            for desc in browsers {
+                let running = registry.isRunning(desc)
+                let title = running ? "\(desc.displayName)  ●" : desc.displayName
+                let item = NSMenuItem(title: title, action: #selector(setMusicSource(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = desc.id
+                item.state = (sourceSelection == .specific(bundleID: desc.id)) ? .on : .off
+                browserMenu.addItem(item)
+            }
+            browserParent.submenu = browserMenu
+            sourceMenu.addItem(browserParent)
+        }
+
         sourceItem.submenu = sourceMenu
         generalMenu.addItem(sourceItem)
         generalItem.submenu = generalMenu
@@ -69,7 +127,7 @@ final class SettingsMenuController: NSObject {
 
         // ── 2. Lyrics & Animation Submenu ──────────────────────────────────
         let lyricsSectionItem = NSMenuItem(title: "Lyrics & Animation", action: nil, keyEquivalent: "")
-        let lyricsSectionMenu = NSMenu(title: "Lyrics & Animation")
+        let lyricsSectionMenu = makeMenu(title: "Lyrics & Animation")
 
         let focusItem = NSMenuItem(title: "Lyrics Focus Mode", action: #selector(toggleFocusMode), keyEquivalent: "")
         focusItem.target = self
@@ -77,7 +135,7 @@ final class SettingsMenuController: NSObject {
         lyricsSectionMenu.addItem(focusItem)
 
         let widthItem = NSMenuItem(title: "Lyrics Width", action: nil, keyEquivalent: "")
-        let widthMenu = NSMenu(title: "Lyrics Width")
+        let widthMenu = makeMenu(title: "Lyrics Width")
         var widths = [0, 50, 100, 150, 200, 250, 260, 300]
         if !widths.contains(lyricsMaxWidth) {
             widths.append(lyricsMaxWidth)
@@ -102,7 +160,7 @@ final class SettingsMenuController: NSObject {
 
         // ── 3. Appearance & Performance Submenu ────────────────────────────
         let appearanceItem = NSMenuItem(title: "Appearance & Performance", action: nil, keyEquivalent: "")
-        let appearanceMenu = NSMenu(title: "Appearance & Performance")
+        let appearanceMenu = makeMenu(title: "Appearance & Performance")
 
         let ultraLightItem = NSMenuItem(title: "Reduce Glass & Blur Effects (60 FPS Lightweight)", action: #selector(toggleUltraLightMode), keyEquivalent: "")
         ultraLightItem.target = self
@@ -125,10 +183,10 @@ final class SettingsMenuController: NSObject {
             menu.addItem(hapticsItem)
         } else {
             let hapticsItem = NSMenuItem(title: "Haptics", action: nil, keyEquivalent: "")
-            let hapticsMenu = NSMenu(title: "Haptics")
+            let hapticsMenu = makeMenu(title: "Haptics")
 
             let intensityItem = NSMenuItem(title: "Intensity", action: nil, keyEquivalent: "")
-            let intensityMenu = NSMenu(title: "Intensity")
+            let intensityMenu = makeMenu(title: "Intensity")
             for (i, mode) in ["Off", "Light", "Medium", "Firm"].enumerated() {
                 let item = NSMenuItem(title: mode, action: #selector(setHaptic(_:)), keyEquivalent: "")
                 item.target = self
@@ -141,7 +199,7 @@ final class SettingsMenuController: NSObject {
 
             hapticsMenu.addItem(.separator())
             let feelItem = NSMenuItem(title: "Haptic Feel", action: nil, keyEquivalent: "")
-            let feelMenu = NSMenu(title: "Haptic Feel")
+            let feelMenu = makeMenu(title: "Haptic Feel")
             let types: [(tag: Int, desc: String)] = [
                 (0, "Auto (kick=6, beat=4)"),
                 (1, "1 - Very light tap"),
@@ -171,7 +229,7 @@ final class SettingsMenuController: NSObject {
 
         // ── 5. Audio Submenu ───────────────────────────────────────────────
         let audioSectionItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
-        let audioSectionMenu = NSMenu(title: "Audio")
+        let audioSectionMenu = makeMenu(title: "Audio")
 
         let audioItem: NSMenuItem
         if !AppCapabilities.supportsAudioTap {
@@ -185,7 +243,7 @@ final class SettingsMenuController: NSObject {
         audioSectionMenu.addItem(audioItem)
 
         let waveItem = NSMenuItem(title: "Waveform Bars", action: nil, keyEquivalent: "")
-        let waveMenu = NSMenu(title: "Waveform Bars")
+        let waveMenu = makeMenu(title: "Waveform Bars")
         var wModes = [0, 6, 10, 14, 24, 32, 48, 128]
         if !wModes.contains(waveformBars) {
             wModes.append(waveformBars)
@@ -227,8 +285,8 @@ final class SettingsMenuController: NSObject {
         menu.addItem(quitItem)
 
         let pt = NSPoint(x: sender.bounds.minX, y: sender.bounds.minY - 5)
-        Self.isPresentingMenuOrAlert = true
-        defer { Self.isPresentingMenuOrAlert = false }
+        Self.beginModalPresentation()
+        defer { Self.endModalPresentation() }
         menu.popUp(positioning: nil, at: pt, in: sender)
     }
 
@@ -237,22 +295,34 @@ final class SettingsMenuController: NSObject {
     }
 
     @objc private func setMusicSource(_ sender: NSMenuItem) {
-        if let key = sender.representedObject as? String {
-            UserDefaults.standard.set(key, forKey: AppSettingKey.musicSourceMode)
-            let bundleID = (key == "Apple Music") ? "com.apple.Music" : "com.spotify.client"
-            NotificationCenter.default.post(name: Notification.Name("ActiveMusicSourceChanged"), object: nil, userInfo: ["bundleID": bundleID])
+        guard let key = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(key, forKey: AppSettingKey.musicSourceMode)
+        if key == "Auto" {
             MusicIPCBridge.shared.pollActivePlayer()
+        } else {
+            NotificationCenter.default.post(
+                name: Notification.Name("ActiveMusicSourceChanged"),
+                object: nil,
+                userInfo: ["bundleID": key, "sourceID": key]
+            )
+            MusicIPCBridge.shared.clearAutomationDenialAndPoll(for: key)
         }
     }
 
+    @objc private func toggleUniversalNowPlaying() {
+        let newVal = !MusicIPCBridge.shared.universalNowPlayingEnabled
+        UserDefaults.standard.set(newVal, forKey: AppSettingKey.universalNowPlayingEnabled)
+        MusicIPCBridge.shared.pollActivePlayer()
+    }
+
     @objc private func showAbout() {
-        Self.isPresentingMenuOrAlert = true
-        defer { Self.isPresentingMenuOrAlert = false }
+        Self.beginModalPresentation()
+        defer { Self.endModalPresentation() }
         let eng = LyricsCoreEngine.shared
         let alert = NSAlert()
         let modeLabel = AppPerformance.isUltraLightMode ? "60 FPS Lightweight" : "Standard Glass"
         alert.messageText = "Lyrics Menu Bar \(eng.currentVersion) (Build \(eng.currentBuild))"
-        alert.informativeText = "Rust Core Engine + Pure AppKit 60 FPS HUD (\(modeLabel))\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
+        alert.informativeText = "Rust Core Engine + Pure AppKit 60 FPS HUD (\(modeLabel))\nUniversal Streaming Support: Spotify, Apple Music, YouTube Music, TIDAL, Deezer, Qobuz, SoundCloud, Cider, VLC, Swinsian, VOX & Web Players.\n\nLicensed under the MIT License\nCopyright © 2026 Puwadon and Contributors\n\nOpen Source & Free."
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
@@ -311,10 +381,25 @@ final class SettingsMenuController: NSObject {
 
     @objc private func setHaptic(_ sender: NSMenuItem) {
         UserDefaults.standard.set(sender.tag, forKey: AppSettingKey.hapticIntensity)
+        // Auto-enable Audio Tap when turning on Haptics so beat detection works immediately
+        if sender.tag > 0 && AppCapabilities.supportsAudioTap {
+            let ud = UserDefaults.standard
+            if !ud.bool(forKey: AppSettingKey.audioFeaturesEnabled) {
+                ud.set(true, forKey: AppSettingKey.audioFeaturesEnabled)
+                NotificationCenter.default.post(name: Notification.Name("AudioFeaturesEnabled"), object: nil)
+            }
+        }
     }
 
     @objc private func setWaveform(_ sender: NSMenuItem) {
         UserDefaults.standard.set(sender.tag, forKey: AppSettingKey.waveformBars)
+        if sender.tag > 0 && AppCapabilities.supportsAudioTap {
+            let ud = UserDefaults.standard
+            if !ud.bool(forKey: AppSettingKey.audioFeaturesEnabled) {
+                ud.set(true, forKey: AppSettingKey.audioFeaturesEnabled)
+                NotificationCenter.default.post(name: Notification.Name("AudioFeaturesEnabled"), object: nil)
+            }
+        }
     }
 
     @objc private func quit() {
@@ -338,8 +423,8 @@ final class SettingsMenuController: NSObject {
     }
 
     @objc private func promptCustomWidth() {
-        Self.isPresentingMenuOrAlert = true
-        defer { Self.isPresentingMenuOrAlert = false }
+        Self.beginModalPresentation()
+        defer { Self.endModalPresentation() }
         let current = UserDefaults.standard.object(forKey: AppSettingKey.lyricsMaxWidth) == nil ? 200 : UserDefaults.standard.integer(forKey: AppSettingKey.lyricsMaxWidth)
         let alert = NSAlert()
         alert.messageText = "Custom Lyrics Width"
@@ -350,16 +435,18 @@ final class SettingsMenuController: NSObject {
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         input.stringValue = String(current)
         alert.accessoryView = input
+        alert.window.initialFirstResponder = input
 
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn, let val = Int(input.stringValue) {
+        if alert.runModal() == .alertFirstButtonReturn,
+           let val = Int(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
             UserDefaults.standard.set(min(max(0, val), 1000), forKey: AppSettingKey.lyricsMaxWidth)
         }
     }
 
     @objc private func promptCustomWaveform() {
-        Self.isPresentingMenuOrAlert = true
-        defer { Self.isPresentingMenuOrAlert = false }
+        Self.beginModalPresentation()
+        defer { Self.endModalPresentation() }
         let current = UserDefaults.standard.object(forKey: AppSettingKey.waveformBars) == nil ? 14 : UserDefaults.standard.integer(forKey: AppSettingKey.waveformBars)
         let alert = NSAlert()
         alert.messageText = "Custom Waveform Bars"
@@ -370,10 +457,20 @@ final class SettingsMenuController: NSObject {
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         input.stringValue = String(current)
         alert.accessoryView = input
+        alert.window.initialFirstResponder = input
 
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn, let val = Int(input.stringValue) {
-            UserDefaults.standard.set(min(max(0, val), 128), forKey: AppSettingKey.waveformBars)
+        if alert.runModal() == .alertFirstButtonReturn,
+           let val = Int(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            let clamped = min(max(0, val), 128)
+            UserDefaults.standard.set(clamped, forKey: AppSettingKey.waveformBars)
+            if clamped > 0 && AppCapabilities.supportsAudioTap {
+                let ud = UserDefaults.standard
+                if !ud.bool(forKey: AppSettingKey.audioFeaturesEnabled) {
+                    ud.set(true, forKey: AppSettingKey.audioFeaturesEnabled)
+                    NotificationCenter.default.post(name: Notification.Name("AudioFeaturesEnabled"), object: nil)
+                }
+            }
         }
     }
 }

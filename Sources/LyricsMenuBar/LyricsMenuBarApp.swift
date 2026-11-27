@@ -74,6 +74,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cachedAlbumArtTrackId: String?
     private var dynamicIslandPopStartTime: CFTimeInterval = 0
     private var needsActiveFramesFromRust: Bool = false
+    private var isSystemAsleep: Bool = false
 
     private lazy var idlePlaySymbol: NSImage? = {
         let img = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Lyrics Menu Bar")
@@ -120,6 +121,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         nc.addObserver(self, selector: #selector(handleClosePopover), name: Notification.Name("ClosePopover"), object: nil)
         nc.addObserver(self, selector: #selector(handleAudioFeaturesDisabled), name: Notification.Name("AudioFeaturesDisabled"), object: nil)
         nc.addObserver(self, selector: #selector(handleAudioFeaturesEnabled), name: Notification.Name("AudioFeaturesEnabled"), object: nil)
+        nc.addObserver(self, selector: #selector(handleScreenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleModalPresentationEnded), name: SettingsMenuController.modalPresentationDidEndNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleLowPowerModeChanged), name: Notification.Name.NSProcessInfoPowerStateDidChange, object: nil)
+
+        let wnc = NSWorkspace.shared.notificationCenter
+        wnc.addObserver(self, selector: #selector(handleSystemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        wnc.addObserver(self, selector: #selector(handleSystemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(handleDistributedTogglePopover), name: NSNotification.Name("com.spoticat.TogglePopover"), object: nil)
 
         // Setup KeyablePanel + HUDGlassView + Pure AppKit HUDContentView (ZERO SwiftUI)
@@ -129,6 +138,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
+        // Always enforce dark glass appearance so white HUD typography & icons remain crisp in macOS Light Mode
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
@@ -160,6 +172,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let canvas = MenuBarCanvasView(frame: button.bounds)
             canvas.autoresizingMask = [.width, .height]
             canvas.isHidden = true
+            canvas.onAppearanceOrScaleChanged = { [weak self] in
+                self?.updateMenuBar()
+            }
             button.addSubview(canvas)
             self.menuBarCanvasView = canvas
         }
@@ -169,6 +184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    self.lastWordLeadX = nil
                     self.syncAudioTapState()
                     self.needsActiveFramesFromRust = true
                     self.syncMenuBarTimerState()
@@ -193,6 +209,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    self.lastWordLeadX = nil
                     self.needsActiveFramesFromRust = true
                     self.syncMenuBarTimerState()
                     self.updateMenuBar()
@@ -202,13 +219,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         observers.append(nc.addObserver(forName: LyricsCoreEngine.artworkDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.updateMenuBar() }
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.needsActiveFramesFromRust = true
+                    self.syncMenuBarTimerState()
+                    self.updateMenuBar()
+                }
             }
         })
 
         observers.append(nc.addObserver(forName: LyricsCoreEngine.lyricsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.updateMenuBar() }
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.lastWordLeadX = nil
+                    self.updateMenuBar()
+                }
             }
         })
 
@@ -227,6 +253,62 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         audioTap.stop()
         musicIPC.cleanup()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+        NotificationCenter.default.removeObserver(self)
+        DistributedNotificationCenter.default().removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    // MARK: - System Sleep / Wake / Screen Hot-Plug Resilience
+
+    @objc private func handleSystemWillSleep() {
+        isSystemAsleep = true
+        stopMenuBarUpdater()
+        audioTap.stop()
+    }
+
+    @objc private func handleSystemDidWake() {
+        isSystemAsleep = false
+        syncAudioTapState()
+        syncMenuBarTimerState()
+        musicIPC.pollActivePlayer()
+        updateMenuBar()
+    }
+
+    @objc private func handleScreenParametersChanged() {
+        if isActiveUpdating {
+            // Recreate CVDisplayLink so it binds to updated displays
+            stopMenuBarUpdater()
+            syncMenuBarTimerState()
+        }
+        updateMenuBar()
+    }
+
+    @objc private func handleLowPowerModeChanged() {
+        DispatchQueue.main.async { [weak self] in
+            self?.handleUltraLightModeChanged()
+        }
+    }
+
+    @objc private func handleModalPresentationEnded() {
+        guard let panel = self.panel, panel.isVisible, !isGenieAnimating else { return }
+        if !NSApp.isActive {
+            // User clicked outside to dismiss the menu — close HUD cleanly instead of leaving it orphaned
+            if !isUpdateInProgress() {
+                animateGenieClose()
+            }
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func isUpdateInProgress() -> Bool {
+        switch coreEngine.updateState {
+        case .downloading, .installing:
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Panel Genie & 60 FPS Spring Open/Close
@@ -241,11 +323,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var yPos: CGFloat
         var buttonMidX: CGFloat = screenFrame.maxX - 100
 
-        if let button = statusItem?.button, let buttonWindow = button.window, buttonWindow.frame.origin.y > 0 {
-            let buttonRect = buttonWindow.convertToScreen(button.frame)
-            buttonMidX = buttonRect.midX
-            xPos = buttonMidX - (panelWidth / 2)
-            yPos = buttonRect.minY - panelHeight - 8
+        if let button = statusItem?.button, let buttonWindow = button.window {
+            let rectInWindow = button.convert(button.bounds, to: nil)
+            let buttonRect = buttonWindow.convertToScreen(rectInWindow)
+            if buttonRect.width > 0 && buttonRect.height > 0 {
+                buttonMidX = buttonRect.midX
+                xPos = buttonMidX - (panelWidth / 2)
+                yPos = buttonRect.minY - panelHeight - 8
+            } else {
+                xPos = screenFrame.maxX - panelWidth - 20
+                yPos = screenFrame.maxY - panelHeight - 8
+            }
         } else {
             xPos = screenFrame.maxX - panelWidth - 20
             yPos = screenFrame.maxY - panelHeight - 8
@@ -269,7 +357,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         coreEngine.isPanelVisible = true
         hudContentView?.lyricsView.snapScrollToActive()
-        hudContentView?.lyricsView.renderNow()
+        hudContentView?.lyricsView.renderNow(force: true)
         syncMenuBarTimerState()
 
         if AppPerformance.isUltraLightMode {
@@ -298,9 +386,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             CATransaction.begin()
             CATransaction.setCompletionBlock { [weak self] in
+                guard let self else { return }
                 layer.transform = CATransform3DIdentity
                 layer.opacity = 1.0
-                self?.isGenieAnimating = false
+                self.isGenieAnimating = false
+                if !panel.isKeyWindow && !SettingsMenuController.isPresentingModal && !self.isUpdateInProgress() {
+                    self.animateGenieClose()
+                }
             }
             layer.add(springAnim, forKey: "liteOpenSpring")
             layer.add(fadeAnim, forKey: "liteOpenOpacity")
@@ -342,15 +434,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self] in
+            guard let self else { return }
             layer.transform = CATransform3DIdentity
             layer.opacity = 1.0
-            self?.isGenieAnimating = false
+            self.isGenieAnimating = false
+            if !panel.isKeyWindow && !SettingsMenuController.isPresentingModal && !self.isUpdateInProgress() {
+                self.animateGenieClose()
+            }
         }
         layer.add(springAnim, forKey: "genieOpenTransform")
         layer.add(fadeAnim, forKey: "genieOpenOpacity")
         layer.transform = CATransform3DIdentity
         layer.opacity = 1.0
         CATransaction.commit()
+    }
+
+    private func finishPanelCloseCleanup(panel: NSPanel, layer: CALayer) {
+        coreEngine.isPanelVisible = false
+        panel.orderOut(nil)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.transform = CATransform3DIdentity
+        layer.anchorPoint = .zero
+        layer.position = .zero
+        layer.opacity = 1.0
+        CATransaction.commit()
+        NSCursor.arrow.set()
+        hudContentView?.lyricsView.purgeImageCache()
+        isGenieAnimating = false
+        syncMenuBarTimerState()
     }
 
     private func animateGenieClose() {
@@ -373,13 +485,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             CATransaction.begin()
             CATransaction.setCompletionBlock { [weak self] in
-                guard let self else { return }
-                self.coreEngine.isPanelVisible = false
-                panel.orderOut(nil)
-                layer.transform = CATransform3DIdentity
-                layer.opacity = 1.0
-                self.isGenieAnimating = false
-                self.syncMenuBarTimerState()
+                self?.finishPanelCloseCleanup(panel: panel, layer: layer)
             }
             layer.add(scaleAnim, forKey: "liteCloseScale")
             layer.add(fadeAnim, forKey: "liteCloseOpacity")
@@ -413,13 +519,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self] in
-            guard let self else { return }
-            self.coreEngine.isPanelVisible = false
-            panel.orderOut(nil)
-            layer.transform = CATransform3DIdentity
-            layer.opacity = 1.0
-            self.isGenieAnimating = false
-            self.syncMenuBarTimerState()
+            self?.finishPanelCloseCleanup(panel: panel, layer: layer)
         }
         layer.add(transformAnim, forKey: "genieCloseTransform")
         layer.add(fadeAnim, forKey: "genieCloseOpacity")
@@ -445,7 +545,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !SettingsMenuController.isPresentingMenuOrAlert else { return }
+        guard !SettingsMenuController.isPresentingModal else { return }
+        guard !isUpdateInProgress() else { return }
         if let window = notification.object as? NSWindow, window == panel {
             if panel?.isVisible == true && !isGenieAnimating {
                 animateGenieClose()
@@ -466,7 +567,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func syncAudioTapState() {
-        guard AppCapabilities.supportsAudioTap else { return }
+        guard AppCapabilities.supportsAudioTap, !isSystemAsleep else { return }
         let featuresEnabled = UserDefaults.standard.bool(forKey: AppSettingKey.audioFeaturesEnabled)
         let hapticIntensity = UserDefaults.standard.integer(forKey: AppSettingKey.hapticIntensity)
         let needsTap = coreEngine.currentTrack != nil
@@ -502,7 +603,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func handleUserDefaultsChanged() {
+        let prevBars = cachedWaveformBars
         refreshCachedPrefs()
+        if prevBars == 0 && cachedWaveformBars > 0, let img = coreEngine.artworkImage {
+            cachedWaveformTheme = ColorExtractor.extractWaveformTheme(from: img)
+        }
         syncAudioTapState()
         syncMenuBarTimerState()
         updateMenuBar()
@@ -516,11 +621,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateMenuBar()
     }
 
+    private func isPopAnimationActive() -> Bool {
+        let elapsed = CACurrentMediaTime() - dynamicIslandPopStartTime
+        return dynamicIslandPopStartTime > 0 && elapsed < 0.75
+    }
+
     func syncMenuBarTimerState() {
+        if isSystemAsleep {
+            stopMenuBarUpdater()
+            return
+        }
         let hasTrack = coreEngine.currentTrack != nil
         let isPlaying = coreEngine.isPlaying
-        let hudVisibleAndPlaying = (panel?.isVisible == true) && isPlaying
-        let needsActive = (hasTrack && (isPlaying || needsActiveFramesFromRust)) || hudVisibleAndPlaying
+        let hudVisibleAndPlaying = hasTrack && (panel?.isVisible == true) && isPlaying
+        let needsActive = (hasTrack && (isPlaying || needsActiveFramesFromRust || isPopAnimationActive())) || hudVisibleAndPlaying
 
         if !needsActive {
             if isActiveUpdating {
@@ -566,7 +680,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func displayLinkTick() {
         let now = CACurrentMediaTime()
-        if now - lastDisplayLinkTick < (1.0 / 62.0) { return }
+        // Slightly under 16.6ms (1/68s = 14.7ms) prevents 60Hz jitter from skipping every other vsync to 30 FPS
+        if now - lastDisplayLinkTick < (1.0 / 68.0) { return }
         lastDisplayLinkTick = now
         updateMenuBar()
     }
@@ -600,6 +715,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return 600.0
     }
 
+    private func showIdleButtonFallback() {
+        if !isShowingIdleIcon {
+            menuBarCanvasView?.isHidden = true
+            menuBarCanvasView?.reset()
+            if let button = self.statusItem?.button {
+                button.image = idlePlaySymbol
+                button.imagePosition = .imageOnly
+            }
+            if let item = self.statusItem, item.length != NSStatusItem.variableLength {
+                item.length = NSStatusItem.variableLength
+            }
+            isShowingIdleIcon = true
+            cachedAlbumArtTrackId = nil
+            hasRealAlbumArt = false
+            lastRenderedLyricsText = ""
+            lastWordLeadX = nil
+        }
+    }
+
     // MARK: - Unified 60 FPS GPU Frame Pass (MenuBar + Visible HUD)
 
     func updateMenuBar() {
@@ -613,19 +747,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let showAlbumArt = cachedShowAlbumArt
         let showLyrics = cachedShowLyrics
 
-        if waveformBars > 0 && AppCapabilities.supportsAudioTap {
-            coreEngine.updateWaveformBandCount(waveformBars)
-        }
-
-        if waveformBars != lastWaveformBarsCount || showAlbumArt != lastShowAlbumArt || showLyrics != lastShowLyrics {
+        if waveformBars != lastWaveformBarsCount {
+            if waveformBars > 0 && AppCapabilities.supportsAudioTap {
+                coreEngine.updateWaveformBandCount(waveformBars)
+            }
+            if lastWaveformBarsCount <= 0 && waveformBars > 0, let img = coreEngine.artworkImage {
+                cachedWaveformTheme = ColorExtractor.extractWaveformTheme(from: img)
+            }
             lastWaveformBarsCount = waveformBars
-            lastShowAlbumArt = showAlbumArt
-            lastShowLyrics = showLyrics
         }
+        lastShowAlbumArt = showAlbumArt
+        lastShowLyrics = showLyrics
 
-        let isVisible = showLyrics || (waveformBars > 0) || showAlbumArt || (coreEngine.currentTrack == nil)
-        if statusItem?.isVisible != isVisible {
-            statusItem?.isVisible = isVisible
+        // NEVER hide statusItem completely — user must always have a clickable entry point in the Menu Bar!
+        if statusItem?.isVisible == false {
+            statusItem?.isVisible = true
         }
 
         let step = coreEngine.stepMenuBarFrame(deltaTime: deltaTime, isUltraLight: isUltraLight)
@@ -633,6 +769,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if step.hasTrack, let track = coreEngine.currentTrack {
             guard let button = self.statusItem?.button else { return }
+
+            let barCount = cachedWaveformBars
+            let barW: CGFloat = 2.0
+            let barSp: CGFloat = 1.5
+            let vizWidth: CGFloat = (barCount > 0 && coreEngine.isPlaying) ? CGFloat(barCount) * (barW + barSp) : 0
+            let artWidth: CGFloat = showAlbumArt ? 20.0 : 0
+            let lyricsRequested = showLyrics && cachedLyricsMaxWidth > 2
+
+            // If user turned off lyrics, album art, AND waveform is inactive, keep clickable idle icon visible!
+            if !lyricsRequested && vizWidth <= 0 && artWidth <= 0 {
+                showIdleButtonFallback()
+                if panel?.isVisible == true {
+                    hudContentView?.lyricsView.renderFrame(
+                        currentTime: coreEngine.currentTime(),
+                        deltaTime: deltaTime,
+                        isPlaying: coreEngine.isPlaying
+                    )
+                }
+                if !step.needsActiveFrames && !(panel?.isVisible == true && coreEngine.isPlaying) {
+                    syncMenuBarTimerState()
+                }
+                return
+            }
+
             if isShowingIdleIcon || button.image != nil {
                 button.image = nil
                 menuBarCanvasView?.isHidden = false
@@ -640,6 +800,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if menuBarCanvasView?.isHidden == true {
                 menuBarCanvasView?.isHidden = false
             }
+
             let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let currentLineText = step.text
 
@@ -661,14 +822,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if step.activeWordIndex >= 0,
                       let activeLine = coreEngine.lyrics.first(where: { $0.id == step.lineId }),
                       step.activeWordIndex < activeLine.words.count {
-                // Find exact prefix X for active word using system San Francisco kerning
                 var searchStart = currentLineText.startIndex
                 var resolvedX: CGFloat? = nil
                 for wi in 0...step.activeWordIndex {
                     let wordText = activeLine.words[wi].text
-                    let range = currentLineText.range(of: wordText, range: searchStart..<currentLineText.endIndex)
-                        ?? currentLineText.range(of: wordText)
-                    if let r = range {
+                    if let r = currentLineText.range(of: wordText, range: searchStart..<currentLineText.endIndex) {
                         searchStart = r.upperBound
                         if wi == step.activeWordIndex {
                             let prefix = String(currentLineText[..<r.lowerBound])
@@ -687,11 +845,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
 
-            let glowPad: CGFloat = 6.0
-            let effectiveMaxW = min(CGFloat(cachedLyricsMaxWidth), getNotchSafeMaxWidth())
+            // Enforce total notch-safe budget across lyrics + waveform + album art + gaps
+            let gap: CGFloat = 8.0
+            let notchBudget = getNotchSafeMaxWidth()
+            let nonLyricsW = vizWidth + artWidth
+                + (vizWidth > 0 && artWidth > 0 ? gap : 0)
+                + ((vizWidth > 0 || artWidth > 0) && lyricsRequested ? gap : 0)
+            let availLyricsBudget = max(0.0, notchBudget - nonLyricsW)
+            let effectiveMaxW = min(CGFloat(cachedLyricsMaxWidth), availLyricsBudget)
             let neededW = ceil(textSize.width) + 32.0
-            let canvasWidth: CGFloat = min(effectiveMaxW, max(60.0, neededW))
+            let canvasWidth: CGFloat = lyricsRequested && effectiveMaxW >= 40.0
+                ? min(effectiveMaxW, max(60.0, neededW))
+                : 0.0
 
+            let glowPad: CGFloat = 6.0
             let scrollPadding: CGFloat = 16.0
             let fullTextWidth = textSize.width + glowPad * 2
             let effectiveWidth = canvasWidth - scrollPadding * 2
@@ -762,14 +929,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
 
-            let barCount = cachedWaveformBars
-            let barW: CGFloat = 2.0
-            let barSp: CGFloat = 1.5
-            let vizWidth: CGFloat = (barCount > 0 && coreEngine.isPlaying) ? CGFloat(barCount) * (barW + barSp) : 0
-            let artWidth: CGFloat = showAlbumArt ? 20.0 : 0
-            let lyricsWidth: CGFloat = (showLyrics && canvasWidth > 2) ? canvasWidth : 0
-            let gap: CGFloat = 8.0
-
+            let lyricsWidth: CGFloat = (canvasWidth > 2) ? canvasWidth : 0
             var totalWidth: CGFloat = 0
             var lyricsX: CGFloat = 0
             var vizX: CGFloat = 0
@@ -809,7 +969,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 currentLineText: currentLineText,
                 textSize: textSize,
                 glowPad: glowPad,
-                showLyrics: showLyrics && canvasWidth > 2,
+                showLyrics: lyricsWidth > 0,
                 lyricsX: lyricsX,
                 canvasWidth: canvasWidth,
                 marqueeOffset: marqueeOffset,
@@ -844,29 +1004,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 )
             }
 
-            if !step.needsActiveFrames && !(panel?.isVisible == true && coreEngine.isPlaying) {
+            if !step.needsActiveFrames && popElapsed == nil && !(panel?.isVisible == true && coreEngine.isPlaying) {
                 syncMenuBarTimerState()
             }
         } else {
-            if !isShowingIdleIcon {
-                menuBarCanvasView?.isHidden = true
-                menuBarCanvasView?.reset()
-                if let button = self.statusItem?.button {
-                    button.image = idlePlaySymbol
-                    button.imagePosition = .imageOnly
-                }
-                if let item = self.statusItem, item.length != NSStatusItem.variableLength {
-                    item.length = NSStatusItem.variableLength
-                }
-                isShowingIdleIcon = true
-                cachedAlbumArtTrackId = nil
-                hasRealAlbumArt = false
-                lastRenderedLyricsText = ""
-            }
+            showIdleButtonFallback()
             if panel?.isVisible == true {
                 hudContentView?.lyricsView.renderFrame(currentTime: 0, deltaTime: deltaTime, isPlaying: false)
             }
-            if isActiveUpdating && !(panel?.isVisible == true && coreEngine.isPlaying) {
+            if isActiveUpdating {
                 stopMenuBarUpdater()
             }
         }

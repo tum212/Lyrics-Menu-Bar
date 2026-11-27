@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use encoding_rs::WINDOWS_874;
 use regex::Regex;
@@ -39,124 +40,134 @@ fn is_bg_vocal(text: &str) -> bool {
     (t.starts_with('(') && t.ends_with(')')) || (t.starts_with('[') && t.ends_with(']'))
 }
 
-// MARK: - Phonetic Syllable Weighting (100% Parity with v1.3.1 LyricTimingCalculator)
+// MARK: - Phonetic Syllable Weighting (100% Parity + Thai/CJK Aware)
 
 pub fn count_syllables(word: &str) -> usize {
-    let cleaned = word
+    let cleaned: String = word
         .to_lowercase()
         .trim_matches(|c: char| !c.is_alphanumeric())
         .to_string();
-    if cleaned.is_empty() || cleaned.chars().count() <= 3 {
+    if cleaned.is_empty() {
+        return 1;
+    }
+
+    // Non-ASCII heuristic (Thai/CJK/Korean): estimate syllables from base (non-combining) characters
+    if !cleaned.is_ascii() {
+        let base_chars = cleaned
+            .chars()
+            .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+            .count();
+        return (base_chars / 2).max(1);
+    }
+
+    if cleaned.len() <= 3 {
         return 1;
     }
 
     let is_vowel = |c: char| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
     let mut count = 0usize;
     let mut prev_was_vowel = false;
-    let chars: Vec<char> = cleaned.chars().collect();
+    let bytes = cleaned.as_bytes();
 
-    for &ch in &chars {
-        let v = is_vowel(ch);
+    for &b in bytes {
+        let v = is_vowel(b as char);
         if v && !prev_was_vowel {
             count += 1;
         }
         prev_was_vowel = v;
     }
 
-    if cleaned.ends_with('e') && !cleaned.ends_with("le") && count > 1 && chars.len() >= 2 {
-        let second_last = chars[chars.len() - 2];
-        if !is_vowel(second_last) {
-            count -= 1;
-        }
+    if cleaned.ends_with('e')
+        && !cleaned.ends_with("le")
+        && !cleaned.ends_with("ee")
+        && !cleaned.ends_with("ye")
+        && count > 1
+    {
+        count -= 1;
     }
+    if cleaned.ends_with("ed") && !cleaned.ends_with("ted") && !cleaned.ends_with("ded") && count > 1
+    {
+        count -= 1;
+    }
+
     count.max(1)
 }
 
-pub fn word_weight(word: &str, is_last_in_line: bool) -> f64 {
-    let cleaned = word
-        .to_lowercase()
-        .trim_matches(|c: char| !c.is_alphanumeric())
-        .to_string();
-    let syllables = count_syllables(&cleaned);
-    let char_len = cleaned.chars().count();
+fn word_weight(word: &str, is_last_in_line: bool) -> f64 {
+    let syls = count_syllables(word) as f64;
+    let mut weight = syls;
+    let lower = word.to_lowercase();
+    let trimmed = lower.trim_matches(|c: char| !c.is_alphanumeric());
 
-    let is_unstressed = matches!(
-        cleaned.as_str(),
-        "a" | "an"
-            | "the"
-            | "in"
-            | "on"
-            | "at"
-            | "to"
-            | "for"
-            | "of"
-            | "and"
-            | "or"
-            | "but"
-            | "is"
-            | "it"
-            | "my"
-            | "so"
-            | "up"
-            | "you"
-            | "me"
-            | "we"
-            | "he"
-            | "she"
-            | "i"
-    );
-
-    let mut mult = if is_unstressed { 0.65 } else { 1.0 };
-    if word.ends_with(',') || word.ends_with(';') || word.ends_with('-') || word.ends_with('—') {
-        mult *= 1.30;
-    } else if word.ends_with('?') || word.ends_with('!') {
-        mult *= 1.25;
+    let fast_words = [
+        "a", "an", "the", "to", "of", "in", "on", "at", "by", "for", "and", "or", "but", "is",
+        "am", "are", "was", "it", "i", "im", "i'm", "u", "ur", "my", "me", "we", "he", "she", "ya",
+        "da", "de", "la",
+    ];
+    if fast_words.contains(&trimmed) {
+        weight *= 0.55;
     }
+
+    if word.ends_with(',') || word.ends_with(';') || word.ends_with(':') {
+        weight += 0.85;
+    } else if word.ends_with('.') || word.ends_with('!') || word.ends_with('?') {
+        weight += 1.25;
+    } else if word.ends_with("...") || word.ends_with('\u{2014}') || word.ends_with('-') {
+        weight += 1.4;
+    }
+
     if is_last_in_line {
-        mult *= 1.75;
+        weight += 0.6;
     }
 
-    let base = (syllables as f64) * 0.70 + (char_len as f64) * 0.08 + 0.22;
-    base * mult
+    let char_count = trimmed.chars().count();
+    if char_count > 6 {
+        weight += ((char_count - 6) as f64) * 0.12;
+    }
+    weight.max(0.35)
 }
 
-pub fn compute_word_timings(lines: Vec<LyricLine>, total_track_duration: f64) -> Vec<LyricLine> {
+pub fn compute_word_timings(lines: Vec<LyricLine>, total_duration: f64) -> Vec<LyricLine> {
     if lines.is_empty() {
         return lines;
     }
-    let len = lines.len();
-    let mut out = Vec::with_capacity(len);
+    let is_unsynced = lines
+        .last()
+        .is_some_and(|l| l.time == 0.0 && l.end_time == 0.0);
+    if is_unsynced {
+        return lines;
+    }
 
-    for i in 0..len {
+    let mut out = Vec::with_capacity(lines.len());
+    for i in 0..lines.len() {
         let line = &lines[i];
-        if !line.words.is_empty() && line.end_time > line.time {
+        if !line.words.is_empty() {
+            let computed_end = if line.end_time > line.time {
+                line.end_time
+            } else if i + 1 < lines.len() {
+                lines[i + 1].time
+            } else {
+                line.time + 5.0
+            };
+            let mut copy = line.clone();
+            copy.end_time = computed_end;
+            out.push(copy);
+            continue;
+        }
+
+        let tokens: Vec<&str> = line.text.split_whitespace().collect();
+        if tokens.is_empty() {
             out.push(line.clone());
             continue;
         }
 
         let start_time = line.time;
-        let tokens: Vec<&str> = line.text.split_whitespace().collect();
-        if tokens.is_empty() {
-            out.push(LyricLine {
-                id: line.id,
-                time: start_time,
-                end_time: start_time + 1.0,
-                text: line.text.clone(),
-                words: Vec::new(),
-                is_background_vocal: line.is_background_vocal,
-            });
-            continue;
-        }
-
-        let next_start = if i + 1 < len {
+        let next_start = if i + 1 < lines.len() {
             lines[i + 1].time
+        } else if total_duration > start_time {
+            total_duration
         } else {
-            let fallback = if total_track_duration > start_time {
-                total_track_duration
-            } else {
-                start_time + 4.0
-            };
-            fallback.min(start_time + 6.0)
+            start_time + 5.0
         };
 
         let raw_gap = (next_start - start_time).max(0.4);
@@ -183,21 +194,28 @@ pub fn compute_word_timings(lines: Vec<LyricLine>, total_track_duration: f64) ->
             .collect();
         let total_weight: f64 = weights.iter().sum::<f64>().max(0.001);
 
+        // Enforce monotonic non-inverted timestamps even for rapid multi-word lines
+        let min_word = (vocal_duration / (tokens.len() as f64)).min(0.08);
+        let raw_durs: Vec<f64> = weights
+            .iter()
+            .map(|&w| (vocal_duration * (w / total_weight)).max(min_word))
+            .collect();
+        let dur_sum: f64 = raw_durs.iter().sum::<f64>().max(0.001);
+        let scale = vocal_duration / dur_sum;
+
         let mut words = Vec::with_capacity(tokens.len());
         let mut cur_start = start_time;
         for (idx, tok) in tokens.iter().enumerate() {
-            let frac = weights[idx] / total_weight;
-            let w_dur = (vocal_duration * frac).max(0.08);
             let w_end = if idx == last_idx {
                 end_time
             } else {
-                cur_start + w_dur
+                (cur_start + raw_durs[idx] * scale).min(end_time)
             };
             words.push(LyricWord {
                 id: next_uid(),
                 text: (*tok).to_string(),
                 start_time: cur_start,
-                end_time: w_end,
+                end_time: w_end.max(cur_start),
                 index: idx,
             });
             cur_start = w_end;
@@ -233,6 +251,18 @@ pub fn decode_bytes(bytes: &[u8]) -> String {
     slice.iter().map(|&b| b as char).collect()
 }
 
+fn decode_xml_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&amp;", "&")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
 // MARK: - Parsers (LRC, eLRC, TTML, Plain)
 
 fn offset_regex() -> &'static Regex {
@@ -240,9 +270,9 @@ fn offset_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\[offset:\s*([+-]?\d+)\]").unwrap())
 }
 
-fn tag_regex() -> &'static Regex {
+fn leading_tag_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\[(\d+):(\d+(?:\.\d+)?)\]").unwrap())
+    RE.get_or_init(|| Regex::new(r"^\s*\[(\d+):(\d+(?:\.\d+)?)\]").unwrap())
 }
 
 fn html_tag_regex() -> &'static Regex {
@@ -250,49 +280,93 @@ fn html_tag_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap())
 }
 
-fn elrc_regex() -> &'static Regex {
+/// Matched-delimiter inline eLRC timestamp finder: `<mm:ss.xx>`, `(mm:ss.xx)`, or `[mm:ss.xx]`
+fn inline_elrc_tag_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?:<|\(|\[)(\d+):(\d+(?:\.\d+)?)(?:>|\)|\])([^<\(\[]*)").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"<(\d+):(\d+(?:\.\d+)?)>|\((\d+):(\d+(?:\.\d+)?)\)|\[(\d+):(\d+(?:\.\d+)?)\]")
+            .unwrap()
+    })
 }
 
-fn ttml_p_regex() -> &'static Regex {
+fn ttml_p_tag_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?s)<p\s+begin="([^"]+)"\s+end="([^"]+)"[^>]*>(.*?)</p>"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?s)<p\b([^>]*)>(.*?)</p>"#).unwrap())
 }
 
-fn ttml_span_regex() -> &'static Regex {
+fn ttml_span_tag_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"<span\s+begin="([^"]+)"\s+end="([^"]+)"[^>]*>([^<]*)</span>"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?s)<span\b([^>]*)>([^<]*)</span>"#).unwrap())
 }
 
-fn parse_elrc_line(content: &str) -> Option<(String, Vec<LyricWord>)> {
-    let caps: Vec<_> = elrc_regex().captures_iter(content).collect();
-    if caps.is_empty() {
+fn extract_xml_attr<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("{key}=\"");
+    let pos = attrs.find(&needle)?;
+    let rest = &attrs[pos + needle.len()..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+fn parse_elrc_line(content: &str, line_start: f64) -> Option<(String, Vec<LyricWord>)> {
+    let re = inline_elrc_tag_regex();
+    let mut tags: Vec<(usize, usize, f64)> = Vec::new();
+    for cap in re.captures_iter(content) {
+        let Some(full) = cap.get(0) else { continue };
+        let (min_s, sec_s) = if let (Some(m), Some(s)) = (cap.get(1), cap.get(2)) {
+            (m.as_str(), s.as_str())
+        } else if let (Some(m), Some(s)) = (cap.get(3), cap.get(4)) {
+            (m.as_str(), s.as_str())
+        } else if let (Some(m), Some(s)) = (cap.get(5), cap.get(6)) {
+            (m.as_str(), s.as_str())
+        } else {
+            continue;
+        };
+        let (Ok(min), Ok(sec)) = (min_s.parse::<f64>(), sec_s.parse::<f64>()) else {
+            continue;
+        };
+        if min.is_finite() && sec.is_finite() {
+            tags.push((full.start(), full.end(), min * 60.0 + sec));
+        }
+    }
+    if tags.is_empty() {
         return None;
     }
 
     let mut words: Vec<LyricWord> = Vec::new();
     let mut full_text = String::new();
 
-    for i in 0..caps.len() {
-        let cap = &caps[i];
-        let Ok(min) = cap[1].parse::<f64>() else {
-            continue;
+    // Preserve any leading text before the first inline timestamp
+    if tags[0].0 > 0 {
+        let prefix = &content[..tags[0].0];
+        let trimmed = prefix.trim();
+        if !trimmed.is_empty() {
+            let end_t = tags[0].2.max(line_start + 0.1);
+            words.push(LyricWord {
+                id: next_uid(),
+                text: trimmed.to_string(),
+                start_time: line_start,
+                end_time: end_t,
+                index: 0,
+            });
+            full_text.push_str(prefix);
+        }
+    }
+
+    for i in 0..tags.len() {
+        let (_, tag_end, word_start) = tags[i];
+        let next_start_byte = if i + 1 < tags.len() {
+            tags[i + 1].0
+        } else {
+            content.len()
         };
-        let Ok(sec) = cap[2].parse::<f64>() else {
-            continue;
-        };
-        let word_start = min * 60.0 + sec;
-        let raw_token = &cap[3];
+        let raw_token = &content[tag_end..next_start_byte];
         let trimmed = raw_token.trim();
         if trimmed.is_empty() {
+            full_text.push_str(raw_token);
             continue;
         }
-
-        let next_word_start = if i + 1 < caps.len() {
-            let nm = caps[i + 1][1].parse::<f64>().unwrap_or(0.0);
-            let ns = caps[i + 1][2].parse::<f64>().unwrap_or(0.0);
-            nm * 60.0 + ns
+        let next_word_start = if i + 1 < tags.len() {
+            tags[i + 1].2
         } else {
             word_start + 0.8
         };
@@ -326,55 +400,74 @@ fn parse_elrc_line(content: &str) -> Option<(String, Vec<LyricWord>)> {
 
 fn parse_timestamp(s: &str) -> Option<f64> {
     let t = s.trim();
-    if let Some(ms_str) = t.strip_suffix("ms") {
-        return ms_str.parse::<f64>().ok().map(|v| v / 1000.0);
-    }
-    if let Some(sec_str) = t.strip_suffix('s') {
-        return sec_str.parse::<f64>().ok();
-    }
-    let parts: Vec<&str> = t.split(':').collect();
-    match parts.len() {
-        3 => {
-            let h = parts[0].parse::<f64>().ok()?;
-            let m = parts[1].parse::<f64>().ok()?;
-            let s = parts[2].parse::<f64>().ok()?;
-            Some(h * 3600.0 + m * 60.0 + s)
+    let val = if let Some(ms_str) = t.strip_suffix("ms") {
+        ms_str.parse::<f64>().ok().map(|v| v / 1000.0)
+    } else if let Some(sec_str) = t.strip_suffix('s') {
+        sec_str.parse::<f64>().ok()
+    } else {
+        let parts: Vec<&str> = t.split(':').collect();
+        match parts.len() {
+            3 => {
+                let h = parts[0].parse::<f64>().ok()?;
+                let m = parts[1].parse::<f64>().ok()?;
+                let s = parts[2].parse::<f64>().ok()?;
+                Some(h * 3600.0 + m * 60.0 + s)
+            }
+            2 => {
+                let m = parts[0].parse::<f64>().ok()?;
+                let s = parts[1].parse::<f64>().ok()?;
+                Some(m * 60.0 + s)
+            }
+            _ => t.parse::<f64>().ok(),
         }
-        2 => {
-            let m = parts[0].parse::<f64>().ok()?;
-            let s = parts[1].parse::<f64>().ok()?;
-            Some(m * 60.0 + s)
-        }
-        _ => t.parse::<f64>().ok(),
+    }?;
+    if val.is_finite() && val >= 0.0 {
+        Some(val)
+    } else {
+        None
     }
 }
 
 pub fn parse_ttml(ttml: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
-    for cap in ttml_p_regex().captures_iter(ttml) {
-        let Some(start_time) = parse_timestamp(&cap[1]) else {
+    for cap in ttml_p_tag_regex().captures_iter(ttml) {
+        let attrs = &cap[1];
+        let Some(begin_s) = extract_xml_attr(attrs, "begin") else {
             continue;
         };
-        let Some(end_time) = parse_timestamp(&cap[2]) else {
+        let Some(end_s) = extract_xml_attr(attrs, "end") else {
             continue;
         };
-        let inner = &cap[3];
+        let (Some(start_time), Some(end_time)) = (parse_timestamp(begin_s), parse_timestamp(end_s))
+        else {
+            continue;
+        };
+        let inner = &cap[2];
 
         let mut words = Vec::new();
         let mut full_text = String::new();
-        for (idx, sm) in ttml_span_regex().captures_iter(inner).enumerate() {
-            if let (Some(ws), Some(we)) = (parse_timestamp(&sm[1]), parse_timestamp(&sm[2])) {
-                let wt = sm[3].trim();
+        for sm in ttml_span_tag_regex().captures_iter(inner) {
+            let s_attrs = &sm[1];
+            let (Some(bs), Some(es)) = (
+                extract_xml_attr(s_attrs, "begin"),
+                extract_xml_attr(s_attrs, "end"),
+            ) else {
+                continue;
+            };
+            if let (Some(ws), Some(we)) = (parse_timestamp(bs), parse_timestamp(es)) {
+                let decoded = decode_xml_entities(&sm[2]);
+                let wt = decoded.trim();
                 if !wt.is_empty() {
                     if !full_text.is_empty() {
                         full_text.push(' ');
                     }
                     full_text.push_str(wt);
+                    let idx = words.len();
                     words.push(LyricWord {
                         id: next_uid(),
                         text: wt.to_string(),
                         start_time: ws,
-                        end_time: we,
+                        end_time: we.max(ws),
                         index: idx,
                     });
                 }
@@ -385,7 +478,7 @@ pub fn parse_ttml(ttml: &str) -> Vec<LyricLine> {
             lines.push(LyricLine {
                 id: next_uid(),
                 time: start_time,
-                end_time,
+                end_time: end_time.max(start_time),
                 text: full_text,
                 words,
                 is_background_vocal: bg,
@@ -393,13 +486,14 @@ pub fn parse_ttml(ttml: &str) -> Vec<LyricLine> {
             continue;
         }
 
-        let clean = html_tag_regex().replace_all(inner, "").trim().to_string();
+        let stripped = html_tag_regex().replace_all(inner, "");
+        let clean = decode_xml_entities(stripped.trim());
         if !clean.is_empty() {
             let bg = is_bg_vocal(&clean);
             lines.push(LyricLine {
                 id: next_uid(),
                 time: start_time,
-                end_time,
+                end_time: end_time.max(start_time),
                 text: clean,
                 words: Vec::new(),
                 is_background_vocal: bg,
@@ -413,7 +507,7 @@ pub fn parse_ttml(ttml: &str) -> Vec<LyricLine> {
 
 pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
     let clean_lrc = lrc.replace('\u{FEFF}', "");
-    if clean_lrc.contains("<tt") || clean_lrc.contains("<p begin=") {
+    if clean_lrc.contains("<tt") || clean_lrc.contains("<p ") {
         let ttml = parse_ttml(&clean_lrc);
         if !ttml.is_empty() {
             return ttml;
@@ -427,6 +521,7 @@ pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
         .unwrap_or(0.0);
 
     let mut result = Vec::new();
+    let lead_re = leading_tag_regex();
     for raw_line in clean_lrc.lines() {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
@@ -438,28 +533,34 @@ pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
             continue;
         }
 
-        let matches: Vec<_> = tag_regex().captures_iter(trimmed).collect();
-        let Some(last) = matches.last() else {
+        // Parse ONLY consecutive leading [mm:ss.xx] line tags so inline [mm:ss.xx] eLRC word tags stay intact
+        let mut line_times: Vec<f64> = Vec::new();
+        let mut rest = trimmed;
+        while let Some(cap) = lead_re.captures(rest) {
+            let Some(m0) = cap.get(0) else { break };
+            if let (Ok(min), Ok(sec)) = (cap[1].parse::<f64>(), cap[2].parse::<f64>()) {
+                if min.is_finite() && sec.is_finite() {
+                    line_times.push((min * 60.0 + sec + time_offset).max(0.0));
+                }
+            }
+            rest = &rest[m0.end()..];
+        }
+        if line_times.is_empty() {
             continue;
-        };
-        let last_end = last.get(0).map(|m| m.end()).unwrap_or(0);
-        let line_content = trimmed[last_end..].trim();
+        }
 
-        let elrc_data = parse_elrc_line(line_content);
+        let line_content = rest.trim();
+        let first_raw_time = (line_times[0] - time_offset).max(0.0);
+        let elrc_data = parse_elrc_line(line_content, first_raw_time);
         let clean_text = elrc_data
             .as_ref()
             .map(|(t, _)| t.clone())
             .unwrap_or_else(|| html_tag_regex().replace_all(line_content, "").trim().to_string());
         let bg = is_bg_vocal(&clean_text);
 
-        for m in &matches {
-            let Ok(min) = m[1].parse::<f64>() else {
-                continue;
-            };
-            let Ok(sec) = m[2].parse::<f64>() else {
-                continue;
-            };
-            let line_time = (min * 60.0 + sec + time_offset).max(0.0);
+        let first_line_time = line_times[0];
+        for &line_time in &line_times {
+            let shift = line_time - first_line_time;
             if let Some((_, ref base_words)) = elrc_data {
                 if !base_words.is_empty() {
                     let adjusted: Vec<LyricWord> = base_words
@@ -467,16 +568,19 @@ pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
                         .map(|w| LyricWord {
                             id: next_uid(),
                             text: w.text.clone(),
-                            start_time: (w.start_time + time_offset).max(0.0),
-                            end_time: (w.end_time + time_offset).max(0.0),
+                            start_time: (w.start_time + time_offset + shift).max(0.0),
+                            end_time: (w.end_time + time_offset + shift).max(0.0),
                             index: w.index,
                         })
                         .collect();
-                    let line_end = adjusted.last().map(|w| w.end_time).unwrap_or(line_time + 3.0);
+                    let line_end = adjusted
+                        .last()
+                        .map(|w| w.end_time)
+                        .unwrap_or(line_time + 3.0);
                     result.push(LyricLine {
                         id: next_uid(),
                         time: line_time,
-                        end_time: line_end,
+                        end_time: line_end.max(line_time),
                         text: clean_text.clone(),
                         words: adjusted,
                         is_background_vocal: bg,
@@ -523,19 +627,120 @@ pub fn parse_plain(text: &str) -> Vec<LyricLine> {
         .collect()
 }
 
-// MARK: - Fuzzy Track Matching
+// MARK: - Fuzzy Track Matching (Preserves Thai Vowels/Tones & Japanese Dakuten!)
+
+fn is_latin_combining_diacritic(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036F}')
+}
 
 pub fn simplify_for_match(s: &str) -> String {
+    // Strip ONLY Latin combining accents (e.g. é -> e) while keeping Thai vowels/tones & Japanese dakuten intact!
     let stripped: String = s
         .nfd()
-        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .filter(|c| !is_latin_combining_diacritic(*c))
+        .nfc()
         .collect();
-    stripped
+    let replaced = stripped
         .to_lowercase()
-        .replace(['-', '(', ')', '.'], " ")
-        .replace(['\'', '"'], "")
-        .trim()
-        .to_string()
+        .replace(['-', '(', ')', '.', '[', ']', '_', '•', '|'], " ")
+        .replace(['\'', '"', '’', '‘'], "");
+    replaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clean_streaming_title(track: &str) -> String {
+    let mut clean = track.trim().to_string();
+    for marker in [
+        " (Official Music Video)",
+        " (Official Video)",
+        " (Official Audio)",
+        " (Official Lyric Video)",
+        " [Official Video]",
+        " [Official Audio]",
+        " [Lyrics]",
+        " (Lyrics)",
+        " - Topic",
+    ] {
+        if let Some(pos) = clean.to_lowercase().find(&marker.to_lowercase()) {
+            if pos > 0 && clean.is_char_boundary(pos) {
+                clean.truncate(pos);
+            }
+        }
+    }
+    if let Some(idx) = clean.find(" - ") {
+        if idx > 0 {
+            clean.truncate(idx);
+        }
+    }
+    if let Some(idx) = clean.find(" (") {
+        if idx > 0 {
+            clean.truncate(idx);
+        }
+    }
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        track.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn clean_streaming_artist(artist: &str) -> String {
+    let trimmed = artist.trim();
+    if let Some(stripped) = trimmed.strip_suffix(" - Topic") {
+        return stripped.trim().to_string();
+    }
+    if let Some(stripped) = trimmed.strip_suffix("VEVO") {
+        if !stripped.trim().is_empty() {
+            return stripped.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn match_score(
+    track_name: Option<&str>,
+    artist_name: Option<&str>,
+    expected_track: &str,
+    expected_artist: &str,
+) -> u8 {
+    let Some(t) = track_name else { return 0 };
+    let st = simplify_for_match(t);
+    let s_exp_t = simplify_for_match(expected_track);
+    if st.is_empty() || s_exp_t.is_empty() {
+        return 0;
+    }
+
+    let track_exact = st == s_exp_t;
+    let track_sub = !track_exact
+        && (st.contains(&s_exp_t) || s_exp_t.contains(&st))
+        && st.chars().count().min(s_exp_t.chars().count()) >= 2;
+    if !track_exact && !track_sub {
+        return 0;
+    }
+
+    let s_exp_a = simplify_for_match(expected_artist);
+    if s_exp_a.is_empty() {
+        return if track_exact { 2 } else { 1 };
+    }
+    let Some(a) = artist_name else { return 0 };
+    let sa = simplify_for_match(a);
+    if sa.is_empty() {
+        return 0;
+    }
+
+    let artist_exact = sa == s_exp_a;
+    let artist_sub = !artist_exact
+        && (sa.contains(&s_exp_a) || s_exp_a.contains(&sa))
+        && sa.chars().count().min(s_exp_a.chars().count()) >= 2;
+    if !artist_exact && !artist_sub {
+        return 0;
+    }
+
+    match (track_exact, artist_exact) {
+        (true, true) => 4,
+        (true, false) | (false, true) => 3,
+        (false, false) => 2,
+    }
 }
 
 pub fn is_matching_track(
@@ -544,26 +749,14 @@ pub fn is_matching_track(
     expected_track: &str,
     expected_artist: &str,
 ) -> bool {
-    let (Some(t), Some(a)) = (track_name, artist_name) else {
-        return false;
-    };
-    let st = simplify_for_match(t);
-    let sa = simplify_for_match(a);
-    let s_exp_t = simplify_for_match(expected_track);
-    let s_exp_a = simplify_for_match(expected_artist);
-    if st.is_empty() || sa.is_empty() || s_exp_t.is_empty() || s_exp_a.is_empty() {
-        return false;
-    }
-    let artist_matches = sa == s_exp_a || sa.contains(&s_exp_a) || s_exp_a.contains(&sa);
-    let track_matches = st == s_exp_t || st.contains(&s_exp_t) || s_exp_t.contains(&st);
-    artist_matches && track_matches
+    match_score(track_name, artist_name, expected_track, expected_artist) > 0
 }
 
-// MARK: - LRU Cache & Multi-Source Concurrent Fetcher
+// MARK: - Zero-Copy Arc LRU Cache & Bounded Concurrent Multi-Source Fetcher
 
 struct LruLyricsCache {
     cap: usize,
-    entries: VecDeque<(String, Vec<LyricLine>)>,
+    entries: VecDeque<(String, Arc<Vec<LyricLine>>)>,
 }
 
 impl LruLyricsCache {
@@ -574,25 +767,29 @@ impl LruLyricsCache {
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<Vec<LyricLine>> {
-        let pos = self.entries.iter().position(|(k, _)| k == key)?;
-        let item = self.entries.remove(pos)?;
-        let val = item.1.clone();
-        self.entries.push_back(item);
-        Some(val)
+    fn get(&mut self, key: &str) -> Option<Arc<Vec<LyricLine>>> {
+        if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {
+            if let Some(item) = self.entries.remove(pos) {
+                let val = item.1.clone();
+                self.entries.push_front(item);
+                return Some(val);
+            }
+        }
+        None
     }
 
-    fn insert(&mut self, key: String, val: Vec<LyricLine>) {
+    fn insert(&mut self, key: String, val: Arc<Vec<LyricLine>>) {
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == &key) {
             self.entries.remove(pos);
-        } else if self.entries.len() >= self.cap {
-            self.entries.pop_front();
         }
-        self.entries.push_back((key, val));
+        if self.entries.len() >= self.cap {
+            self.entries.pop_back();
+        }
+        self.entries.push_front((key, val));
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LyricsEndpoints {
     pub lrclib_search: String,
     pub lrclib_get: String,
@@ -627,9 +824,13 @@ struct OvhResult {
 }
 
 fn fetch_url_text(url: &str) -> Option<String> {
-    let agent = crate::build_https_agent(12, 15);
     let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-    let resp = agent.get(url).set("User-Agent", ua).call().ok()?;
+    let resp = crate::shared_https_agent()
+        .get(url)
+        .timeout(Duration::from_secs(12))
+        .set("User-Agent", ua)
+        .call()
+        .ok()?;
     if resp.status() != 200 {
         return None;
     }
@@ -655,28 +856,39 @@ fn lrclib_search(
     let Ok(results) = serde_json::from_str::<Vec<LrcResult>>(&text) else {
         return Vec::new();
     };
-    let matched: Vec<LrcResult> = results
+    let mut scored: Vec<(u8, LrcResult)> = results
         .into_iter()
-        .filter(|r| {
-            is_matching_track(
+        .filter_map(|r| {
+            let sc = match_score(
                 r.track_name.as_deref(),
                 r.artist_name.as_deref(),
                 expected_track,
                 expected_artist,
-            )
+            );
+            if sc > 0 {
+                Some((sc, r))
+            } else {
+                None
+            }
         })
         .collect();
-    if let Some(synced) = matched
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+    if let Some((_, best_synced)) = scored
         .iter()
-        .find_map(|r| r.synced_lyrics.as_deref().filter(|s| !s.is_empty()))
+        .find(|(_, r)| r.synced_lyrics.as_deref().is_some_and(|s| !s.is_empty()))
     {
-        return parse_lrc(synced);
+        if let Some(synced) = best_synced.synced_lyrics.as_deref() {
+            return parse_lrc(synced);
+        }
     }
-    if let Some(plain) = matched
+    if let Some((_, best_plain)) = scored
         .iter()
-        .find_map(|r| r.plain_lyrics.as_deref().filter(|s| !s.is_empty()))
+        .find(|(_, r)| r.plain_lyrics.as_deref().is_some_and(|s| !s.is_empty()))
     {
-        return parse_plain(plain);
+        if let Some(plain) = best_plain.plain_lyrics.as_deref() {
+            return parse_plain(plain);
+        }
     }
     Vec::new()
 }
@@ -712,6 +924,9 @@ fn lrclib_get(endpoint: &str, track: &str, artist: &str, album: &str) -> Vec<Lyr
 }
 
 fn ovh_fetch(endpoint: &str, track: &str, artist: &str) -> Vec<LyricLine> {
+    if artist.is_empty() {
+        return Vec::new();
+    }
     let url = format!(
         "{endpoint}/{}/{}",
         urlencoding::encode(artist),
@@ -732,10 +947,25 @@ fn ovh_fetch(endpoint: &str, track: &str, artist: &str) -> Vec<LyricLine> {
 
 pub type LyricsReadyCallback = extern "C" fn(ctx: usize, request_id: u64);
 
+struct LoadingGuard {
+    engine: Arc<LyricsEngine>,
+    my_id: u64,
+}
+
+impl Drop for LoadingGuard {
+    fn drop(&mut self) {
+        self.engine.active_fetches.fetch_sub(1, Ordering::AcqRel);
+        if self.engine.request_id.load(Ordering::Acquire) == self.my_id {
+            self.engine.is_loading.store(false, Ordering::Release);
+        }
+    }
+}
+
 pub struct LyricsEngine {
     pub current_lines: Mutex<Arc<Vec<LyricLine>>>,
     pub is_loading: AtomicBool,
     request_id: AtomicU64,
+    active_fetches: AtomicUsize,
     last_query: Mutex<String>,
     cache: Mutex<LruLyricsCache>,
     pub endpoints: Mutex<LyricsEndpoints>,
@@ -747,6 +977,7 @@ impl LyricsEngine {
             current_lines: Mutex::new(Arc::new(Vec::new())),
             is_loading: AtomicBool::new(false),
             request_id: AtomicU64::new(0),
+            active_fetches: AtomicUsize::new(0),
             last_query: Mutex::new(String::new()),
             cache: Mutex::new(LruLyricsCache::new(100)),
             endpoints: Mutex::new(LyricsEndpoints::default()),
@@ -756,50 +987,54 @@ impl LyricsEngine {
     pub fn clear(&self) {
         self.request_id.fetch_add(1, Ordering::AcqRel);
         self.is_loading.store(false, Ordering::Release);
-        if let Ok(mut q) = self.last_query.lock() {
-            q.clear();
-        }
-        if let Ok(mut lines) = self.current_lines.lock() {
-            *lines = Arc::new(Vec::new());
-        }
+        self.last_query
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *self.current_lines.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Vec::new());
     }
 
     pub fn set_endpoints(&self, lrclib_search: &str, lrclib_get: &str, lyrics_ovh: &str) {
-        if let Ok(mut ep) = self.endpoints.lock() {
-            if !lrclib_search.is_empty() {
-                ep.lrclib_search = lrclib_search.to_string();
-            }
-            if !lrclib_get.is_empty() {
-                ep.lrclib_get = lrclib_get.to_string();
-            }
-            if !lyrics_ovh.is_empty() {
-                ep.lyrics_ovh = lyrics_ovh.to_string();
-            }
+        let mut ep = self.endpoints.lock().unwrap_or_else(|e| e.into_inner());
+        if !lrclib_search.is_empty() {
+            ep.lrclib_search = lrclib_search.to_string();
+        }
+        if !lrclib_get.is_empty() {
+            ep.lrclib_get = lrclib_get.to_string();
+        }
+        if !lyrics_ovh.is_empty() {
+            ep.lyrics_ovh = lyrics_ovh.to_string();
         }
     }
 
     pub fn snapshot(&self) -> Arc<Vec<LyricLine>> {
         self.current_lines
             .lock()
-            .map(|g| g.clone())
-            .unwrap_or_else(|_| Arc::new(Vec::new()))
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Returns true on synchronous cache hit (caller can read lines right away).
-    /// Returns false if async network race was dispatched.
     pub fn fetch_lyrics(
         self: &Arc<Self>,
         track_name: &str,
         artist_name: &str,
         album_name: &str,
         ctx: usize,
-        callback: LyricsReadyCallback,
+        callback: Option<LyricsReadyCallback>,
     ) -> bool {
-        if track_name.is_empty() || artist_name.is_empty() {
+        if track_name.trim().is_empty() {
             return false;
         }
-        let query_key = format!("{track_name}-{artist_name}-{album_name}");
-        if let Ok(mut last_q) = self.last_query.lock() {
+        let cleaned_artist = clean_streaming_artist(artist_name);
+        let query_key = format!(
+            "{}\0{}\0{}",
+            track_name.trim().to_lowercase(),
+            cleaned_artist.to_lowercase(),
+            album_name.trim().to_lowercase()
+        );
+        {
+            let mut last_q = self.last_query.lock().unwrap_or_else(|e| e.into_inner());
             if *last_q == query_key {
                 return false;
             }
@@ -808,166 +1043,262 @@ impl LyricsEngine {
 
         let my_id = self.request_id.fetch_add(1, Ordering::AcqRel) + 1;
 
-        if let Ok(mut cache) = self.cache.lock() {
+        {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(hit) = cache.get(&query_key) {
-                if let Ok(mut lines) = self.current_lines.lock() {
-                    *lines = Arc::new(hit);
-                }
+                *self.current_lines.lock().unwrap_or_else(|e| e.into_inner()) = hit;
                 self.is_loading.store(false, Ordering::Release);
                 return true;
             }
         }
 
-        if let Ok(mut lines) = self.current_lines.lock() {
-            *lines = Arc::new(Vec::new());
-        }
+        *self.current_lines.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Vec::new());
         self.is_loading.store(true, Ordering::Release);
 
-        let mut clean = track_name.to_string();
-        if let Some(idx) = clean.find(" - ") {
-            clean.truncate(idx);
+        // Cap concurrent fetch coordinators to prevent unbounded thread bombs during rapid skipping
+        if self.active_fetches.fetch_add(1, Ordering::AcqRel) >= 6 {
+            self.active_fetches.fetch_sub(1, Ordering::AcqRel);
+            self.is_loading.store(false, Ordering::Release);
+            self.last_query
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            if let Some(cb) = callback {
+                cb(ctx, my_id);
+            }
+            return false;
         }
-        if let Some(idx) = clean.find(" (") {
-            clean.truncate(idx);
-        }
-        let clean_track = clean.trim().to_string();
-        let orig_track = track_name.to_string();
-        let artist = artist_name.to_string();
-        let album = album_name.to_string();
+
+        let clean_track = clean_streaming_title(track_name);
+        let orig_track = track_name.trim().to_string();
+        let artist = cleaned_artist;
+        let album = album_name.trim().to_string();
         let ep = self
             .endpoints
             .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let engine = self.clone();
 
-        let _ = thread::Builder::new()
-            .name("lyrics-fetch".into())
-            .spawn(move || {
-                // Phase 1: Race 3 LRCLib queries concurrently
-                let (tx, rx) = std::sync::mpsc::channel::<(usize, Vec<LyricLine>)>();
+        let spawn_res = thread::Builder::new().name("lyrics-fetch".into()).spawn(move || {
+            let _guard = LoadingGuard {
+                engine: engine.clone(),
+                my_id,
+            };
 
-                {
-                    let tx0 = tx.clone();
-                    let ep_get = ep.lrclib_get.clone();
-                    let ct = clean_track.clone();
-                    let ar = artist.clone();
-                    let al = album.clone();
-                    let _ = thread::spawn(move || {
-                        let res = lrclib_get(&ep_get, &ct, &ar, &al);
-                        let _ = tx0.send((0, res));
-                    });
-                }
-                {
-                    let tx1 = tx.clone();
-                    let ep_s = ep.lrclib_search.clone();
-                    let ct = clean_track.clone();
-                    let ar = artist.clone();
-                    let _ = thread::spawn(move || {
-                        let q = format!("{ct} {ar}");
-                        let res = lrclib_search(&ep_s, &q, &ct, &ar);
-                        let _ = tx1.send((1, res));
-                    });
-                }
-                {
-                    let tx2 = tx;
-                    let ep_s = ep.lrclib_search.clone();
-                    let ot = orig_track.clone();
-                    let ar = artist.clone();
-                    let _ = thread::spawn(move || {
-                        let q = format!("{ot} {ar}");
-                        let res = lrclib_search(&ep_s, &q, &ot, &ar);
-                        let _ = tx2.send((2, res));
-                    });
-                }
+            let dup_titles = clean_track.eq_ignore_ascii_case(&orig_track);
 
-                let mut winner: Option<Vec<LyricLine>> = None;
-                let mut collected: [Option<Vec<LyricLine>>; 3] = [None, None, None];
-                for _ in 0..3 {
-                    if engine.request_id.load(Ordering::Acquire) != my_id {
-                        return;
-                    }
-                    let Ok((idx, res)) = rx.recv() else { break };
-                    if !res.is_empty() {
-                        let is_synced = res.len() > 1 && res.last().is_some_and(|l| l.time > 0.0);
-                        if is_synced {
-                            winner = Some(res);
-                            break;
-                        }
-                        if idx < 3 {
-                            collected[idx] = Some(res);
-                        }
-                    }
-                }
-                if winner.is_none() {
-                    winner = collected
-                        .into_iter()
-                        .flatten()
-                        .find(|v| !v.is_empty());
-                }
+            // Phase 1: Race deduplicated LRCLib queries
+            let (tx, rx) = std::sync::mpsc::channel::<(usize, Vec<LyricLine>)>();
+            let mut expected_p1 = 0usize;
 
+            if !artist.is_empty() {
+                expected_p1 += 1;
+                let tx0 = tx.clone();
+                let ep_get = ep.lrclib_get.clone();
+                let ct = clean_track.clone();
+                let ar = artist.clone();
+                let al = album.clone();
+                if thread::Builder::new().spawn(move || {
+                    let _ = tx0.send((0, lrclib_get(&ep_get, &ct, &ar, &al)));
+                })
+                .is_err()
+                {
+                    expected_p1 -= 1;
+                }
+            }
+
+            {
+                expected_p1 += 1;
+                let tx1 = tx.clone();
+                let ep_s = ep.lrclib_search.clone();
+                let ct = clean_track.clone();
+                let ar = artist.clone();
+                if thread::Builder::new().spawn(move || {
+                    let q = if ar.is_empty() {
+                        ct.clone()
+                    } else {
+                        format!("{ct} {ar}")
+                    };
+                    let _ = tx1.send((1, lrclib_search(&ep_s, &q, &ct, &ar)));
+                })
+                .is_err()
+                {
+                    expected_p1 -= 1;
+                }
+            }
+
+            if !dup_titles {
+                expected_p1 += 1;
+                let tx2 = tx.clone();
+                let ep_s = ep.lrclib_search.clone();
+                let ot = orig_track.clone();
+                let ar = artist.clone();
+                if thread::Builder::new().spawn(move || {
+                    let q = if ar.is_empty() {
+                        ot.clone()
+                    } else {
+                        format!("{ot} {ar}")
+                    };
+                    let _ = tx2.send((2, lrclib_search(&ep_s, &q, &ot, &ar)));
+                })
+                .is_err()
+                {
+                    expected_p1 -= 1;
+                }
+            }
+            drop(tx);
+
+            let mut winner: Option<Vec<LyricLine>> = None;
+            let mut collected: [Option<Vec<LyricLine>>; 3] = [None, None, None];
+            let mut received = 0usize;
+            while received < expected_p1 {
                 if engine.request_id.load(Ordering::Acquire) != my_id {
                     return;
                 }
-
-                if let Some(lines) = winner {
-                    if let Ok(mut c) = engine.cache.lock() {
-                        c.insert(query_key, lines.clone());
+                match rx.recv_timeout(Duration::from_millis(120)) {
+                    Ok((idx, res)) => {
+                        received += 1;
+                        if !res.is_empty() {
+                            let is_synced = res
+                                .last()
+                                .is_some_and(|l| l.time > 0.0 || l.end_time > 0.0);
+                            if is_synced {
+                                winner = Some(res);
+                                break;
+                            }
+                            if idx < 3 {
+                                collected[idx] = Some(res);
+                            }
+                        }
                     }
-                    if let Ok(mut cur) = engine.current_lines.lock() {
-                        *cur = Arc::new(lines);
-                    }
-                    engine.is_loading.store(false, Ordering::Release);
-                    callback(ctx, my_id);
-                    return;
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
+            }
+            if winner.is_none() {
+                winner = collected.into_iter().flatten().find(|v| !v.is_empty());
+            }
 
-                // Phase 2: Race 2 OVH requests concurrently
+            if engine.request_id.load(Ordering::Acquire) != my_id {
+                return;
+            }
+
+            if let Some(lines) = winner {
+                let arc_lines = Arc::new(lines);
+                engine
+                    .cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(query_key, arc_lines.clone());
+                *engine
+                    .current_lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = arc_lines;
+                engine.is_loading.store(false, Ordering::Release);
+                if let Some(cb) = callback {
+                    cb(ctx, my_id);
+                }
+                return;
+            }
+
+            // Phase 2: Deduplicated OVH fallback
+            let mut final_ovh = Vec::new();
+            if !artist.is_empty() {
                 let (otx, orx) = std::sync::mpsc::channel::<Vec<LyricLine>>();
+                let mut expected_p2 = 0usize;
                 {
+                    expected_p2 += 1;
                     let tx0 = otx.clone();
                     let ep_o = ep.lyrics_ovh.clone();
                     let ct = clean_track;
                     let ar = artist.clone();
-                    let _ = thread::spawn(move || {
+                    if thread::Builder::new().spawn(move || {
                         let _ = tx0.send(ovh_fetch(&ep_o, &ct, &ar));
-                    });
+                    })
+                    .is_err()
+                    {
+                        expected_p2 -= 1;
+                    }
                 }
-                {
-                    let tx1 = otx;
+                if !dup_titles {
+                    expected_p2 += 1;
+                    let tx1 = otx.clone();
                     let ep_o = ep.lyrics_ovh;
                     let ot = orig_track;
                     let ar = artist;
-                    let _ = thread::spawn(move || {
+                    if thread::Builder::new().spawn(move || {
                         let _ = tx1.send(ovh_fetch(&ep_o, &ot, &ar));
-                    });
+                    })
+                    .is_err()
+                    {
+                        expected_p2 -= 1;
+                    }
                 }
+                drop(otx);
 
-                let mut final_ovh = Vec::new();
-                for _ in 0..2 {
+                let mut got2 = 0usize;
+                while got2 < expected_p2 {
                     if engine.request_id.load(Ordering::Acquire) != my_id {
                         return;
                     }
-                    if let Ok(res) = orx.recv() {
-                        if !res.is_empty() {
-                            final_ovh = res;
-                            break;
+                    match orx.recv_timeout(Duration::from_millis(120)) {
+                        Ok(res) => {
+                            got2 += 1;
+                            if !res.is_empty() {
+                                final_ovh = res;
+                                break;
+                            }
                         }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
+            }
 
-                if engine.request_id.load(Ordering::Acquire) != my_id {
-                    return;
+            if engine.request_id.load(Ordering::Acquire) != my_id {
+                return;
+            }
+
+            if !final_ovh.is_empty() {
+                let arc_lines = Arc::new(final_ovh);
+                engine
+                    .cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(query_key, arc_lines.clone());
+                *engine
+                    .current_lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = arc_lines;
+            } else {
+                // Do NOT permanently cache empty/failed network results; allow future retry
+                let mut lq = engine.last_query.lock().unwrap_or_else(|e| e.into_inner());
+                if *lq == query_key {
+                    lq.clear();
                 }
-                if let Ok(mut c) = engine.cache.lock() {
-                    c.insert(query_key, final_ovh.clone());
-                }
-                if let Ok(mut cur) = engine.current_lines.lock() {
-                    *cur = Arc::new(final_ovh);
-                }
-                engine.is_loading.store(false, Ordering::Release);
-                callback(ctx, my_id);
-            });
+                *engine
+                    .current_lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Arc::new(Vec::new());
+            }
+            engine.is_loading.store(false, Ordering::Release);
+            if let Some(cb) = callback {
+                cb(ctx, my_id);
+            }
+        });
+
+        if spawn_res.is_err() {
+            self.active_fetches.fetch_sub(1, Ordering::AcqRel);
+            self.is_loading.store(false, Ordering::Release);
+            self.last_query
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            if let Some(cb) = callback {
+                cb(ctx, my_id);
+            }
+        }
 
         false
     }
@@ -990,23 +1321,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_elrc_syllable_continuation() {
-        let lrc = "[00:10.00]<00:10.00>beau<00:10.25>ti<00:10.50>ful <00:10.80>day\n";
+    fn test_parse_elrc_syllable_continuation_and_brackets() {
+        let lrc = "[00:10.00]<00:10.00>beau<00:10.25>ti<00:10.50>ful <00:10.80>day\n[00:12.00]fast [00:12.20]words\n";
         let lines = parse_lrc(lrc);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].words.len(), 2);
         assert_eq!(lines[0].words[0].text, "beautiful");
         assert_eq!(lines[0].words[1].text, "day");
         assert!(lines[0].words[0].end_time >= 10.7);
+        assert_eq!(lines[1].text, "fast words");
+        assert_eq!(lines[1].words.len(), 2);
+        assert!((lines[1].words[0].start_time - 12.0).abs() < 0.01);
+        assert!((lines[1].words[1].start_time - 12.2).abs() < 0.01);
     }
 
     #[test]
-    fn test_parse_ttml() {
-        let ttml = r#"<tt><body><p begin="1000ms" end="4.5s"><span begin="1000ms" end="2.0s">One</span><span begin="2.0s" end="4.5s">Two</span></p></body></tt>"#;
+    fn test_parse_ttml_reordered_attrs_and_entities() {
+        let ttml = r#"<tt><body><p xml:id="p1" ttm:agent="v1" begin="1000ms" end="4.5s"><span ttm:role="x" begin="1000ms" end="2.0s">Rock &amp;</span><span begin="2.0s" end="4.5s">Roll&#39;s</span></p></body></tt>"#;
         let lines = parse_ttml(ttml);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text, "One Two");
+        assert_eq!(lines[0].text, "Rock & Roll's");
         assert_eq!(lines[0].words.len(), 2);
+        assert_eq!(lines[0].words[0].index, 0);
+        assert_eq!(lines[0].words[1].index, 1);
         assert!((lines[0].time - 1.0).abs() < 0.01);
         assert!((lines[0].end_time - 4.5).abs() < 0.01);
     }
@@ -1018,18 +1355,32 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "Line 1");
 
-        // Windows-874 for "ก" is 0xA1
         let decoded = decode_bytes(&[0xA1]);
         assert_eq!(decoded, "ก");
     }
 
     #[test]
-    fn test_fuzzy_match_diacritics() {
+    fn test_fuzzy_match_diacritics_and_thai_preservation() {
         assert!(is_matching_track(
             Some("Déjà Vu (Deluxe)"),
             Some("Beyoncé"),
             "Deja Vu",
             "Beyonce"
         ));
+        // Multi-space collapse on punctuation
+        assert_eq!(simplify_for_match("Mr. Brightside"), "mr brightside");
+        // Thai vowels and tone marks MUST be preserved (never collapsed to unrelated words!)
+        assert_ne!(simplify_for_match("ปา"), simplify_for_match("ป่า"));
+        assert_ne!(simplify_for_match("ใกล้"), simplify_for_match("ไกล"));
+    }
+
+    #[test]
+    fn test_fast_rap_word_timings_never_invert() {
+        let lrc = "[00:01.00]one two three four five six seven eight nine ten eleven twelve\n[00:01.60]next\n";
+        let lines = parse_lrc(lrc);
+        for w in &lines[0].words {
+            assert!(w.start_time <= w.end_time);
+            assert!(w.end_time <= lines[0].end_time + 1e-6);
+        }
     }
 }

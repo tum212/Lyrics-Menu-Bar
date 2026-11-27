@@ -122,12 +122,13 @@ private final class TactileCircleButton: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef { removeTrackingArea(existing) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingAreaRef = area
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         isHovered = true
         updateAppearance()
         animateScale(1.06)
@@ -141,11 +142,13 @@ private final class TactileCircleButton: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         isPressed = true
         animateScale(0.86)
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard isPressed else { return }
         let pt = convert(event.locationInWindow, from: nil)
         isPressed = false
         animateScale(isHovered ? 1.06 : 1.0)
@@ -272,7 +275,7 @@ private final class GlassIconCircleButton: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef { removeTrackingArea(existing) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingAreaRef = area
     }
@@ -283,6 +286,7 @@ private final class GlassIconCircleButton: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         NSCursor.pointingHand.set()
     }
 
@@ -291,11 +295,13 @@ private final class GlassIconCircleButton: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         iconLayer.opacity = 0.55
     }
 
     override func mouseUp(with event: NSEvent) {
         iconLayer.opacity = 1.0
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         let pt = convert(event.locationInWindow, from: nil)
         if bounds.contains(pt) {
             onClick?()
@@ -321,12 +327,13 @@ private final class ClickableAreaView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingAreaRef { removeTrackingArea(existing) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingAreaRef = area
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         if isClickEnabled?() ?? true {
             NSCursor.pointingHand.set()
         }
@@ -339,6 +346,7 @@ private final class ClickableAreaView: NSView {
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
+        guard !LyricsCoreEngine.shared.showUpdateModal else { return }
         let pt = convert(event.locationInWindow, from: nil)
         if bounds.contains(pt), (isClickEnabled?() ?? true) {
             onClick?()
@@ -355,6 +363,7 @@ private final class HUDUpdateModalOverlay: NSView {
     private let cardBorderLayer = CAShapeLayer()
     private let versionPillLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(labelWithString: "")
+    private let closeBtn = NSButton(frame: .zero)
     private let notesScroll = NSScrollView()
     private let notesTextView = NSTextView()
     private let progressContainer = NSView()
@@ -374,6 +383,12 @@ private final class HUDUpdateModalOverlay: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not supported")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        cardBorderLayer.contentsScale = scale
     }
 
     private func setup() {
@@ -404,6 +419,7 @@ private final class HUDUpdateModalOverlay: NSView {
         cardBorderLayer.fillColor = NSColor.clear.cgColor
         cardBorderLayer.strokeColor = NSColor.white.withAlphaComponent(0.28).cgColor
         cardBorderLayer.lineWidth = 0.75
+        cardBorderLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         cardEffect.layer?.addSublayer(cardBorderLayer)
         addSubview(cardEffect)
 
@@ -422,7 +438,7 @@ private final class HUDUpdateModalOverlay: NSView {
         titleLabel.textColor = .white
         cardEffect.addSubview(titleLabel)
 
-        versionPillLabel.frame = NSRect(x: 196, y: cardH - 36, width: 64, height: 17)
+        versionPillLabel.frame = NSRect(x: 206, y: cardH - 36, width: 64, height: 17)
         versionPillLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
         versionPillLabel.textColor = NSColor(calibratedRed: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
         versionPillLabel.alignment = .center
@@ -437,18 +453,20 @@ private final class HUDUpdateModalOverlay: NSView {
         subtitleLabel.lineBreakMode = .byTruncatingTail
         cardEffect.addSubview(subtitleLabel)
 
-        let closeBtn = NSButton(frame: NSRect(x: cardW - 36, y: cardH - 36, width: 20, height: 20))
+        closeBtn.frame = NSRect(x: cardW - 36, y: cardH - 36, width: 20, height: 20)
         closeBtn.isBordered = false
-        closeBtn.title = "✕"
-        closeBtn.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        closeBtn.contentTintColor = NSColor.white.withAlphaComponent(0.7)
+        closeBtn.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
+        closeBtn.imageScaling = .scaleProportionallyDown
+        closeBtn.contentTintColor = NSColor.white.withAlphaComponent(0.75)
         closeBtn.target = self
-        closeBtn.action = #selector(cancelTapped)
+        closeBtn.action = #selector(dismissTapped)
         cardEffect.addSubview(closeBtn)
 
-        // Notes Box
+        // Notes Box (Properly configured scrollable NSTextView!)
         notesScroll.frame = NSRect(x: 16, y: 54, width: cardW - 32, height: 74)
         notesScroll.hasVerticalScroller = true
+        notesScroll.hasHorizontalScroller = false
+        notesScroll.autohidesScrollers = true
         notesScroll.drawsBackground = true
         notesScroll.backgroundColor = NSColor.black.withAlphaComponent(0.28)
         notesScroll.wantsLayer = true
@@ -456,7 +474,17 @@ private final class HUDUpdateModalOverlay: NSView {
         notesScroll.layer?.borderWidth = 0.5
         notesScroll.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
 
+        let contentSize = notesScroll.contentSize
+        notesTextView.frame = NSRect(origin: .zero, size: contentSize)
+        notesTextView.minSize = NSSize(width: 0, height: contentSize.height)
+        notesTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        notesTextView.isVerticallyResizable = true
+        notesTextView.isHorizontallyResizable = false
+        notesTextView.autoresizingMask = [.width]
+        notesTextView.textContainer?.containerSize = NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        notesTextView.textContainer?.widthTracksTextView = true
         notesTextView.isEditable = false
+        notesTextView.isSelectable = true
         notesTextView.drawsBackground = false
         notesTextView.font = NSFont.systemFont(ofSize: 11)
         notesTextView.textColor = NSColor.white.withAlphaComponent(0.88)
@@ -510,7 +538,7 @@ private final class HUDUpdateModalOverlay: NSView {
         laterButton.frame = NSRect(x: 16, y: 14, width: 78, height: 28)
         laterButton.bezelStyle = .rounded
         laterButton.target = self
-        laterButton.action = #selector(cancelTapped)
+        laterButton.action = #selector(laterOrCancelTapped)
         cardEffect.addSubview(laterButton)
 
         updateNowButton.frame = NSRect(x: cardW - 122, y: 14, width: 106, height: 28)
@@ -534,14 +562,21 @@ private final class HUDUpdateModalOverlay: NSView {
             installingSpinner.isHidden = true
             installingSpinner.stopAnimation(nil)
             installingLabel.isHidden = true
+            closeBtn.isHidden = false
+            closeBtn.isEnabled = true
+            laterButton.isHidden = false
             laterButton.title = "Later"
             updateNowButton.isHidden = false
 
         case .downloading(let progress):
+            versionPillLabel.isHidden = versionPillLabel.stringValue.isEmpty
             notesScroll.isHidden = true
             progressContainer.isHidden = false
             installingSpinner.isHidden = true
+            installingSpinner.stopAnimation(nil)
             installingLabel.isHidden = true
+            closeBtn.isHidden = true
+            closeBtn.isEnabled = false
             subtitleLabel.stringValue = "Downloading package from GitHub Releases..."
             progressPercent.stringValue = "\(Int(progress * 100))%"
             let maxW = progressTrack.bounds.width
@@ -549,6 +584,7 @@ private final class HUDUpdateModalOverlay: NSView {
             CATransaction.setDisableActions(true)
             progressFill.frame = CGRect(x: 0, y: 0, width: max(6.0, maxW * CGFloat(progress)), height: 6)
             CATransaction.commit()
+            laterButton.isHidden = false
             laterButton.title = "Cancel"
             updateNowButton.isHidden = true
 
@@ -558,17 +594,24 @@ private final class HUDUpdateModalOverlay: NSView {
             installingSpinner.isHidden = false
             installingSpinner.startAnimation(nil)
             installingLabel.isHidden = false
+            closeBtn.isHidden = true
+            closeBtn.isEnabled = false
             subtitleLabel.stringValue = "Verifying package and relaunching application..."
-            laterButton.title = "Dismiss"
+            laterButton.isHidden = true
             updateNowButton.isHidden = true
 
         case .failed(let err):
+            versionPillLabel.isHidden = true
             notesScroll.isHidden = false
             notesTextView.string = err
             progressContainer.isHidden = true
             installingSpinner.isHidden = true
+            installingSpinner.stopAnimation(nil)
             installingLabel.isHidden = true
+            closeBtn.isHidden = false
+            closeBtn.isEnabled = true
             subtitleLabel.stringValue = "Update failed"
+            laterButton.isHidden = false
             laterButton.title = "Close"
             updateNowButton.isHidden = true
 
@@ -581,16 +624,36 @@ private final class HUDUpdateModalOverlay: NSView {
         true
     }
 
-    override func mouseDown(with event: NSEvent) {
+    override func scrollWheel(with event: NSEvent) {
+        // Swallow scroll events so lyrics underneath never scroll while modal is open
         let pt = convert(event.locationInWindow, from: nil)
-        if !cardEffect.frame.contains(pt) {
-            if case .downloading = LyricsCoreEngine.shared.updateState { return }
-            LyricsCoreEngine.shared.cancelUpdateDownload()
+        if cardEffect.frame.contains(pt), !notesScroll.isHidden {
+            notesScroll.scrollWheel(with: event)
         }
     }
 
-    @objc private func cancelTapped() {
-        LyricsCoreEngine.shared.cancelUpdateDownload()
+    override func mouseDown(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        if !cardEffect.frame.contains(pt) {
+            switch LyricsCoreEngine.shared.updateState {
+            case .downloading, .installing:
+                return
+            default:
+                LyricsCoreEngine.shared.dismissUpdateModal()
+            }
+        }
+    }
+
+    @objc private func dismissTapped() {
+        LyricsCoreEngine.shared.dismissUpdateModal()
+    }
+
+    @objc private func laterOrCancelTapped() {
+        if case .downloading = LyricsCoreEngine.shared.updateState {
+            LyricsCoreEngine.shared.cancelUpdateDownload()
+        } else {
+            LyricsCoreEngine.shared.dismissUpdateModal()
+        }
     }
 
     @objc private func updateNowTapped() {
@@ -612,7 +675,7 @@ final class HUDContentView: NSView {
 
     private let trackInfoButton = ClickableAreaView(frame: NSRect(x: 18, y: 60, width: 142, height: 34))
     private let titleLabel = NSTextField(labelWithString: "No Music Playing")
-    private let artistLabel = NSTextField(labelWithString: "Open Spotify or Apple Music")
+    private let artistLabel = NSTextField(labelWithString: "Open any music app")
 
     private let prevBtn = TactileCircleButton(frame: NSRect(x: 34, y: 18, width: 32, height: 32), symbolName: "backward.fill", iconSize: 15)
     private let playPauseBtn = TactileCircleButton(frame: NSRect(x: 70, y: 15, width: 38, height: 38), symbolName: "play.fill", iconSize: 20)
@@ -638,6 +701,10 @@ final class HUDContentView: NSView {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func setup() {
@@ -772,13 +839,13 @@ final class HUDContentView: NSView {
         let eng = LyricsCoreEngine.shared
         if let track = eng.currentTrack {
             titleLabel.stringValue = track.name
-            artistLabel.stringValue = track.artist
-            let appLabel = eng.activeSource == .appleMusic ? "Apple Music" : "Spotify"
+            artistLabel.stringValue = track.artist.isEmpty ? track.sourceDisplayName : track.artist
+            let appLabel = track.sourceDisplayName
             artButton.toolTip = "Click to open in \(appLabel)"
             trackInfoButton.toolTip = "Click to open in \(appLabel)"
         } else {
             titleLabel.stringValue = "No Music Playing"
-            artistLabel.stringValue = "Open Spotify or Apple Music"
+            artistLabel.stringValue = "Open any music app"
             artButton.toolTip = nil
             trackInfoButton.toolTip = nil
         }

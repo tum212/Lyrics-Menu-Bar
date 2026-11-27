@@ -1,23 +1,5 @@
 use crate::lyrics::LyricLine;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum MusicSource {
-    Auto = 0,
-    Spotify = 1,
-    AppleMusic = 2,
-}
-
-impl MusicSource {
-    pub fn from_i32(v: i32) -> Self {
-        match v {
-            1 => Self::Spotify,
-            2 => Self::AppleMusic,
-            _ => Self::Auto,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaybackTrack {
     pub id: String,
@@ -26,7 +8,7 @@ pub struct PlaybackTrack {
     pub album: String,
     pub artwork_url: String,
     pub duration: f64,
-    pub source: MusicSource,
+    pub source_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,7 +49,7 @@ pub struct PlaybackEngine {
     pub last_update_mono: f64,
     pub last_monotonic_time: f64,
     pub monotonic_track_id: String,
-    pub active_source: MusicSource,
+    pub active_source_id: String,
     pub consecutive_stopped_polls: i32,
 
     // Menu bar animation physics state
@@ -80,6 +62,32 @@ pub struct PlaybackEngine {
     pub last_sparkle_track_id: String,
 }
 
+fn is_combining_char(c: char) -> bool {
+    unicode_normalization::char::is_combining_mark(c)
+}
+
+/// Truncate cleanly at ~max_chars without slicing inside Thai/Unicode combining clusters.
+fn truncate_safe(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = String::with_capacity(s.len().min(max_chars * 4));
+    let mut base_count = 0usize;
+    for ch in s.chars() {
+        let combining = is_combining_char(ch);
+        if !combining && base_count >= keep {
+            break;
+        }
+        out.push(ch);
+        if !combining {
+            base_count += 1;
+        }
+    }
+    out.push_str("...");
+    out
+}
+
 impl PlaybackEngine {
     pub fn new() -> Self {
         Self {
@@ -89,7 +97,7 @@ impl PlaybackEngine {
             last_update_mono: 0.0,
             last_monotonic_time: 0.0,
             monotonic_track_id: String::new(),
-            active_source: MusicSource::Spotify,
+            active_source_id: String::new(),
             consecutive_stopped_polls: 0,
             last_rendered_text: String::new(),
             transition_progress: 1.0,
@@ -106,49 +114,68 @@ impl PlaybackEngine {
         track: PlaybackTrack,
         position: f64,
         is_playing: bool,
-        source: MusicSource,
+        source_id: String,
         now_mono: f64,
         now_unix: f64,
     ) -> PlaybackDelta {
+        if track.name.trim().is_empty() && self.current_track.is_none() {
+            return PlaybackDelta::default();
+        }
         self.consecutive_stopped_polls = 0;
 
+        let safe_pos = if position.is_finite() {
+            position.max(0.0)
+        } else {
+            0.0
+        };
+
         let track_changed = match &self.current_track {
-            None => !track.name.is_empty(),
+            None => !track.name.trim().is_empty(),
             Some(cur) => {
                 cur.name.to_lowercase() != track.name.to_lowercase()
                     || cur.artist.to_lowercase() != track.artist.to_lowercase()
+                    || cur.source_id != source_id
             }
         };
-        let artwork_url_changed = self
-            .current_track
-            .as_ref()
-            .map(|c| c.artwork_url != track.artwork_url)
-            .unwrap_or(false);
+
+        // Preserve previous artwork_url BEFORE computing artwork_url_changed so omitted URLs don't trigger spurious reloads
+        let mut merged = track;
+        merged.source_id = source_id.clone();
+        if !track_changed && merged.artwork_url.is_empty() {
+            if let Some(cur) = &self.current_track {
+                merged.artwork_url = cur.artwork_url.clone();
+            }
+        }
+        let artwork_url_changed = match &self.current_track {
+            None => !merged.artwork_url.is_empty(),
+            Some(cur) => !merged.artwork_url.is_empty() && cur.artwork_url != merged.artwork_url,
+        };
+
         let play_state_changed = self.is_playing != is_playing;
-        let source_changed = self.active_source != source;
+        let source_changed = !source_id.is_empty() && self.active_source_id != source_id;
 
         let expected = if self.is_playing {
             self.playback_position + (now_mono - self.last_update_mono).max(0.0)
         } else {
             self.playback_position
         };
-        let delta = position - expected;
+        let delta = safe_pos - expected;
 
         if track_changed || play_state_changed || delta < -0.25 || delta > 1.2 {
-            self.playback_position = position;
+            self.playback_position = safe_pos;
             self.last_update_mono = now_mono;
-            self.last_monotonic_time = position;
-            self.monotonic_track_id = track.id.clone();
+            self.last_monotonic_time = safe_pos;
+            self.monotonic_track_id = merged.id.clone();
         } else {
-            self.playback_position = position;
+            self.playback_position = safe_pos;
             self.last_update_mono = now_mono;
             if delta.abs() > 0.35 {
-                self.last_monotonic_time = position;
+                self.last_monotonic_time = safe_pos;
             }
         }
 
         if source_changed {
-            self.active_source = source;
+            self.active_source_id = source_id;
         }
         if play_state_changed {
             self.is_playing = is_playing;
@@ -156,20 +183,11 @@ impl PlaybackEngine {
                 self.transition_progress = 1.0;
             }
         }
-
         if track_changed {
             self.track_changed_unix = now_unix;
-            self.last_sparkle_track_id = track.id.clone();
+            self.last_sparkle_track_id = merged.id.clone();
         }
 
-        let mut merged = track;
-        if !track_changed {
-            if merged.artwork_url.is_empty() {
-                if let Some(cur) = &self.current_track {
-                    merged.artwork_url = cur.artwork_url.clone();
-                }
-            }
-        }
         self.current_track = Some(merged);
 
         PlaybackDelta {
@@ -180,17 +198,25 @@ impl PlaybackEngine {
         }
     }
 
-    pub fn mark_stopped(&mut self, source: MusicSource, threshold: i32, is_not_running: bool) -> bool {
-        self.consecutive_stopped_polls += 1;
-        if self.consecutive_stopped_polls > threshold
-            && (self.active_source == source || is_not_running)
-        {
+    pub fn mark_stopped(&mut self, source_id: &str, threshold: i32, is_not_running: bool) -> bool {
+        if self.current_track.is_none() {
+            return false;
+        }
+        let source_matches = source_id.is_empty() || self.active_source_id == source_id;
+        if !source_matches && !is_not_running {
+            return false;
+        }
+        self.consecutive_stopped_polls = self.consecutive_stopped_polls.saturating_add(1);
+        if is_not_running || self.consecutive_stopped_polls > threshold {
             self.current_track = None;
             self.is_playing = false;
             self.playback_position = 0.0;
             self.last_monotonic_time = 0.0;
+            self.monotonic_track_id.clear();
             self.last_rendered_text.clear();
             self.transition_progress = 1.0;
+            self.animated_orb_alpha = 0.0;
+            self.consecutive_stopped_polls = 0;
             return true;
         }
         false
@@ -206,7 +232,7 @@ impl PlaybackEngine {
         } else {
             self.playback_position
         };
-        let clamped = raw.max(0.0);
+        let clamped = if raw.is_finite() { raw.max(0.0) } else { 0.0 };
 
         if self.monotonic_track_id != track.id
             || !self.is_playing
@@ -224,7 +250,11 @@ impl PlaybackEngine {
     }
 
     pub fn seek_local(&mut self, target_time: f64, now_mono: f64) {
-        let t = target_time.max(0.0);
+        let t = if target_time.is_finite() {
+            target_time.max(0.0)
+        } else {
+            0.0
+        };
         self.playback_position = t;
         self.last_update_mono = now_mono;
         self.last_monotonic_time = t;
@@ -234,7 +264,9 @@ impl PlaybackEngine {
         if lines.is_empty() {
             return (-1, false);
         }
-        let is_unsynced = lines.len() > 1 && lines.last().is_some_and(|l| l.time == 0.0);
+        let is_unsynced = lines
+            .last()
+            .is_some_and(|l| l.time == 0.0 && l.end_time == 0.0);
         if is_unsynced {
             let dur = if duration > 0.0 { duration } else { 100.0 };
             let progress = (time / dur).clamp(0.0, 1.0);
@@ -266,13 +298,24 @@ impl PlaybackEngine {
         is_loading_lyrics: bool,
         is_ultra_light: bool,
     ) -> Option<MenuBarLyricResolved> {
+        let safe_dt = if dt.is_finite() {
+            dt.clamp(0.0, 0.25)
+        } else {
+            0.016
+        };
         let time = self.current_time(now_mono);
-        let track = self.current_track.as_ref()?.clone();
-
-        if self.last_sparkle_track_id != track.id {
-            self.last_sparkle_track_id = track.id.clone();
-            self.track_changed_unix = now_unix;
+        let track_id_matches = self
+            .current_track
+            .as_ref()
+            .map(|t| self.last_sparkle_track_id == t.id)?;
+        if !track_id_matches {
+            if let Some(ref t) = self.current_track {
+                self.last_sparkle_track_id = t.id.clone();
+                self.track_changed_unix = now_unix;
+            }
         }
+
+        let track = self.current_track.as_ref()?;
         let sparkle_time = (now_unix - self.track_changed_unix).max(0.0);
 
         let mut current_line_text: String;
@@ -282,7 +325,9 @@ impl PlaybackEngine {
         let mut is_intro = false;
 
         if !lines.is_empty() {
-            is_unsynced = lines.len() > 1 && lines.last().is_some_and(|l| l.time == 0.0);
+            is_unsynced = lines
+                .last()
+                .is_some_and(|l| l.time == 0.0 && l.end_time == 0.0);
             if is_unsynced {
                 let dur = if track.duration > 0.0 {
                     track.duration
@@ -296,6 +341,8 @@ impl PlaybackEngine {
                 is_intro = true;
                 if sparkle_time < 5.5 {
                     current_line_text = track.name.clone();
+                } else if track.artist.is_empty() {
+                    current_line_text = format!("♪ {}", track.name);
                 } else {
                     current_line_text = format!("♪ {} - {}", track.name, track.artist);
                 }
@@ -325,6 +372,10 @@ impl PlaybackEngine {
             }
         } else if is_loading_lyrics || sparkle_time < 5.5 {
             current_line_text = track.name.clone();
+        } else if track.artist.is_empty() {
+            current_line_text = track.name.clone();
+        } else if track.album.is_empty() {
+            current_line_text = format!("{} - {}", track.name, track.artist);
         } else {
             current_line_text = format!("{} - {} • {}", track.name, track.artist, track.album);
         }
@@ -332,13 +383,16 @@ impl PlaybackEngine {
         if current_line_text.is_empty() {
             current_line_text = "♪".to_string();
         }
+
+        let is_showing_track_title = current_line_text == track.name;
         if current_line_text.chars().count() > 75 {
-            let truncated: String = current_line_text.chars().take(72).collect();
-            current_line_text = format!("{truncated}...");
+            current_line_text = truncate_safe(&current_line_text, 75);
         }
 
         let line_id = if lines.is_empty() || is_intro {
             0
+        } else if peeked_ahead && current_index + 1 < lines.len() {
+            lines[current_index + 1].id
         } else {
             lines[current_index].id
         };
@@ -406,7 +460,7 @@ impl PlaybackEngine {
             self.transition_progress = 0.0;
         }
         if self.transition_progress < 1.0 {
-            self.transition_progress = (self.transition_progress + dt / 0.42).min(1.0);
+            self.transition_progress = (self.transition_progress + safe_dt / 0.42).min(1.0);
         }
 
         let target_orb = if progress > 0.0 && progress < 1.0 {
@@ -414,12 +468,15 @@ impl PlaybackEngine {
         } else {
             0.0
         };
-        let alpha_smooth = 1.0 - (-15.0 * dt).exp();
+        let alpha_smooth = 1.0 - (-15.0 * safe_dt).exp();
         self.animated_orb_alpha += (target_orb - self.animated_orb_alpha) * alpha_smooth;
+        if (target_orb - self.animated_orb_alpha).abs() < 0.004 {
+            self.animated_orb_alpha = target_orb;
+        }
 
         let target_art_scale = if self.is_playing { 1.0 } else { 0.82 };
         let target_art_opacity = if self.is_playing { 1.0 } else { 0.74 };
-        let art_lerp = 1.0 - (-10.0 * dt).exp();
+        let art_lerp = 1.0 - (-10.0 * safe_dt).exp();
         self.art_scale += (target_art_scale - self.art_scale) * art_lerp;
         self.art_opacity += (target_art_opacity - self.art_opacity) * art_lerp;
         if (target_art_scale - self.art_scale).abs() < 0.004 {
@@ -427,19 +484,22 @@ impl PlaybackEngine {
             self.art_opacity = target_art_opacity;
         }
 
-        let is_paused_settling = !self.is_playing
-            && ((self.art_scale - 0.82).abs() > 0.005 || self.transition_progress < 1.0);
-        let needs_active_frames = self.is_playing || is_paused_settling;
-
         let total_sparkle_dur = 5.5_f64;
         let is_sparkling_candidate = !is_ultra_light
-            && (is_loading_lyrics || (sparkle_time < total_sparkle_dur && current_line_text == track.name));
+            && (is_loading_lyrics || (sparkle_time < total_sparkle_dur && is_showing_track_title));
         let sparkle_cycle_time = if is_loading_lyrics {
             sparkle_time % total_sparkle_dur
         } else {
             sparkle_time
         };
         let is_interlude = current_line_text.contains('✦');
+
+        let is_paused_settling = !self.is_playing
+            && ((self.art_scale - 0.82).abs() > 0.005
+                || self.transition_progress < 1.0
+                || (target_orb - self.animated_orb_alpha).abs() > 0.005
+                || is_sparkling_candidate);
+        let needs_active_frames = self.is_playing || is_paused_settling;
 
         Some(MenuBarLyricResolved {
             text: current_line_text,
@@ -480,18 +540,32 @@ mod tests {
             album: "Album".into(),
             artwork_url: "".into(),
             duration: 180.0,
-            source: MusicSource::Spotify,
+            source_id: "com.spotify.client".into(),
         };
-        pb.update_playback_state(tr.clone(), 10.0, true, MusicSource::Spotify, 100.0, 1000.0);
+        pb.update_playback_state(
+            tr.clone(),
+            10.0,
+            true,
+            "com.spotify.client".into(),
+            100.0,
+            1000.0,
+        );
         let t1 = pb.current_time(101.0);
         assert!((t1 - 11.0).abs() < 0.01);
 
         // Small backward jitter <= 0.25s clamped forward
-        pb.update_playback_state(tr.clone(), 10.9, true, MusicSource::Spotify, 101.0, 1001.0);
+        pb.update_playback_state(
+            tr.clone(),
+            10.9,
+            true,
+            "com.spotify.client".into(),
+            101.0,
+            1001.0,
+        );
         assert!(pb.current_time(101.0) >= 11.0);
 
         // Real backward seek > 0.25s resyncs cleanly
-        pb.update_playback_state(tr, 4.0, true, MusicSource::Spotify, 102.0, 1002.0);
+        pb.update_playback_state(tr, 4.0, true, "com.spotify.client".into(), 102.0, 1002.0);
         assert!((pb.current_time(102.0) - 4.0).abs() < 0.01);
     }
 
@@ -499,23 +573,74 @@ mod tests {
     fn test_pause_settle_to_082() {
         let mut pb = PlaybackEngine::new();
         let tr = PlaybackTrack {
-            id: "sp:1".into(),
+            id: "sp:2".into(),
             name: "Song".into(),
             artist: "Artist".into(),
-            album: "Album".into(),
-            artwork_url: "".into(),
+            album: "".into(),
+            artwork_url: "https://example.com/a.jpg".into(),
             duration: 180.0,
-            source: MusicSource::Spotify,
+            source_id: "com.tidal.desktop".into(),
         };
-        let lines = parse_lrc("[00:05.00]Hello\n[00:10.00]World\n");
-        pb.update_playback_state(tr, 6.0, false, MusicSource::Spotify, 10.0, 100.0);
+        let d1 = pb.update_playback_state(
+            tr.clone(),
+            5.0,
+            false,
+            "com.tidal.desktop".into(),
+            10.0,
+            2000.0,
+        );
+        assert!(d1.artwork_url_changed);
+        // Second update with omitted artwork_url must NOT fire spurious artwork_url_changed
+        let mut tr_no_url = tr;
+        tr_no_url.artwork_url = "".into();
+        let d2 = pb.update_playback_state(
+            tr_no_url,
+            5.0,
+            false,
+            "com.tidal.desktop".into(),
+            11.0,
+            2001.0,
+        );
+        assert!(!d2.artwork_url_changed);
 
-        let mut last_res = None;
+        let lines = parse_lrc("[00:01.00]Hello world\n[00:10.00]Next line");
+        let mut last = None;
         for step in 0..80 {
-            last_res = pb.step_menubar_frame(&lines, 0.016, 10.0 + (step as f64) * 0.016, 100.0, false, false);
+            last = pb.step_menubar_frame(
+                &lines,
+                0.016,
+                11.0 + (step as f64) * 0.016,
+                2001.0 + (step as f64) * 0.016,
+                false,
+                true,
+            );
         }
-        let r = last_res.unwrap();
-        assert!((r.art_scale - 0.82).abs() <= 0.005);
-        assert!(!r.needs_active_frames);
+        let frame = last.unwrap();
+        assert!((frame.art_scale - 0.82).abs() < 0.01);
+        assert!(!frame.needs_active_frames);
+    }
+
+    #[test]
+    fn test_multi_source_stop_isolation_and_nan_dt() {
+        let mut pb = PlaybackEngine::new();
+        let tr = PlaybackTrack {
+            id: "ytm:1".into(),
+            name: "Track".into(),
+            artist: "Artist".into(),
+            album: "".into(),
+            artwork_url: "".into(),
+            duration: 200.0,
+            source_id: "com.google.Chrome".into(),
+        };
+        pb.update_playback_state(tr, 12.0, true, "com.google.Chrome".into(), 50.0, 5000.0);
+        // Stopped signal from a DIFFERENT app must NOT clear Chrome track
+        assert!(!pb.mark_stopped("com.tidal.desktop", 0, false));
+        assert!(pb.current_track.is_some());
+        // NaN dt must not poison art_scale
+        let f = pb.step_menubar_frame(&[], f64::NAN, 50.1, 5000.1, false, false).unwrap();
+        assert!(f.art_scale.is_finite());
+        // Stopping active source with is_not_running clears immediately, and second call returns false
+        assert!(pb.mark_stopped("com.google.Chrome", 2, true));
+        assert!(!pb.mark_stopped("com.google.Chrome", 2, true));
     }
 }

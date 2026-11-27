@@ -5,28 +5,6 @@ import ImageIO
 
 // MARK: - Domain Models
 
-public enum MusicSourceMode: Int32, CaseIterable, Sendable {
-    case auto = 0
-    case spotify = 1
-    case appleMusic = 2
-
-    public var defaultsValue: String {
-        switch self {
-        case .auto: return "Auto"
-        case .spotify: return "Spotify"
-        case .appleMusic: return "Apple Music"
-        }
-    }
-
-    public init(defaultsValue: String) {
-        switch defaultsValue {
-        case "Spotify": self = .spotify
-        case "Apple Music": self = .appleMusic
-        default: self = .auto
-        }
-    }
-}
-
 public struct TrackModel: Equatable, Sendable {
     public var id: String
     public var name: String
@@ -35,7 +13,36 @@ public struct TrackModel: Equatable, Sendable {
     public var artworkURL: String?
     public var artworkData: Data?
     public var duration: Double
-    public var source: MusicSourceMode
+    /// Canonical player bundle ID (e.g. "com.spotify.client", "com.apple.Music", "com.tidal.desktop", "com.brave.Browser")
+    public var sourceID: String
+    /// Human-readable source label (e.g. "Spotify", "YouTube Music", "TIDAL", "Brave Browser")
+    public var sourceDisplayName: String
+    /// Process bundle ID to tap for CoreAudio waveform/haptics (may equal sourceID or browser bundle ID)
+    public var audioBundleID: String
+
+    public init(
+        id: String,
+        name: String,
+        artist: String,
+        album: String,
+        artworkURL: String? = nil,
+        artworkData: Data? = nil,
+        duration: Double = 0,
+        sourceID: String,
+        sourceDisplayName: String? = nil,
+        audioBundleID: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.artist = artist
+        self.album = album
+        self.artworkURL = artworkURL
+        self.artworkData = artworkData
+        self.duration = duration
+        self.sourceID = sourceID
+        self.sourceDisplayName = sourceDisplayName ?? MusicSourceRegistry.shared.displayName(forBundleID: sourceID)
+        self.audioBundleID = audioBundleID ?? sourceID
+    }
 }
 
 public struct LyricWordModel: Decodable, Equatable, Sendable {
@@ -164,14 +171,14 @@ public final class ArtworkCache {
     }
 
     public func setImage(_ image: NSImage, forKey key: String) {
-        let cost = Int(image.size.width * image.size.height * 4)
+        let cost = max(1, Int(image.size.width * image.size.height * 4))
         cache.setObject(image, forKey: key as NSString, cost: cost)
     }
 
     public static func cacheKey(for track: TrackModel) -> String {
         let nameKey = track.name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let artistKey = track.artist.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(track.source.defaultsValue)|\(nameKey)|\(artistKey)"
+        return "\(track.sourceID)|\(nameKey)|\(artistKey)"
     }
 
     public static func normalizeKey(name: String, artist: String) -> String {
@@ -181,19 +188,22 @@ public final class ArtworkCache {
     }
 
     public func storeImage(_ image: NSImage, for track: TrackModel) {
-        setImage(image, forKey: track.id)
-        setImage(image, forKey: Self.cacheKey(for: track))
-        setImage(image, forKey: Self.normalizeKey(name: track.name, artist: track.artist))
+        let primary = Self.cacheKey(for: track)
+        setImage(image, forKey: primary)
+        let normalized = Self.normalizeKey(name: track.name, artist: track.artist)
+        if normalized != primary && !track.name.isEmpty {
+            setImage(image, forKey: normalized)
+        }
     }
 
     public func findImage(for track: TrackModel) -> NSImage? {
-        image(forKey: track.id)
-            ?? image(forKey: Self.cacheKey(for: track))
+        image(forKey: Self.cacheKey(for: track))
             ?? image(forKey: Self.normalizeKey(name: track.name, artist: track.artist))
     }
 }
 
 public enum ColorExtractor {
+    @MainActor
     public static func extractWaveformTheme(from image: NSImage) -> WaveformThemeModel {
         let w = 48
         let h = 48
@@ -310,7 +320,9 @@ public final class LyricsCoreEngine {
     // State
     public private(set) var currentTrack: TrackModel?
     public private(set) var isPlaying: Bool = false
-    public private(set) var activeSource: MusicSourceMode = .spotify
+    public private(set) var activeSourceID: String = "com.spotify.client"
+    public private(set) var activeSourceDisplayName: String = "Spotify"
+    public private(set) var activeAudioBundleID: String = "com.spotify.client"
     public private(set) var lyrics: [LyricLineModel] = []
     public private(set) var isLyricsLoading: Bool = false
 
@@ -342,11 +354,14 @@ public final class LyricsCoreEngine {
 
     private var artworkGeneration: Int = 0
     private var artworkTask: Task<Void, Never>?
-    private var artworkRetryCount: Int = 0
-    private var nextArtworkRetryDate: Date = .distantPast
-    private let retryIntervals: [TimeInterval] = [0.2, 0.5, 1.2, 2.0]
+    private var inFlightArtworkKey: String?
+    private let retryIntervals: [UInt64] = [300_000_000, 800_000_000, 1_500_000_000]
     private var isManualUpdateCheck = false
     private let targetDmgPath = "/tmp/LyricsMenuBarUpdate.dmg"
+
+    // Preallocated scratch buffer for 60 FPS zero-allocation bar ticking
+    private var waveformFloatScratch: [Float] = Array(repeating: 2.5, count: 128)
+    private var lastSubmittedBandCount: Int = -1
 
     private init() {
         self.coreHandle = lyrics_core_create()!
@@ -386,17 +401,23 @@ public final class LyricsCoreEngine {
     }
 
     public func seekLocal(to time: Double) {
-        lyrics_core_playback_seek_local(coreHandle, max(0, time), ProcessInfo.processInfo.systemUptime)
+        let safeTime = time.isFinite ? max(0, time) : 0
+        lyrics_core_playback_seek_local(coreHandle, safeTime, ProcessInfo.processInfo.systemUptime)
         NotificationCenter.default.post(name: Self.playbackDidSeekNotification, object: self)
     }
 
     public func togglePlayStateLocal() {
+        guard currentTrack != nil else { return }
         isPlaying.toggle()
         lyrics_core_playback_set_playing_local(coreHandle, isPlaying, ProcessInfo.processInfo.systemUptime)
         NotificationCenter.default.post(name: Self.playStateDidChangeNotification, object: self)
     }
 
-    public func updatePlaybackState(track: TrackModel, position: Double, isPlaying: Bool, source: MusicSourceMode) {
+    public func updatePlaybackState(track: TrackModel, position: Double, isPlaying: Bool) {
+        guard !track.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let safePos = position.isFinite ? max(0, position) : 0
+        let safeDur = track.duration.isFinite ? max(0, track.duration) : 0
         let nowMono = ProcessInfo.processInfo.systemUptime
         let nowUnix = Date().timeIntervalSince1970
 
@@ -405,37 +426,48 @@ public final class LyricsCoreEngine {
                 track.artist.withCString { artPtr in
                     track.album.withCString { albPtr in
                         (track.artworkURL ?? "").withCString { urlPtr in
-                            lyrics_core_playback_update(
-                                coreHandle,
-                                idPtr,
-                                namePtr,
-                                artPtr,
-                                albPtr,
-                                urlPtr,
-                                track.duration,
-                                position,
-                                isPlaying,
-                                source.rawValue,
-                                nowMono,
-                                nowUnix
-                            )
+                            track.sourceID.withCString { srcPtr in
+                                lyrics_core_playback_update(
+                                    coreHandle,
+                                    idPtr,
+                                    namePtr,
+                                    artPtr,
+                                    albPtr,
+                                    urlPtr,
+                                    safeDur,
+                                    safePos,
+                                    isPlaying,
+                                    srcPtr,
+                                    nowMono,
+                                    nowUnix
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        if delta.source_changed {
-            self.activeSource = source
-            let bundleID = (source == .appleMusic) ? "com.apple.Music" : "com.spotify.client"
+        let audioBundleChanged = (track.audioBundleID != activeAudioBundleID)
+        if delta.source_changed || audioBundleChanged {
+            self.activeSourceID = track.sourceID
+            self.activeSourceDisplayName = track.sourceDisplayName
+            self.activeAudioBundleID = track.audioBundleID
             NotificationCenter.default.post(
                 name: Notification.Name("ActiveMusicSourceChanged"),
                 object: nil,
-                userInfo: ["bundleID": bundleID]
+                userInfo: [
+                    "bundleID": track.audioBundleID,
+                    "sourceID": track.sourceID
+                ]
             )
+        } else if track.sourceDisplayName != activeSourceDisplayName {
+            self.activeSourceDisplayName = track.sourceDisplayName
         }
 
         var updatedTrack = track
+        updatedTrack.duration = safeDur
+        let hasNewEmbeddedArtwork = (updatedTrack.artworkData != nil && self.currentTrack?.artworkData == nil)
         if !delta.track_changed {
             if updatedTrack.artworkData == nil {
                 updatedTrack.artworkData = self.currentTrack?.artworkData
@@ -451,59 +483,62 @@ public final class LyricsCoreEngine {
             NotificationCenter.default.post(name: Self.playStateDidChangeNotification, object: self)
         }
 
-        let shouldRetryArtwork = (self.artworkImage == nil
-            && self.artworkRetryCount < self.retryIntervals.count
-            && Date() >= self.nextArtworkRetryDate)
-
         if delta.track_changed {
+            self.inFlightArtworkKey = nil
             if let cached = ArtworkCache.shared.findImage(for: updatedTrack) {
                 ArtworkCache.shared.storeImage(cached, for: updatedTrack)
+                self.artworkTask?.cancel()
+                self.artworkGeneration += 1
                 self.artworkImage = cached
+                self.artworkRevision += 1
             } else {
                 self.artworkImage = nil
+                self.artworkRevision += 1
+                self.loadArtwork(for: updatedTrack, force: true)
             }
-            self.artworkRevision += 1
-            self.artworkRetryCount = 0
-            self.nextArtworkRetryDate = .distantPast
-            self.loadArtwork(for: updatedTrack)
             self.fetchLyrics(for: updatedTrack)
             NotificationCenter.default.post(name: Self.trackDidChangeNotification, object: self)
-        } else if delta.artwork_url_changed || shouldRetryArtwork {
-            self.loadArtwork(for: updatedTrack)
+        } else if (delta.artwork_url_changed || hasNewEmbeddedArtwork) && self.artworkImage == nil {
+            self.loadArtwork(for: updatedTrack, force: true)
         }
     }
 
-    public func handleStopped(source: MusicSourceMode, threshold: Int32, isNotRunning: Bool) {
-        if lyrics_core_playback_mark_stopped(coreHandle, source.rawValue, threshold, isNotRunning) {
+    public func handleStopped(sourceID: String, threshold: Int32, isNotRunning: Bool) {
+        let cleared = sourceID.withCString { srcPtr in
+            lyrics_core_playback_mark_stopped(coreHandle, srcPtr, threshold, isNotRunning)
+        }
+        if cleared {
             self.currentTrack = nil
             self.isPlaying = false
             self.lyrics = []
             self.isLyricsLoading = false
             lyrics_core_lyrics_clear(coreHandle)
             self.artworkTask?.cancel()
+            self.artworkTask = nil
+            self.inFlightArtworkKey = nil
             self.artworkGeneration += 1
             self.artworkImage = nil
             self.artworkRevision += 1
-            self.artworkRetryCount = 0
-            self.nextArtworkRetryDate = .distantPast
             NotificationCenter.default.post(name: Self.lyricsDidChangeNotification, object: self)
             NotificationCenter.default.post(name: Self.playStateDidChangeNotification, object: self)
             NotificationCenter.default.post(name: Self.trackDidChangeNotification, object: self)
         }
     }
 
-    public func setSpotifyArtworkURLIfMissing(_ urlString: String, expectedTrackName: String) {
-        guard let cur = currentTrack, cur.name == expectedTrackName else { return }
+    public func setArtworkURLIfMissing(_ urlString: String, expectedTrackName: String) {
+        guard !urlString.isEmpty, let cur = currentTrack, cur.name == expectedTrackName else { return }
         if cur.artworkURL == nil || artworkImage == nil {
             self.currentTrack?.artworkURL = urlString
-            self.loadArtwork(for: self.currentTrack!)
+            if let updated = self.currentTrack {
+                self.loadArtwork(for: updated, force: true)
+            }
         }
     }
 
     // MARK: - Lyrics Fetch via Rust
 
     public func fetchLyrics(for track: TrackModel) {
-        guard !track.name.isEmpty, !track.artist.isEmpty else {
+        guard !track.name.isEmpty else {
             self.lyrics = []
             self.isLyricsLoading = false
             NotificationCenter.default.post(name: Self.lyricsDidChangeNotification, object: self)
@@ -552,82 +587,103 @@ public final class LyricsCoreEngine {
 
     // MARK: - Artwork Loading via Rust Transport + CGImageSource Compact Decode
 
-    private func loadArtwork(for track: TrackModel) {
+    private func loadArtwork(for track: TrackModel, force: Bool) {
+        let trackArtKey = ArtworkCache.cacheKey(for: track)
+
         if let cached = ArtworkCache.shared.findImage(for: track) {
-            self.artworkImage = cached
-            self.artworkRevision += 1
-            self.artworkRetryCount = 0
-            self.nextArtworkRetryDate = .distantPast
-            NotificationCenter.default.post(name: Self.artworkDidChangeNotification, object: self)
+            if self.artworkImage !== cached {
+                self.artworkImage = cached
+                self.artworkRevision += 1
+                NotificationCenter.default.post(name: Self.artworkDidChangeNotification, object: self)
+            }
+            return
+        }
+
+        // Never cancel an already in-flight download for the same track unless forced by new URL/data
+        if !force && inFlightArtworkKey == trackArtKey && artworkTask != nil {
             return
         }
 
         artworkGeneration += 1
         let myGen = artworkGeneration
+        inFlightArtworkKey = trackArtKey
         artworkTask?.cancel()
 
-        if self.currentTrack?.name != track.name {
-            self.artworkImage = nil
-        }
+        let maxDim: CGFloat = AppPerformance.isUltraLightMode ? 240 : 300
+        let retryDelays = self.retryIntervals
 
         artworkTask = Task { [weak self] in
             guard let self = self else { return }
-            let isUltraLight = AppPerformance.isUltraLightMode
-            let maxDim: CGFloat = isUltraLight ? 240 : 300
+            defer {
+                if self.artworkGeneration == myGen {
+                    self.inFlightArtworkKey = nil
+                }
+            }
 
-            let rawData: Data? = await Task.detached(priority: .userInitiated) {
-                if track.source == .appleMusic {
-                    let result = MusicIPCBridge.fetchAppleMusicArtworkData(expectedID: track.id)
-                    if let data = result.data {
-                        return data
+            let maxAttempts = retryDelays.count + 1
+            for attempt in 0..<maxAttempts {
+                if Task.isCancelled { return }
+
+                let rawData: Data? = await Task.detached(priority: .userInitiated) {
+                    // 1. Embedded artwork bytes (MediaRemote / Local API / Swinsian)
+                    if let embedded = track.artworkData, embedded.count > 64 {
+                        return embedded
                     }
-                } else if let rawURL = track.artworkURL {
-                    let sanitizedPtr = rawURL.withCString { lyrics_core_sanitize_artwork_url($0) }
-                    if let sPtr = sanitizedPtr {
-                        let urlStr = String(cString: sPtr)
-                        lyrics_core_free_string(sPtr)
-                        let buf = urlStr.withCString { lyrics_core_download_bytes($0, 8) }
+
+                    // 2. Apple Music native artwork via serial OSA executor
+                    if track.sourceID == "com.apple.Music" {
+                        let result = MusicIPCBridge.fetchAppleMusicArtworkData(expectedID: track.id)
+                        if let data = result.data {
+                            return data
+                        }
+                    }
+
+                    // 3. Direct artwork URL (Spotify CDN / Pear YTM / Cider / MediaRemote)
+                    if let rawURL = track.artworkURL, !rawURL.isEmpty {
+                        let sanitizedPtr = rawURL.withCString { lyrics_core_sanitize_artwork_url($0) }
+                        if let sPtr = sanitizedPtr {
+                            let urlStr = String(cString: sPtr)
+                            lyrics_core_free_string(sPtr)
+                            let buf = urlStr.withCString { lyrics_core_download_bytes($0, 8) }
+                            if let ptr = buf.data, buf.len > 0 {
+                                let data = Data(bytes: ptr, count: buf.len)
+                                lyrics_core_free_bytes(buf)
+                                return data
+                            }
+                        }
+                    }
+
+                    // 4. Universal iTunes Search artwork fallback (covers TIDAL, Deezer, Web Players, VLC, etc.)
+                    if !track.name.isEmpty {
+                        let buf = track.name.withCString { tPtr in
+                            track.artist.withCString { aPtr in
+                                lyrics_core_fetch_itunes_artwork(tPtr, aPtr)
+                            }
+                        }
                         if let ptr = buf.data, buf.len > 0 {
                             let data = Data(bytes: ptr, count: buf.len)
                             lyrics_core_free_bytes(buf)
                             return data
                         }
                     }
+                    return nil
+                }.value
+
+                guard !Task.isCancelled, self.artworkGeneration == myGen else { return }
+                guard let cur = self.currentTrack, cur.name == track.name else { return }
+
+                if let loadedImage = rawData.flatMap({ ColorExtractor.decodeCompactImage(from: $0, maxDimension: maxDim) }) {
+                    ArtworkCache.shared.storeImage(loadedImage, for: track)
+                    self.artworkImage = loadedImage
+                    self.artworkRevision += 1
+                    NotificationCenter.default.post(name: Self.artworkDidChangeNotification, object: self)
+                    return
                 }
 
-                if !track.name.isEmpty {
-                    let buf = track.name.withCString { tPtr in
-                        track.artist.withCString { aPtr in
-                            lyrics_core_fetch_itunes_artwork(tPtr, aPtr)
-                        }
-                    }
-                    if let ptr = buf.data, buf.len > 0 {
-                        let data = Data(bytes: ptr, count: buf.len)
-                        lyrics_core_free_bytes(buf)
-                        return data
-                    }
+                if attempt < retryDelays.count {
+                    try? await Task.sleep(nanoseconds: retryDelays[attempt])
                 }
-                return nil
-            }.value
-
-            guard !Task.isCancelled, self.artworkGeneration == myGen else { return }
-            guard let cur = self.currentTrack, cur.name == track.name else { return }
-            let loadedImage = rawData.flatMap { ColorExtractor.decodeCompactImage(from: $0, maxDimension: maxDim) }
-
-            if let img = loadedImage {
-                ArtworkCache.shared.storeImage(img, for: track)
-                self.artworkImage = img
-                self.artworkRevision += 1
-                self.artworkRetryCount = 0
-                self.nextArtworkRetryDate = .distantPast
-            } else {
-                if self.artworkRetryCount < self.retryIntervals.count {
-                    self.nextArtworkRetryDate = Date().addingTimeInterval(self.retryIntervals[self.artworkRetryCount])
-                    self.artworkRetryCount += 1
-                }
-                self.artworkRevision += 1
             }
-            NotificationCenter.default.post(name: Self.artworkDidChangeNotification, object: self)
         }
     }
 
@@ -676,10 +732,13 @@ public final class LyricsCoreEngine {
         return (Int(idx), unsynced)
     }
 
-    // MARK: - Audio & Haptics Bridge
+    // MARK: - Audio & Haptics Bridge (Zero Per-Frame Heap Allocations)
 
     public func updateWaveformBandCount(_ count: Int) {
-        lyrics_core_audio_update_band_count(audioHandle, Int32(count))
+        let clamped = min(128, max(0, count))
+        guard clamped != lastSubmittedBandCount else { return }
+        lastSubmittedBandCount = clamped
+        lyrics_core_audio_update_band_count(audioHandle, Int32(clamped))
     }
 
     public func tickWaveformBars(
@@ -688,28 +747,31 @@ public final class LyricsCoreEngine {
         barCount: Int,
         outHeights: inout [CGFloat]
     ) {
-        guard barCount > 0 else {
+        let count = min(128, max(0, barCount))
+        guard count > 0 else {
             outHeights.removeAll(keepingCapacity: true)
             return
         }
-        var floatBuf = [Float](repeating: 2.5, count: barCount)
-        let n = floatBuf.withUnsafeMutableBufferPointer { ptr in
+        if waveformFloatScratch.count < count {
+            waveformFloatScratch = Array(repeating: 2.5, count: count)
+        }
+        let n = waveformFloatScratch.withUnsafeMutableBufferPointer { ptr in
             lyrics_core_audio_tick_bars(
                 audioHandle,
                 deltaTime,
                 Date().timeIntervalSince1970,
                 isPlaying,
                 isTapRunning,
-                barCount,
+                count,
                 ptr.baseAddress,
-                barCount
+                count
             )
         }
         if outHeights.count != n {
             outHeights = Array(repeating: 2.5, count: n)
         }
         for i in 0..<n {
-            outHeights[i] = CGFloat(floatBuf[i])
+            outHeights[i] = CGFloat(waveformFloatScratch[i])
         }
     }
 
@@ -811,6 +873,20 @@ public final class LyricsCoreEngine {
         }
     }
 
+    /// Dismisses the modal without discarding `.updateAvailable` badge/state ("Later" button)
+    public func dismissUpdateModal() {
+        if case .downloading = updateState {
+            cancelUpdateDownload()
+            return
+        }
+        if case .failed = updateState {
+            updateState = .idle
+        }
+        showUpdateModal = false
+        NotificationCenter.default.post(name: Self.updateStateDidChangeNotification, object: self)
+    }
+
+    /// Cancels an active download and resets update state
     public func cancelUpdateDownload() {
         lyrics_core_cancel_download(coreHandle)
         self.updateState = .idle
@@ -826,56 +902,77 @@ public final class LyricsCoreEngine {
         let targetAppPath = currentAppPath.hasPrefix("/Applications")
             ? currentAppPath
             : "/Applications/Lyrics Menu Bar.app"
-        let scriptPath = "/tmp/update_lyricsmenubar.sh"
-        let mountPoint = "/tmp/LyricsMenuBarMount"
+        let dmgPath = self.targetDmgPath
+        let pid = ProcessInfo.processInfo.processIdentifier
 
-        let scriptContent = """
-        #!/bin/bash
-        sleep 1.2
-        hdiutil detach "\(mountPoint)" -force 2>/dev/null || true
-        rm -rf "\(mountPoint)"
-        mkdir -p "\(mountPoint)"
+        Task.detached(priority: .userInitiated) {
+            let tmpDir = NSTemporaryDirectory() + "LyricsMenuBarUpdate-\(UUID().uuidString)"
+            let scriptPath = "\(tmpDir)/update.sh"
+            let mountPoint = "\(tmpDir)/mount"
 
-        hdiutil attach "\(targetDmgPath)" -nobrowse -mountpoint "\(mountPoint)" -quiet
-        sleep 0.6
+            let scriptContent = """
+            #!/bin/bash
+            set -e
+            # Wait for old app to exit (max 5s)
+            for _ in $(seq 1 25); do
+                kill -0 \(pid) 2>/dev/null || break
+                sleep 0.2
+            done
 
-        APP_SRC=$(find "\(mountPoint)" -maxdepth 1 -name "*.app" | head -n 1)
-        if [ -n "$APP_SRC" ] && [ -d "$APP_SRC" ]; then
-            rm -rf "\(targetAppPath)"
-            cp -R "$APP_SRC" "\(targetAppPath)"
-            xattr -cr "\(targetAppPath)" 2>/dev/null || true
-        fi
-
-        hdiutil detach "\(mountPoint)" -quiet 2>/dev/null || true
-        rm -rf "\(mountPoint)" "\(targetDmgPath)" "\(scriptPath)"
-        open -a "\(targetAppPath)"
-        """
-
-        do {
-            try scriptContent.write(toFile: scriptPath, atomically: true, encoding: .utf8)
-            let chmod = Process()
-            chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
-            chmod.arguments = ["+x", scriptPath]
-            try chmod.run()
-            chmod.waitUntilExit()
-
-            let launcher = Process()
-            launcher.executableURL = URL(fileURLWithPath: "/bin/bash")
-            launcher.arguments = ["-c", "nohup \(scriptPath) >/dev/null 2>&1 &"]
-            try launcher.run()
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                NSApp.terminate(nil)
+            mkdir -p "\(mountPoint)"
+            cleanup() {
+                hdiutil detach "\(mountPoint)" -force 2>/dev/null || true
+                rm -rf "\(tmpDir)" "\(dmgPath)" 2>/dev/null || true
             }
-        } catch {
-            self.updateState = .failed(error: "Installation launcher error: \(error.localizedDescription)")
-            NotificationCenter.default.post(name: Self.updateStateDidChangeNotification, object: self)
+            trap cleanup EXIT
+
+            hdiutil attach "\(dmgPath)" -nobrowse -mountpoint "\(mountPoint)" -quiet
+            APP_SRC=$(find "\(mountPoint)" -maxdepth 1 -name "*.app" | head -n 1)
+            if [ -z "$APP_SRC" ] || [ ! -d "$APP_SRC" ]; then
+                exit 1
+            fi
+
+            # Verify bundle signature integrity before replacing installed app
+            if ! codesign --verify --deep --strict "$APP_SRC" >/dev/null 2>&1; then
+                exit 2
+            fi
+
+            STAGING_APP="\(targetAppPath).staging.$$"
+            rm -rf "$STAGING_APP"
+            ditto "$APP_SRC" "$STAGING_APP"
+            xattr -cr "$STAGING_APP" 2>/dev/null || true
+            rm -rf "\(targetAppPath)"
+            mv "$STAGING_APP" "\(targetAppPath)"
+            open -a "\(targetAppPath)"
+            """
+
+            do {
+                try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+                try scriptContent.write(toFile: scriptPath, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptPath)
+
+                let launcher = Process()
+                launcher.executableURL = URL(fileURLWithPath: "/bin/bash")
+                launcher.arguments = ["-c", "nohup \"\(scriptPath)\" >/dev/null 2>&1 &"]
+                try launcher.run()
+
+                await MainActor.run {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        NSApp.terminate(nil)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    LyricsCoreEngine.shared.updateState = .failed(error: "Installation launcher error: \(error.localizedDescription)")
+                    NotificationCenter.default.post(name: LyricsCoreEngine.updateStateDidChangeNotification, object: LyricsCoreEngine.shared)
+                }
+            }
         }
     }
 
     private func showUpToDateAlert() {
-        SettingsMenuController.isPresentingMenuOrAlert = true
-        defer { SettingsMenuController.isPresentingMenuOrAlert = false }
+        SettingsMenuController.beginModalPresentation()
+        defer { SettingsMenuController.endModalPresentation() }
         let alert = NSAlert()
         alert.messageText = "Lyrics Menu Bar is Up to Date"
         alert.informativeText = "You are running the latest version (v\(currentVersion))."

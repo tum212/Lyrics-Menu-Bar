@@ -6,7 +6,7 @@
 # Usage:
 #   bash build_dmg.sh
 # ============================================================
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_TITLE="Lyrics Menu Bar"
@@ -40,8 +40,7 @@ echo "   Rust universal staticlib complete ✓"
 # ----- 1. BUILD -------------------------------------------------------
 cd "$SCRIPT_DIR"
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-    swift build -c release --arch arm64 --arch x86_64 \
-    2>&1 | grep -v "^warning:" || true
+    swift build -c release --arch arm64 --arch x86_64
 
 BINARY_PATH=""
 if [ -f "$SCRIPT_DIR/.build/apple/Products/Release/LyricsMenuBar" ]; then

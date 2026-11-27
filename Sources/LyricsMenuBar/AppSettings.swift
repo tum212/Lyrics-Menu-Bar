@@ -23,7 +23,7 @@ public enum AppPerformance {
         #endif
     }
 
-    /// Live runtime Ultra-Light Mode flag (user toggleable in Settings)
+    /// Live runtime Ultra-Light Mode flag (user toggleable in Settings; follows Low Power Mode dynamically when unset)
     public static var isUltraLightMode: Bool {
         if UserDefaults.standard.object(forKey: AppSettingKey.ultraLightMode) != nil {
             return UserDefaults.standard.bool(forKey: AppSettingKey.ultraLightMode)
@@ -39,38 +39,39 @@ public enum AppSettingKey {
     // Lyrics & Focus
     public static let lyricsFocusMode = "lyricsFocusMode"
     public static let lyricsMaxWidth = "lyricsMaxWidth"
-    
+
     // Visibility & UI
     public static let showLyrics = "showLyrics"
     public static let showAlbumArt = "showAlbumArt"
     public static let audioFeaturesEnabled = "audioFeaturesEnabled"
     public static let specularEdgeEnabled = "specularEdgeEnabled"
-    
-    // Music Source
+
+    // Music Source & Universal Streaming
     public static let musicSourceMode = "musicSourceMode"
-    
+    public static let universalNowPlayingEnabled = "universalNowPlayingEnabled"
+
     // Audio & Waveform
     public static let waveformBars = "waveformBars"
     public static let lastWaveformBars = "lastWaveformBars"
-    
+
     // Haptics
     public static let hapticEnabled = "hapticEnabled"
     public static let hapticIntensity = "hapticIntensity"
     public static let hapticActuatorType = "hapticActuatorType"
-    
+
     // System
     public static let launchAtLogin = "launchAtLogin"
 }
 
 public enum AppDefaults {
     public static let defaultLyricsWidths: [Int] = [100, 150, 200, 260]
-    
+
     public static func register() {
         let supportsTap = AppCapabilities.supportsAudioTap
         let defaultUltraLight = AppPerformance.defaultUltraLightMode
 
+        // Intentionally omit `ultraLightMode` from register(defaults:) so runtime Low Power Mode changes work dynamically
         UserDefaults.standard.register(defaults: [
-            AppSettingKey.ultraLightMode: defaultUltraLight,
             AppSettingKey.lyricsFocusMode: true,
             AppSettingKey.lyricsMaxWidth: 200,
             AppSettingKey.showLyrics: true,
@@ -78,6 +79,7 @@ public enum AppDefaults {
             AppSettingKey.audioFeaturesEnabled: supportsTap && !defaultUltraLight,
             AppSettingKey.specularEdgeEnabled: !defaultUltraLight,
             AppSettingKey.musicSourceMode: "Auto",
+            AppSettingKey.universalNowPlayingEnabled: true,
             AppSettingKey.waveformBars: (defaultUltraLight || !supportsTap) ? 0 : 14,
             AppSettingKey.hapticEnabled: false,
             AppSettingKey.hapticIntensity: 0,

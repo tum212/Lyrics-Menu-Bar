@@ -229,17 +229,23 @@ pub fn sanitize_artwork_url(url_str: &str) -> Option<String> {
 }
 
 pub fn download_url_bytes(url: &str, timeout_secs: u64, user_agent: &str) -> Option<Vec<u8>> {
-    let agent = crate::build_https_agent(timeout_secs, timeout_secs);
-    let resp = agent.get(url).set("User-Agent", user_agent).call().ok()?;
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    let secs = timeout_secs.clamp(1, 30);
+    let resp = crate::shared_https_agent()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(secs))
+        .set("User-Agent", user_agent)
+        .call()
+        .ok()?;
     if resp.status() != 200 {
         return None;
     }
     let mut bytes = Vec::new();
     resp.into_reader()
-        .take(16 * 1024 * 1024)
+        .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.is_empty() {
+    if bytes.is_empty() || bytes.len() > MAX_BYTES {
         None
     } else {
         Some(bytes)
@@ -262,42 +268,82 @@ struct ITunesTrackResult {
 }
 
 fn clean_track_for_itunes(track: &str) -> String {
-    let mut s = track.to_string();
-    if let Some(idx) = s.find("(feat") {
-        s.truncate(idx);
+    let lower = track.to_lowercase();
+    let mut cut = track.len();
+    for needle in ["(feat", "(ft.", "[feat", "- remaster", "(remaster", "(official"] {
+        if let Some(idx) = lower.find(needle) {
+            if idx > 0 && idx < cut {
+                cut = idx;
+            }
+        }
     }
-    if let Some(idx) = s.find("- Remaster") {
-        s.truncate(idx);
+    while cut > 0 && !track.is_char_boundary(cut) {
+        cut -= 1;
     }
-    s.trim().to_string()
+    let trimmed = track[..cut].trim();
+    if trimmed.is_empty() {
+        track.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn fetch_itunes_artwork_bytes(track: &str, artist: &str) -> Option<Vec<u8>> {
     let cleaned = clean_track_for_itunes(track);
-    let query = format!("{} {}", artist.trim(), cleaned);
+    let target_artist = crate::lyrics::simplify_for_match(artist);
+    let target_track = crate::lyrics::simplify_for_match(&cleaned);
+    if target_track.is_empty() {
+        return None;
+    }
+
+    let query = if artist.trim().is_empty() {
+        cleaned.clone()
+    } else {
+        format!("{} {}", artist.trim(), cleaned)
+    };
     let encoded = urlencoding::encode(&query);
-    let url = format!("https://itunes.apple.com/search?term={encoded}&entity=song&limit=5");
+    let url = format!("https://itunes.apple.com/search?term={encoded}&entity=song&limit=8");
     let json_bytes = download_url_bytes(&url, 6, "LyricsMenuBar/2.0")?;
     let parsed: ITunesSearchResponse = serde_json::from_slice(&json_bytes).ok()?;
 
-    let target_artist = artist.trim().to_lowercase();
-    let target_track = cleaned.trim().to_lowercase();
-
     for item in parsed.results {
-        let Some(item_artist) = item.artist_name.as_deref().map(|v| v.to_lowercase()) else {
+        let Some(item_track_raw) = item.track_name.as_deref() else {
             continue;
         };
-        let Some(item_track) = item.track_name.as_deref().map(|v| v.to_lowercase()) else {
+        let item_track = crate::lyrics::simplify_for_match(item_track_raw);
+        if item_track.is_empty() {
             continue;
-        };
-        let artist_match =
-            item_artist.contains(&target_artist) || target_artist.contains(&item_artist);
-        let track_match =
-            item_track.contains(&target_track) || target_track.contains(&item_track);
-        if artist_match && track_match {
-            if let Some(art100) = item.artwork_url100 {
-                let high_res = art100.replace("100x100bb", "600x600bb");
-                if let Some(bytes) = download_url_bytes(&high_res, 8, "LyricsMenuBar/2.0") {
+        }
+        let track_match = item_track == target_track
+            || item_track.contains(&target_track)
+            || target_track.contains(&item_track);
+        if !track_match {
+            continue;
+        }
+
+        if !target_artist.is_empty() {
+            let Some(item_artist_raw) = item.artist_name.as_deref() else {
+                continue;
+            };
+            let item_artist = crate::lyrics::simplify_for_match(item_artist_raw);
+            if item_artist.is_empty() {
+                continue;
+            }
+            let artist_match = item_artist == target_artist
+                || item_artist.contains(&target_artist)
+                || target_artist.contains(&item_artist);
+            if !artist_match {
+                continue;
+            }
+        }
+
+        if let Some(art100) = item.artwork_url100.as_deref() {
+            let high_res = art100.replace("100x100bb", "600x600bb");
+            if let Some(bytes) = download_url_bytes(&high_res, 8, "LyricsMenuBar/2.0") {
+                return Some(bytes);
+            }
+            if high_res != art100 {
+                if let Some(bytes) = download_url_bytes(art100, 8, "LyricsMenuBar/2.0") {
                     return Some(bytes);
                 }
             }

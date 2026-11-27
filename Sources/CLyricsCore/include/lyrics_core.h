@@ -146,13 +146,13 @@ CFfiPlaybackDelta lyrics_core_playback_update(
     double duration,
     double position,
     bool is_playing,
-    int32_t source,
+    const char *source_id,
     double now_mono,
     double now_unix
 );
 bool lyrics_core_playback_mark_stopped(
     LyricsCoreHandle *handle,
-    int32_t source,
+    const char *source_id,
     int32_t threshold,
     bool is_not_running
 );

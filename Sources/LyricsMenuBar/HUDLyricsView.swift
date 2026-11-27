@@ -60,13 +60,13 @@ final class HUDLyricsView: NSView {
 
             maskSolid.anchorPoint = .zero
             maskSolid.backgroundColor = NSColor.white.cgColor
-            maskSolid.frame = CGRect(x: -1200, y: 0, width: 1200, height: 32)
+            maskSolid.frame = CGRect(x: -1200, y: 0, width: 1200, height: 34)
 
             maskFeather.anchorPoint = .zero
             maskFeather.colors = [NSColor.white.cgColor, NSColor.clear.cgColor]
             maskFeather.startPoint = CGPoint(x: 0.0, y: 0.5)
             maskFeather.endPoint = CGPoint(x: 1.0, y: 0.5)
-            maskFeather.frame = CGRect(x: 0, y: 0, width: 20, height: 32)
+            maskFeather.frame = CGRect(x: 0, y: 0, width: 20, height: 34)
 
             maskContainer.addSublayer(maskSolid)
             maskContainer.addSublayer(maskFeather)
@@ -124,6 +124,9 @@ final class HUDLyricsView: NSView {
     private var activeRowIndex: Int = -1
     private var manualScrollUntil: CFTimeInterval = 0
 
+    // Cached preferences (zero per-frame UserDefaults reads)
+    private var cachedFocusMode: Bool = true
+
     // Hover & Tracking
     private var isViewportHovered: Bool = false
     private var hoveredRowIndex: Int = -1
@@ -142,10 +145,16 @@ final class HUDLyricsView: NSView {
         setup()
     }
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     private func setup() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.masksToBounds = false
+
+        cachedFocusMode = UserDefaults.standard.object(forKey: AppSettingKey.lyricsFocusMode) as? Bool ?? true
 
         clipLayer.anchorPoint = .zero
         clipLayer.masksToBounds = true
@@ -188,6 +197,7 @@ final class HUDLyricsView: NSView {
     }
 
     @objc private func handlePrefsChanged() {
+        cachedFocusMode = UserDefaults.standard.object(forKey: AppSettingKey.lyricsFocusMode) as? Bool ?? true
         renderNow()
     }
 
@@ -211,12 +221,25 @@ final class HUDLyricsView: NSView {
         let newScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         guard abs(newScale - backingScale) > 0.01 else { return }
         backingScale = newScale
-        imageCache.removeAll(keepingCapacity: true)
+        purgeImageCache()
         emptyLabelLayer.contentsScale = newScale
         for s in rowSlots {
             for sub in s.subSlots {
                 sub.applyScale(newScale)
                 sub.cachedKey = ""
+            }
+        }
+        renderNow()
+    }
+
+    /// Releases cached lyric textures when the HUD panel closes to keep idle VRAM at 0.
+    func purgeImageCache() {
+        imageCache.removeAll(keepingCapacity: false)
+        for s in rowSlots {
+            for sub in s.subSlots {
+                sub.cachedKey = ""
+                sub.dimLayer.contents = nil
+                sub.litLayer.contents = nil
             }
         }
     }
@@ -228,7 +251,7 @@ final class HUDLyricsView: NSView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -279,16 +302,20 @@ final class HUDLyricsView: NSView {
         }
     }
 
-    func renderNow() {
+    func renderNow(force: Bool = false) {
+        if !force && window != nil && window?.isVisible == false {
+            return
+        }
         let eng = LyricsCoreEngine.shared
         renderFrame(
             currentTime: eng.currentTime(),
             deltaTime: 0.016,
-            isPlaying: eng.isPlaying
+            isPlaying: eng.isPlaying,
+            force: force
         )
     }
 
-    // MARK: - Font & Layout Cache
+    // MARK: - Font & Multilingual Layout Engine (Supports Latin, Thai, CJK)
 
     private static func makeFont(isBgVocal: Bool) -> NSFont {
         let size: CGFloat = isBgVocal ? 15.0 : 20.0
@@ -297,6 +324,24 @@ final class HUDLyricsView: NSView {
             return NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
         }
         return base
+    }
+
+    /// Wraps a long unspaced string (e.g. Thai or CJK) into grapheme-cluster-safe chunks fitting within `maxWidth`.
+    private static func wrapLongToken(_ token: String, maxWidth: CGFloat, attrs: [NSAttributedString.Key: Any]) -> [String] {
+        guard token.size(withAttributes: attrs).width > maxWidth else { return [token] }
+        var pieces: [String] = []
+        var cur = ""
+        for ch in token {
+            let candidate = cur + String(ch)
+            if candidate.size(withAttributes: attrs).width > maxWidth && !cur.isEmpty {
+                pieces.append(cur)
+                cur = String(ch)
+            } else {
+                cur = candidate
+            }
+        }
+        if !cur.isEmpty { pieces.append(cur) }
+        return pieces.isEmpty ? [token] : pieces
     }
 
     private func rebuildLayout() {
@@ -319,7 +364,8 @@ final class HUDLyricsView: NSView {
             for sub in s.subSlots { sub.cachedKey = "" }
         }
 
-        isUnsynced = lines.count > 1 && (lines.last?.time ?? 0) == 0
+        isUnsynced = (lines.count > 1 && (lines.last?.time ?? 0) == 0)
+            || (lines.count == 1 && (lines.first?.time ?? 0) == 0 && (lines.first?.endTime ?? 0) == 0)
         guard !lines.isEmpty else {
             totalContentHeight = 0
             return
@@ -335,41 +381,76 @@ final class HUDLyricsView: NSView {
             let effectiveW = max(80.0, contentAvailW - indentX - 12.0)
             let font = Self.makeFont(isBgVocal: isBg)
             let attrs: [NSAttributedString.Key: Any] = [.font: font]
-            let subH: CGFloat = isBg ? 22.0 : 28.0
+            let subH: CGFloat = isBg ? 24.0 : 30.0
 
             var subLines: [SubLineLayout] = []
             if !line.words.isEmpty && !isUnsynced {
-                // Wrap using LyricWordModel tokens + measure cumulative span X positions
-                var wrappedRows: [[LyricWordModel]] = []
-                var curWords: [LyricWordModel] = []
-                var curW: CGFloat = 0
-                let spaceW = " ".size(withAttributes: attrs).width
+                // Determine whether original line text separated words with spaces (preserve Thai/CJK unspaced scripts!)
+                let lineHasSpaces = line.text.contains(" ")
+                var expandedWords: [(word: LyricWordModel, precededBySpace: Bool)] = []
+                expandedWords.reserveCapacity(line.words.count)
 
-                for word in line.words {
-                    let wordW = word.text.size(withAttributes: attrs).width
-                    let added = curWords.isEmpty ? wordW : (spaceW + wordW)
-                    if curW + added > effectiveW && !curWords.isEmpty {
-                        wrappedRows.append(curWords)
-                        curWords = [word]
-                        curW = wordW
+                var scanStart = line.text.startIndex
+                for (wi, word) in line.words.enumerated() {
+                    var needsSpace = wi > 0 && lineHasSpaces
+                    if wi > 0, let found = line.text.range(of: word.text, range: scanStart..<line.text.endIndex) {
+                        let gap = line.text[scanStart..<found.lowerBound]
+                        needsSpace = gap.contains(where: { $0.isWhitespace })
+                        scanStart = found.upperBound
+                    }
+                    // Break ultra-long unspaced Thai/CJK word tokens cleanly so they never clip horizontally
+                    let subTokens = Self.wrapLongToken(word.text, maxWidth: effectiveW, attrs: attrs)
+                    if subTokens.count == 1 {
+                        expandedWords.append((word, needsSpace))
                     } else {
-                        curWords.append(word)
-                        curW += added
+                        let totalChars = max(1, word.text.count)
+                        let wordDur = max(0.05, word.endTime - word.startTime)
+                        var accChars = 0
+                        for (ti, tok) in subTokens.enumerated() {
+                            let sFrac = Double(accChars) / Double(totalChars)
+                            accChars += tok.count
+                            let eFrac = Double(accChars) / Double(totalChars)
+                            let synth = LyricWordModel(
+                                id: word.id &+ UInt64(ti),
+                                text: tok,
+                                startTime: word.startTime + wordDur * sFrac,
+                                endTime: word.startTime + wordDur * eFrac,
+                                index: word.index
+                            )
+                            expandedWords.append((synth, ti == 0 ? needsSpace : false))
+                        }
                     }
                 }
-                if !curWords.isEmpty { wrappedRows.append(curWords) }
-                if wrappedRows.isEmpty { wrappedRows = [line.words] }
+
+                var wrappedRows: [[(word: LyricWordModel, precededBySpace: Bool)]] = []
+                var curRow: [(word: LyricWordModel, precededBySpace: Bool)] = []
+                var curText = ""
+
+                for item in expandedWords {
+                    let sep = (!curRow.isEmpty && item.precededBySpace) ? " " : ""
+                    let candidate = curText + sep + item.word.text
+                    if candidate.size(withAttributes: attrs).width > effectiveW && !curRow.isEmpty {
+                        wrappedRows.append(curRow)
+                        curRow = [(item.word, false)]
+                        curText = item.word.text
+                    } else {
+                        curRow.append(item)
+                        curText = candidate
+                    }
+                }
+                if !curRow.isEmpty { wrappedRows.append(curRow) }
 
                 var subY: CGFloat = 0
                 for rw in wrappedRows {
                     var built = ""
                     var spans: [WordSpanLayout] = []
-                    for (wi, word) in rw.enumerated() {
-                        let prefix = wi == 0 ? "" : built + " "
+                    for (wi, item) in rw.enumerated() {
+                        let sep = (wi > 0 && item.precededBySpace) ? " " : ""
+                        let prefix = built + sep
                         let sx = prefix.isEmpty ? 0.0 : prefix.size(withAttributes: attrs).width
-                        built = prefix + word.text
+                        built = prefix + item.word.text
                         let ex = built.size(withAttributes: attrs).width
-                        spans.append(WordSpanLayout(startTime: word.startTime, endTime: word.endTime, startX: sx, endX: ex))
+                        spans.append(WordSpanLayout(startTime: item.word.startTime, endTime: item.word.endTime, startX: sx, endX: ex))
                     }
                     let rowW = max(1.0, built.size(withAttributes: attrs).width)
                     subLines.append(SubLineLayout(
@@ -378,8 +459,8 @@ final class HUDLyricsView: NSView {
                         height: subH,
                         offsetYFromRowTop: subY,
                         spans: spans,
-                        startTime: rw.first?.startTime ?? line.time,
-                        endTime: rw.last?.endTime ?? line.endTime
+                        startTime: rw.first?.word.startTime ?? line.time,
+                        endTime: rw.last?.word.endTime ?? line.endTime
                     ))
                     subY += subH + 4.0
                 }
@@ -388,12 +469,14 @@ final class HUDLyricsView: NSView {
                 var textRows: [String] = []
                 var curLine = ""
                 for wToken in rawWords {
-                    let candidate = curLine.isEmpty ? wToken : "\(curLine) \(wToken)"
-                    if candidate.size(withAttributes: attrs).width > effectiveW && !curLine.isEmpty {
-                        textRows.append(curLine)
-                        curLine = wToken
-                    } else {
-                        curLine = candidate
+                    for chunk in Self.wrapLongToken(wToken, maxWidth: effectiveW, attrs: attrs) {
+                        let candidate = curLine.isEmpty ? chunk : "\(curLine) \(chunk)"
+                        if candidate.size(withAttributes: attrs).width > effectiveW && !curLine.isEmpty {
+                            textRows.append(curLine)
+                            curLine = chunk
+                        } else {
+                            curLine = candidate
+                        }
                     }
                 }
                 if !curLine.isEmpty { textRows.append(curLine) }
@@ -434,7 +517,11 @@ final class HUDLyricsView: NSView {
 
     // MARK: - 60 FPS Frame Render
 
-    func renderFrame(currentTime: Double, deltaTime: Double, isPlaying: Bool) {
+    func renderFrame(currentTime: Double, deltaTime: Double, isPlaying: Bool, force: Bool = false) {
+        if !force && window != nil && window?.isVisible == false {
+            return
+        }
+
         let engine = LyricsCoreEngine.shared
         let lines = engine.lyrics
         let isUltraLight = AppPerformance.isUltraLightMode
@@ -444,7 +531,13 @@ final class HUDLyricsView: NSView {
             CATransaction.setDisableActions(true)
             clipLayer.isHidden = true
             emptyLabelLayer.isHidden = false
-            emptyLabelLayer.string = engine.isLyricsLoading ? "Loading lyrics..." : (isPlaying ? "♪" : "")
+            if engine.isLyricsLoading {
+                emptyLabelLayer.string = "Loading lyrics..."
+            } else if engine.currentTrack != nil {
+                emptyLabelLayer.string = "♪"
+            } else {
+                emptyLabelLayer.string = ""
+            }
             for s in rowSlots { s.container.isHidden = true }
             CATransaction.commit()
             return
@@ -473,8 +566,8 @@ final class HUDLyricsView: NSView {
         let dt = min(0.05, max(0.001, deltaTime))
         let stiffness: CGFloat = 95.0
         let damping: CGFloat = 19.5
-        let force = (targetScrollY - scrollY) * stiffness
-        scrollVelocity = (scrollVelocity + force * CGFloat(dt)) * max(0.0, 1.0 - damping * CGFloat(dt))
+        let forceVal = (targetScrollY - scrollY) * stiffness
+        scrollVelocity = (scrollVelocity + forceVal * CGFloat(dt)) * max(0.0, 1.0 - damping * CGFloat(dt))
         scrollY += scrollVelocity * CGFloat(dt)
         if abs(targetScrollY - scrollY) < 0.2 && abs(scrollVelocity) < 0.5 {
             scrollY = targetScrollY
@@ -485,7 +578,6 @@ final class HUDLyricsView: NSView {
         let visMinY = scrollY - 48.0
         let visMaxY = scrollY + viewportH + 48.0
 
-        // Collect visible row indices
         var visibleIndices: [Int] = []
         visibleIndices.reserveCapacity(16)
         for (i, row) in rows.enumerated() {
@@ -511,12 +603,13 @@ final class HUDLyricsView: NSView {
             }
         }
 
+        let focusMode = cachedFocusMode
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         clipLayer.isHidden = false
         emptyLabelLayer.isHidden = true
 
-        // Precompute fallback per-subline progress if line has no word spans
         for (slotIdx, slot) in rowSlots.enumerated() {
             guard slotIdx < visibleIndices.count else {
                 slot.container.isHidden = true
@@ -536,7 +629,6 @@ final class HUDLyricsView: NSView {
             let isActive = (!isUnsynced && rIdx == activeRowIndex)
             let isPast = (!isUnsynced && activeRowIndex >= 0 && rIdx < activeRowIndex)
             let isRowHovered = (rIdx == hoveredRowIndex) || isViewportHovered
-            let focusMode = UserDefaults.standard.object(forKey: AppSettingKey.lyricsFocusMode) as? Bool ?? true
 
             let dimAlpha: Float
             if isUnsynced {
@@ -674,10 +766,11 @@ final class HUDLyricsView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        let needsRedraw = isViewportHovered || hoveredRowIndex != -1
         isViewportHovered = false
-        if hoveredRowIndex != -1 {
-            hoveredRowIndex = -1
-            NSCursor.arrow.set()
+        hoveredRowIndex = -1
+        NSCursor.arrow.set()
+        if needsRedraw {
             renderNow()
         }
     }

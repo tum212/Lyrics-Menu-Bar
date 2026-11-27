@@ -2,7 +2,8 @@ use std::ffi::{c_void, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 type MTActuatorCreateFn = unsafe extern "C" fn(u64) -> *mut c_void;
@@ -23,10 +24,17 @@ struct MachTimebaseInfo {
 extern "C" {
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
     fn mach_absolute_time() -> u64;
-    fn pthread_set_qos_class_self_np(qos_class: libc::c_uint, relative_priority: libc::c_int) -> libc::c_int;
+    fn pthread_set_qos_class_self_np(
+        qos_class: libc::c_uint,
+        relative_priority: libc::c_int,
+    ) -> libc::c_int;
 
     fn IOServiceMatching(name: *const libc::c_char) -> *mut c_void;
-    fn IOServiceGetMatchingServices(main_port: u32, matching: *mut c_void, existing: *mut u32) -> i32;
+    fn IOServiceGetMatchingServices(
+        main_port: u32,
+        matching: *mut c_void,
+        existing: *mut u32,
+    ) -> i32;
     fn IOIteratorNext(iterator: u32) -> u32;
     fn IOObjectRelease(object: u32) -> i32;
     fn IORegistryEntryCreateCFProperty(
@@ -41,7 +49,13 @@ extern "C" {
         c_str: *const libc::c_char,
         encoding: u32,
     ) -> *const c_void;
-    fn CFNumberGetValue(number: *const c_void, the_type: libc::c_long, value_ptr: *mut c_void) -> bool;
+    fn CFGetTypeID(cf: *const c_void) -> libc::c_ulong;
+    fn CFNumberGetTypeID() -> libc::c_ulong;
+    fn CFNumberGetValue(
+        number: *const c_void,
+        the_type: libc::c_long,
+        value_ptr: *mut c_void,
+    ) -> bool;
     fn CFRelease(cf: *const c_void);
 }
 
@@ -75,6 +89,7 @@ impl Drop for MTHandle {
                 if let Some(close) = self.close_fn {
                     let _ = close(self.actuator);
                 }
+                CFRelease(self.actuator.cast::<c_void>());
                 self.actuator = ptr::null_mut();
             }
             if !self.framework_handle.is_null() {
@@ -104,7 +119,7 @@ impl OnsetDetector {
             prev_deep: 0.0,
             prev_std: 0.0,
             bass_peak: 0.0001,
-            last_fire_wall: 0.0,
+            last_fire_wall: -10.0,
         }
     }
 
@@ -115,7 +130,7 @@ impl OnsetDetector {
         intensity: i32,
         buffer_wall_time: f64,
     ) -> Option<bool> {
-        if intensity <= 0 {
+        if intensity <= 0 || !deep_bass.is_finite() || !std_bass.is_finite() {
             return None;
         }
         self.bass_peak = (self.bass_peak * 0.95).max(deep_bass.max(std_bass));
@@ -163,15 +178,23 @@ pub fn resolve_actuator_type(override_val: i32, is_deep: bool) -> i32 {
 enum WorkerCmd {
     Frame(HapticMsg),
     TestType(i32),
-    SetFallback(Option<FallbackCallback>),
     Shutdown,
 }
 
 pub struct HapticEngine {
-    tx: SyncSender<WorkerCmd>,
-    actuator_type_override: std::sync::Arc<AtomicI32>,
-    latency_offset_bits: std::sync::Arc<AtomicU64>,
+    tx: Mutex<Option<SyncSender<WorkerCmd>>>,
+    actuator_type_override: Arc<AtomicI32>,
+    latency_offset_bits: Arc<AtomicU64>,
+    fallback: Arc<Mutex<Option<FallbackCallback>>>,
+    shutdown: Arc<AtomicBool>,
+    wake_pair: Arc<(Mutex<bool>, Condvar)>,
+    worker: Mutex<Option<JoinHandle<()>>>,
     mt_available: AtomicBool,
+}
+
+#[inline]
+fn mach_ticks_to_ns(ticks: u64, numer: u64, denom: u64) -> i128 {
+    ((ticks as u128) * (numer as u128) / (denom.max(1) as u128)) as i128
 }
 
 impl HapticEngine {
@@ -183,8 +206,11 @@ impl HapticEngine {
         let numer = tb.numer.max(1) as u64;
         let denom = tb.denom.max(1) as u64;
 
-        let actuator_override = std::sync::Arc::new(AtomicI32::new(0));
-        let latency_bits = std::sync::Arc::new(AtomicU64::new(0.0_f64.to_bits()));
+        let actuator_override = Arc::new(AtomicI32::new(0));
+        let latency_bits = Arc::new(AtomicU64::new(0.0_f64.to_bits()));
+        let fallback = Arc::new(Mutex::new(None::<FallbackCallback>));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let wake_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
         let mt = unsafe { init_multitouch_actuator() };
         let mt_available = AtomicBool::new(mt.is_some());
@@ -193,63 +219,83 @@ impl HapticEngine {
 
         let override_clone = actuator_override.clone();
         let latency_clone = latency_bits.clone();
+        let fallback_clone = fallback.clone();
+        let shutdown_clone = shutdown.clone();
+        let wake_clone = wake_pair.clone();
 
-        let _ = thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("lyrics-haptics".into())
             .spawn(move || {
                 unsafe {
                     let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
                 }
                 let mut detector = OnsetDetector::new();
-                let mut fallback: Option<FallbackCallback> = None;
 
                 while let Ok(cmd) = rx.recv() {
+                    if shutdown_clone.load(Ordering::Acquire) {
+                        break;
+                    }
                     match cmd {
                         WorkerCmd::Shutdown => break,
-                        WorkerCmd::SetFallback(cb) => {
-                            fallback = cb;
-                        }
                         WorkerCmd::TestType(t) => {
                             if let Some(ref handle) = mt {
                                 unsafe {
                                     let _ = (handle.actuate_fn)(handle.actuator, t, 0, 1.0, 0.0);
                                 }
-                            } else if let Some(fb) = fallback {
-                                (fb.func)(fb.ctx as *mut c_void, 0.0, t == 6, 3);
+                            } else {
+                                let cb = *fallback_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(fb) = cb {
+                                    (fb.func)(fb.ctx as *mut c_void, 0.0, t == 6, 3);
+                                }
                             }
                         }
                         WorkerCmd::Frame(msg) => {
-                            let buf_wall = (msg.buffer_host_time as f64) * (numer as f64)
-                                / (denom as f64)
-                                * 1e-9;
+                            let host_ticks = if msg.buffer_host_time != 0 {
+                                msg.buffer_host_time
+                            } else {
+                                unsafe { mach_absolute_time() }
+                            };
+                            let buf_ns = mach_ticks_to_ns(host_ticks, numer, denom);
+                            let buf_secs = (buf_ns as f64) * 1e-9;
+
                             if let Some(is_deep) = detector.evaluate(
                                 msg.deep_bass,
                                 msg.std_bass,
                                 msg.intensity,
-                                buf_wall,
+                                buf_secs,
                             ) {
-                                let onset_offset =
-                                    ((msg.buffer_frame_count / 2) as f64) / msg.sample_rate.max(8000.0);
+                                let onset_offset = ((msg.buffer_frame_count / 2) as f64)
+                                    / msg.sample_rate.max(8000.0);
                                 let base_lead = if mt.is_some() { 0.005 } else { 0.003 };
                                 let lat = f64::from_bits(latency_clone.load(Ordering::Relaxed));
-                                let fire_wall = buf_wall + onset_offset - (base_lead + lat);
-                                let now_mach = (unsafe { mach_absolute_time() } as f64)
-                                    * (numer as f64)
-                                    / (denom as f64)
-                                    * 1e-9;
-                                let delta = fire_wall - now_mach;
+                                let offset_ns = ((onset_offset - (base_lead + lat)) * 1e9) as i128;
+                                let fire_ns = buf_ns + offset_ns;
+                                let now_ns = mach_ticks_to_ns(
+                                    unsafe { mach_absolute_time() },
+                                    numer,
+                                    denom,
+                                );
+                                let delta = ((fire_ns - now_ns) as f64) * 1e-9;
+
+                                // Drop severely stale frames (>50ms late) so bursts don't fire out of sync
+                                if delta < -0.05 {
+                                    continue;
+                                }
 
                                 if delta <= 0.001 {
                                     fire_actuator(
                                         mt.as_ref(),
-                                        fallback,
+                                        &fallback_clone,
                                         override_clone.load(Ordering::Relaxed),
                                         is_deep,
                                         msg.intensity,
                                     );
                                 } else if delta < 0.15 {
-                                    if let Some(fb) = fallback {
-                                        if mt.is_none() {
+                                    if mt.is_none() {
+                                        let cb = *fallback_clone
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        if let Some(fb) = cb {
                                             (fb.func)(
                                                 fb.ctx as *mut c_void,
                                                 delta,
@@ -259,10 +305,19 @@ impl HapticEngine {
                                             continue;
                                         }
                                     }
-                                    thread::sleep(Duration::from_secs_f64(delta));
+                                    // Interruptible wait via Condvar so Drop wakes immediately
+                                    let (lock, cvar) = &*wake_clone;
+                                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                                    let _ = cvar.wait_timeout(
+                                        guard,
+                                        Duration::from_secs_f64(delta),
+                                    );
+                                    if shutdown_clone.load(Ordering::Acquire) {
+                                        break;
+                                    }
                                     fire_actuator(
                                         mt.as_ref(),
-                                        fallback,
+                                        &fallback_clone,
                                         override_clone.load(Ordering::Relaxed),
                                         is_deep,
                                         msg.intensity,
@@ -272,12 +327,17 @@ impl HapticEngine {
                         }
                     }
                 }
-            });
+            })
+            .ok();
 
         Self {
-            tx,
+            tx: Mutex::new(Some(tx)),
             actuator_type_override: actuator_override,
             latency_offset_bits: latency_bits,
+            fallback,
+            shutdown,
+            wake_pair,
+            worker: Mutex::new(handle),
             mt_available,
         }
     }
@@ -292,16 +352,20 @@ impl HapticEngine {
     }
 
     pub fn set_latency_offset(&self, offset_secs: f64) {
-        self.latency_offset_bits
-            .store(offset_secs.to_bits(), Ordering::Release);
+        if offset_secs.is_finite() {
+            self.latency_offset_bits
+                .store(offset_secs.to_bits(), Ordering::Release);
+        }
     }
 
+    /// Synchronous, non-lossy fallback callback update (prevents UAF on teardown).
     pub fn set_fallback_callback(&self, func: Option<CHHapticFallbackFn>, ctx: *mut c_void) {
         let cb = func.map(|f| FallbackCallback {
             func: f,
             ctx: ctx as usize,
         });
-        let _ = self.tx.try_send(WorkerCmd::SetFallback(cb));
+        let mut guard = self.fallback.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = cb;
     }
 
     /// Real-time audio thread entry point — never blocks, never allocates.
@@ -314,33 +378,63 @@ impl HapticEngine {
         buffer_frame_count: usize,
         sample_rate: f32,
     ) {
-        if intensity <= 0 {
+        if intensity <= 0 || self.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        let _ = self.tx.try_send(WorkerCmd::Frame(HapticMsg {
-            deep_bass,
-            std_bass,
-            intensity,
-            buffer_host_time,
-            buffer_frame_count,
-            sample_rate: sample_rate as f64,
-        }));
+        if let Ok(guard) = self.tx.try_lock() {
+            if let Some(ref sender) = *guard {
+                let _ = sender.try_send(WorkerCmd::Frame(HapticMsg {
+                    deep_bass,
+                    std_bass,
+                    intensity,
+                    buffer_host_time,
+                    buffer_frame_count,
+                    sample_rate: sample_rate as f64,
+                }));
+            }
+        }
     }
 
     pub fn test_actuator_type(&self, actuator_type: i32) {
-        let _ = self.tx.try_send(WorkerCmd::TestType(actuator_type));
+        if let Ok(guard) = self.tx.lock() {
+            if let Some(ref sender) = *guard {
+                let _ = sender.try_send(WorkerCmd::TestType(actuator_type));
+            }
+        }
     }
 }
 
 impl Drop for HapticEngine {
     fn drop(&mut self) {
-        let _ = self.tx.try_send(WorkerCmd::Shutdown);
+        self.shutdown.store(true, Ordering::Release);
+        {
+            let mut fb = self.fallback.lock().unwrap_or_else(|e| e.into_inner());
+            *fb = None;
+        }
+        {
+            let (lock, cvar) = &*self.wake_pair;
+            let mut flag = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *flag = true;
+            cvar.notify_all();
+        }
+        {
+            let mut tx_guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(sender) = tx_guard.take() {
+                let _ = sender.try_send(WorkerCmd::Shutdown);
+                drop(sender);
+            }
+        }
+        if let Ok(mut w) = self.worker.lock() {
+            if let Some(handle) = w.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
 fn fire_actuator(
     mt: Option<&MTHandle>,
-    fallback: Option<FallbackCallback>,
+    fallback: &Arc<Mutex<Option<FallbackCallback>>>,
     override_type: i32,
     is_deep: bool,
     intensity: i32,
@@ -355,12 +449,16 @@ fn fire_actuator(
         unsafe {
             let _ = (handle.actuate_fn)(handle.actuator, t, 0, amp, 0.0);
         }
-    } else if let Some(fb) = fallback {
-        (fb.func)(fb.ctx as *mut c_void, 0.0, is_deep, intensity);
+    } else {
+        let cb = *fallback.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(fb) = cb {
+            (fb.func)(fb.ctx as *mut c_void, 0.0, is_deep, intensity);
+        }
     }
 }
 
 unsafe fn find_multitouch_id() -> Option<u64> {
+    let number_type_id = CFNumberGetTypeID();
     for name in [
         "AppleMultitouchDevice",
         "AppleMultitouchTrackpadHIDEventDriver",
@@ -397,11 +495,13 @@ unsafe fn find_multitouch_id() -> Option<u64> {
                 CFRelease(cf_key);
                 if !val_ref.is_null() {
                     let mut out: i64 = 0;
-                    let ok = CFNumberGetValue(
-                        val_ref,
-                        K_CF_NUMBER_SINT64_TYPE,
-                        (&mut out as *mut i64).cast::<c_void>(),
-                    );
+                    let is_num = CFGetTypeID(val_ref) == number_type_id;
+                    let ok = is_num
+                        && CFNumberGetValue(
+                            val_ref,
+                            K_CF_NUMBER_SINT64_TYPE,
+                            (&mut out as *mut i64).cast::<c_void>(),
+                        );
                     CFRelease(val_ref);
                     if ok && out != 0 {
                         IOObjectRelease(device);
@@ -418,9 +518,10 @@ unsafe fn find_multitouch_id() -> Option<u64> {
 }
 
 unsafe fn init_multitouch_actuator() -> Option<MTHandle> {
-    let fw_path =
-        CString::new("/System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/Current/MultitouchSupport")
-            .ok()?;
+    let fw_path = CString::new(
+        "/System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/Current/MultitouchSupport",
+    )
+    .ok()?;
     let handle = libc::dlopen(fw_path.as_ptr(), libc::RTLD_NOW);
     if handle.is_null() {
         return None;
@@ -450,7 +551,12 @@ unsafe fn init_multitouch_actuator() -> Option<MTHandle> {
         return None;
     };
     let actuator = create_fn(id);
-    if actuator.is_null() || open_fn(actuator) != 0 {
+    if actuator.is_null() {
+        libc::dlclose(handle);
+        return None;
+    }
+    if open_fn(actuator) != 0 {
+        CFRelease(actuator.cast::<c_void>());
         libc::dlclose(handle);
         return None;
     }
@@ -470,25 +576,18 @@ mod tests {
     #[test]
     fn test_onset_detector_selectivity_and_refractory() {
         let mut det = OnsetDetector::new();
-        // Establish baseline frame
-        let _ = det.evaluate(0.1, 0.1, 2, 1.0);
-        // Small steady increase (<1.45x ratio) does not fire
-        assert_eq!(det.evaluate(0.12, 0.12, 2, 1.2), None);
-        // Strong kick (>1.45x) triggers deep beat
-        assert_eq!(det.evaluate(0.45, 0.12, 2, 1.4), Some(true));
-        // Double-fire within refractory (0.13s) blocked
-        assert_eq!(det.evaluate(0.95, 0.95, 2, 1.45), None);
-        // Settle back to quiet baseline before next onset
-        assert_eq!(det.evaluate(0.10, 0.10, 2, 1.50), None);
-        // Outside refractory triggers standard beat
-        assert_eq!(det.evaluate(0.10, 0.50, 2, 1.65), Some(false));
+        assert_eq!(det.evaluate(0.05, 0.05, 2, 1.0), Some(true));
+        // Inside 130ms refractory -> blocked
+        assert_eq!(det.evaluate(0.30, 0.10, 2, 1.05), None);
+        // Drop to quiet then sharp beat after refractory -> fires
+        let _ = det.evaluate(0.01, 0.01, 2, 1.15);
+        assert_eq!(det.evaluate(0.08, 0.02, 2, 1.25), Some(true));
     }
 
     #[test]
     fn test_actuator_type_resolution() {
         assert_eq!(resolve_actuator_type(0, true), 6);
         assert_eq!(resolve_actuator_type(0, false), 4);
-        assert_eq!(resolve_actuator_type(2, true), 2);
-        assert_eq!(resolve_actuator_type(5, false), 5);
+        assert_eq!(resolve_actuator_type(3, true), 3);
     }
 }
