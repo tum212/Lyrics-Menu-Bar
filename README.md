@@ -5,13 +5,14 @@
 </p>
 
 <p align="center">
-  Rust-powered core engine + zero-SwiftUI native AppKit 60 FPS lyrics, floating glass HUD, audio visualizer, and Force Touch trackpad haptics for macOS 13.0+.
+  <strong>v2.0.0 — Rust Core Engine + Pure AppKit 60 FPS Universal Lyrics, Floating Glass HUD, Process-Tree Audio Visualizer &amp; Force Touch Haptics for macOS 13.0+.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-macOS%2013.0%2B-blue?style=flat-square&logo=apple" alt="Platform">
-  <img src="https://img.shields.io/badge/Core-Rust-DEA584?style=flat-square&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/UI-AppKit%20%2F%20CALayer-orange?style=flat-square&logo=swift" alt="AppKit">
+  <img src="https://img.shields.io/badge/Core-Rust%20Staticlib-DEA584?style=flat-square&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/UI-Pure%20AppKit%20%2F%20CALayer-orange?style=flat-square&logo=swift" alt="AppKit">
+  <img src="https://img.shields.io/badge/SwiftUI-0%25-brightgreen?style=flat-square" alt="Zero SwiftUI">
   <img src="https://img.shields.io/badge/Release-v2.0.0-emerald?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/Architecture-Apple%20Silicon%20%2F%20Intel-purple?style=flat-square" alt="Arch">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
@@ -24,132 +25,128 @@
 ---
 
 ## Table of Contents
-- [Features](#features)
-- [Ultra-Light Mode & Performance Architecture](#ultra-light-mode--performance-architecture)
+- [What's New in v2.0.0](#whats-new-in-v200)
+- [Universal Multi-App & Web Streaming Support](#universal-multi-app--web-streaming-support)
+- [Why Rust + Pure AppKit? (Performance & Architecture)](#why-rust--pure-appkit-performance--architecture)
+- [Core Features](#core-features)
 - [macOS Compatibility](#macos-compatibility)
-- [How It Works](#how-it-works)
-- [Requirements](#requirements)
-- [Installation](#installation)
+- [Installation (Zero Runtime Dependencies)](#installation-zero-runtime-dependencies)
 - [Building from Source](#building-from-source)
 - [Repository Structure](#repository-structure)
 - [License](#license)
 
 ---
 
-## Features
+## What's New in v2.0.0
+
+- **Rust Core Engine (`liblyrics_core.a`)**: Rebuilt the entire DSP, haptics, lyrics parsing/fetching, playback clock, color extraction, and OTA updater engine in Rust — compiled ahead-of-time into a universal Mach-O static library embedded inside the single executable (**no Rust/Xcode runtime required on user Macs**).
+- **100% Zero-SwiftUI Pure AppKit / `CALayer` UI**: Eliminated SwiftUI (`SwiftUICore`, `NSHostingView`, `TimelineView`) completely for locked **60 FPS VSync** smoothness even on fanless Intel Macs such as the **MacBook 12" (2017 Core m3)**, with **`0 Hz` / `0%` CPU** when paused or idle.
+- **Universal Multi-App & Web Streaming Engine**: Goes far beyond Spotify & Apple Music — now supports **YouTube Music (Desktop & Web)**, **TIDAL**, **Deezer**, **Qobuz**, **Amazon Music**, **SoundCloud**, **Cider**, **Swinsian**, **VOX**, **VLC**, **Doppler**, **Cog**, **IINA**, **Bandcamp**, and **YouTube** across **Safari, Chrome, Brave, Arc, Edge, Vivaldi, Opera, and Firefox**.
+- **Process-Tree CoreAudio Tap**: Automatically discovers Electron, Chromium, and Safari `WebKit.GPU` / `WebKit.WebContent` helper subprocesses so the real-time waveform visualizer & Force Touch beat haptics work across desktop apps and web browsers alike.
+- **Auto-Fade Hover HUD Controls**: Top-right Settings (`...`) and Close (`^`) glass buttons stay unobtrusively hidden while reading lyrics, fade smoothly in on mouse hover/movement, and fade back out after 2 seconds of stillness.
+- **Multilingual Typography & Thai/CJK Precision**: 22pt menu bar text clearance prevents upper Thai tone mark clipping, grapheme-safe HUD line wrapping handles unspaced Thai/CJK scripts cleanly, and fuzzy lyric matching preserves Thai vowels/tones and Japanese dakuten.
+
+---
+
+## Universal Multi-App & Web Streaming Support
+
+Lyrics Menu Bar v2.0.0 uses a **3-layer sanctioned macOS detection engine** with strict **Playing > Sticky Paused** arbitration (a paused background player never hijacks an active stream):
+
+| Layer | Supported Players & Services | How It Works |
+| :--- | :--- | :--- |
+| **Layer 1 — Native & Local API** | **Spotify**, **Apple Music**, **Swinsian**, **VOX**, **VLC**, **YouTube Music Desktop (Pear / th-ch `:26538`)**, **YTMDesktop (`:9863`)**, **Cider (`:10767`)** | `DistributedNotificationCenter` + single serial `OSAScriptExecutor` + official localhost APIs |
+| **Layer 2 — In-Process MediaRemote** | All Now Playing apps & browsers on **macOS 13.0–15.3** | Direct in-process `MediaRemote.framework` (`dlopen`), gracefully stands down with 0 overhead on macOS 15.4+ |
+| **Layer 3 — Web Players & Desktop Apps** | **YouTube Music Web**, **Spotify Web**, **Apple Music Web**, **SoundCloud**, **TIDAL**, **Deezer**, **Qobuz**, **Amazon Music**, **Bandcamp**, **YouTube**, **Doppler**, **Cog**, **IINA** in **Safari, Chrome, Brave, Arc, Edge, Vivaldi, Opera, Firefox** | Sanctioned browser tab/MediaSession reading + cached **YouTube oEmbed** metadata resolver (for single-title Art Tracks) + `CGWindowListCopyWindowInfo` + CoreAudio `kAudioProcessPropertyIsRunningOutput` active-audio detection |
+
+Select **`Auto (Detect Any Player)`** or lock to any installed app / web browser under **Settings → General → Music Source** (live running apps are marked with `●`).
+
+---
+
+## Why Rust + Pure AppKit? (Performance & Architecture)
+
+Built with an **"Apollo 11 / 4KB-to-the-Moon"** engineering standard: respect the user's hardware, eliminate framework bloat, and never drop frame rates to hide inefficiency.
+
+| Metric / Subsystem | v1.x (SwiftUI + `NSHostingView`) | v2.0.0 (Rust Core + Pure AppKit / `CALayer`) |
+| :--- | :--- | :--- |
+| **UI Framework** | SwiftUI + `NSHostingView` + `TimelineView` | **0% SwiftUI** — Pure AppKit + GPU `CALayer` |
+| **Audio FFT & Beat Engine** | Swift `vDSP` + main-thread timers | **Rust `realfft` 4096-pt** (zero-alloc RT PCM ring buffer) |
+| **Networking & TLS** | `URLSession` + Swift `Task` fan-out | **Rust `ureq` + shared `native-tls` keep-alive pool** |
+| **Lyrics Parsing & Timing** | Swift regex / per-frame `UserDefaults` | **Rust LRC/eLRC/TTML/Plain + 100-entry `Arc` LRU cache** |
+| **Menu Bar Rendering** | Frequent redraws / SwiftUI layout passes | **Rasterize once to Retina `CGImage` → GPU-only 60 FPS wipe/slide** |
+| **Idle / Paused CPU & VRAM** | Periodic timers & retained SwiftUI tree | **`0 Hz` `CVDisplayLink` sleep + HUD texture cache purged on close** |
+| **MacBook 12" (2017 Core m3)** | Heavy glass + SwiftUI frame drops | **Locked 60 FPS VSync** with Auto-ON Lightweight Mode |
+| **End-User Runtime Requirement** | macOS 13+ | **macOS 13+ only** (`liblyrics_core.a` statically linked — **zero Rust install needed**) |
+
+### Adaptive Performance Modes
+- **Standard Glass Mode**: Multi-pass `CABackdropLayer` saturation vibrancy, specular edge highlights, 3D Genie panel spring, and subtle singing lyric glow.
+- **Reduce Glass & Blur Effects (60 FPS Lightweight)**: Automatically enabled on **Intel (`x86_64`) Macs**, **macOS 13 Ventura**, and **macOS Low Power Mode** (always toggleable in **Settings → Appearance & Performance**). Uses single-pass native `NSVisualEffectView` + 2D `CASpringAnimation` to preserve Intel iGPU bandwidth while keeping full **60 FPS** karaoke wipes, marquee scrolling, and click-to-seek.
+
+---
+
+## Core Features
 
 ### Real-Time Menu Bar Lyrics
-- Synchronized lyrics displayed directly in the macOS menu bar for **Spotify** and **Apple Music**.
-- Supports word/syllable-level karaoke timing when available, with automatic fallback for line-synced and plain lyrics.
-- Displays an interlude indicator (`✦ ✦ ✦`) during instrumental sections so you know when the next line starts.
-- Smooth marquee scrolling for longer lines and clean play-icon idle state (`play.fill`) when stopped.
+- Synchronized word/syllable karaoke highlighting (`CAGradientLayer` feather mask) with automatic fallback for line-synced and plain lyrics.
+- Animated 3-star interlude indicator (`✦ ✦ ✦`) during instrumental breaks, marquee scrolling within notch-safe screen budgets, and clickable `play.fill` fallback when idle or all strip elements are toggled off.
 
 <p align="center">
   <img src="docs/images/menubar_interlude_stars.gif" width="100%" alt="Menu Bar Lyrics and Interlude Indicator">
 </p>
 
-### Dynamic Audio Visualizer *(macOS 14.2+ for live CoreAudio Tap)*
-- Real-time frequency spectrum visualizer rendered in the menu bar with true-tone colors sampled from the album cover.
-- Configurable bar count (Off, 6, 10, 14, 24, 32, 48, or custom up to 128 bars).
-- Asymmetric ballistic filtering with snappy bass rise and smooth decay.
-- Flexible display modes: lyrics only, waveform only, or lyrics + waveform + album art.
+### Dynamic Audio Visualizer *(macOS 14.2+)*
+- Real-time logarithmic frequency spectrum (60 Hz – 16 kHz, Bluetooth HFP 16 kHz safe) rendered in the menu bar with true-tone 12-hue-bucket colors extracted from the album cover.
+- Configurable bar counts (`Off`, `6`, `10`, `14`, `24`, `32`, `48`, or custom up to `128` bars) with zero per-frame heap allocations at 60 FPS.
 
 <p align="center">
   <img src="docs/images/menubar_lyrics_and_waveform.gif" width="100%" alt="Menu Bar Audio Visualizer and Lyrics">
 </p>
 
-### Floating Glass HUD
-- Click the menu bar item to toggle the floating glass HUD panel.
-- Clean, centered album artwork (tactile pause scale, click to open Spotify or Apple Music) alongside `LazyVStack` lyrics with auto-scroll.
-- Playback controls: Previous (rewinds to `0:00` if past 3 seconds), Play/Pause, Next.
-- **Click-to-seek**: click any lyric line in the HUD to jump directly to that timestamp.
-- **Zero-CPU hidden freeze**: background timers and SwiftUI `TimelineView` loops automatically pause whenever the HUD popover is closed.
+### Floating Dark-Glass HUD
+- Click the menu bar strip to open the floating dark-glass HUD panel (locked to `.darkAqua` so white typography stays crisp in both macOS Dark and Light Mode, across all Spaces and Full-Screen apps).
+- Virtualized `HUDLyricsView` (18 recycled `CALayer` slots) with critically-damped Apple Music scroll physics, Focus Mode depth, **click-to-seek** on any line, and hover auto-fading `...` / `^` top-right controls.
+- Album art & track info click-through opens the currently active player or browser directly.
 
 <p align="center">
   <img src="docs/images/lyrics_window_singing.gif" width="100%" alt="Lyrics HUD Window">
 </p>
 
 ### Force Touch Trackpad Haptics *(macOS 14.2+)*
-- Uses the MacBook Force Touch trackpad as a tactile bass companion synced to live audio.
-- Analyzes low-frequency transients and fires physical haptic clicks on the beat with a calibrated 5ms acoustic lead time.
-- Selectable intensity presets (`Off`, `Light`, `Medium`, `Firm`) and actuator profiles (`Type 1`–`Type 6`).
+- Dedicated Rust `Condvar` scheduler driving `MultitouchSupport.framework` (`MTActuatorActuate` via `IOKit`) with calibrated 5ms acoustic lead time and Mach host-time synchronization, plus automatic `CHHapticEngine` fallback on hardware without Force Touch.
+- Selectable intensity (`Off`, `Light`, `Medium`, `Firm`) and actuator feel (`Auto`, `Type 1`–`Type 6`, plus live feel tester).
 
-### In-App Updates & Remote Config
-- Automatic update checks against GitHub Releases (`v2.0.0`) with 1-click in-app DMG streaming download (`ureq` in Rust), install, and relaunch.
-- Dynamic Git-hosted remote configuration (`remote_config.json`) for zero-downtime lyrics endpoint updates.
-
----
-
-## Ultra-Light Mode & Performance Architecture
-
-**v2.0.0** eliminates SwiftUI (`SwiftUICore` / `NSHostingView`) completely, pairing a **Rust staticlib core engine** (`liblyrics_core.a`) with a **pure AppKit / `CALayer` shell**. One universal app (**`LyricsMenuBar-2.0.0.dmg`**) sustains **locked 60 FPS VSync smoothness** on everything from Apple Silicon MacBooks down to fanless Intel Macs such as the **MacBook 12" (2017 Core m3)** without ever throttling frame rates down:
-
-### Layer 1: Rust Core Engine + Zero-SwiftUI 60 FPS Pipeline (All Macs)
-- **Rust Core Engine (`rust/lyrics-core`)**: Runs zero-allocation 4096-pt `realfft` DSP + beat-synced Force Touch haptics (`IOKit` + `MultitouchSupport`), LRC/eLRC/TTML/Plain lyrics parsing & phonetic word timing, concurrent LRCLib/OVH fetching + 100-item LRU cache, monotonic anti-jitter clock, 12-hue-bucket color extraction, and streaming OTA DMG downloads.
-- **Zero-Redraw `CALayer` Menu Bar Canvas & Virtualized HUD**: Both the Menu Bar strip (`MenuBarCanvasView`) and floating HUD stream (`HUDLyricsView`) rasterize each lyric row once into Retina `CGImage`s and animate karaoke wipes (`CAGradientLayer`), spring scrolls, marquee sliding, equalizer bars, and art crossfades directly on CoreAnimation GPU layers — **0 SwiftUI views**, **0 `NSImage.lockFocus()` redraws**.
-- **`CVDisplayLink` VSync + 0% CPU Idle/Paused**: Shared `CVDisplayLink` runs at locked 60 FPS (capped from 120 Hz on ProMotion) only during active playback or visible HUD animation, sleeping at **`0 Hz`** whenever playback is paused or idle.
-- **Precompiled Background IPC**: Compiles Spotify and Apple Music `NSAppleScript` instances once on a `.utility` background serial queue (`2.0s` coalesced polling + instant `DistributedNotificationCenter` events).
-
-### Layer 2: Reduce Glass & Blur Effects *(Auto-ON on Intel Macs, macOS 13 & Low Power Mode)*
-- **Automatic Hardware Detection**: Automatically enabled on `x86_64` Intel Macs, macOS 13 Ventura, or when macOS Low Power Mode is active — and **toggleable anytime** under **Settings → Appearance & Performance → Reduce Glass & Blur Effects (60 FPS Lightweight)**.
-- **GPU Bandwidth Savings at Full 60 FPS**:
-  - Uses a single-pass native `NSVisualEffectView` HUD backdrop (eliminating multi-pass `CABackdropLayer` saturation compositing and specular strokes on older integrated GPUs such as Intel HD 615) alongside crisp 60 FPS 2D `CASpringAnimation` panel transitions.
-  - Skips Gaussian `NSShadow` glow blurs and menu bar sparkle particles while keeping full **60 FPS** karaoke wipes, marquee scrolling, album art transitions, click-to-seek, and OTA updates.
+### Streaming In-App OTA Updates & Remote Config
+- Checks `remote_config.json` and GitHub Releases (`v2.0.0`) with proper semver pre-release handling, atomic `.part` DMG streaming download, `codesign --verify --deep --strict` verification before swap, and 1-click relaunch.
 
 ---
 
 ## macOS Compatibility
 
-Unsupported system-tap features on macOS 13 Ventura are **automatically greyed out** in Settings with clear macOS 14.2+ requirement labels:
+Unsupported macOS 14.2+ tap features are automatically greyed out on macOS 13 Ventura:
 
-| Feature | macOS 13.0+ (Ventura) | macOS 14.2+ (Sonoma / Sequoia+) |
+| Feature | macOS 13.0+ (Ventura) | macOS 14.2+ (Sonoma / Sequoia / Tahoe) |
 |---|:---:|:---:|
-| 60 FPS GPU-Native Menu Bar Lyrics & Marquee | Supported | Supported |
-| 60 FPS Floating HUD Window & Word Karaoke | Supported | Supported |
-| Click-to-Seek & Playback Controls | Supported | Supported |
+| 60 FPS Rust + `CALayer` Menu Bar Lyrics & Marquee | Supported | Supported |
+| 60 FPS Floating Dark-Glass HUD & Word Karaoke | Supported | Supported |
+| Universal Multi-App & Web Browser Support | Supported | Supported |
+| Click-to-Seek & Unified Playback Controls | Supported | Supported |
 | Reduce Glass & Blur Effects (60 FPS Lightweight) | Auto-ON (Toggleable) | Auto on Intel / Low Power |
-| Full Multi-Pass `CABackdropLayer` Glass & 3D Genie | Optional (via Toggle) | Supported |
-| Live CoreAudio Process Tap Visualizer | Greyed out (`Requires macOS 14.2+`) | Supported |
+| Live CoreAudio Process-Tree Tap Visualizer | Greyed out (`Requires macOS 14.2+`) | Supported |
 | Force Touch Beat-Synced Haptics | Greyed out (`Requires macOS 14.2+`) | Supported |
 
 ---
 
-## How It Works
+## Installation (Zero Runtime Dependencies)
 
-### 1. Audio Capture via CoreAudio Process Tap *(macOS 14.2+)*
-- Uses `AudioHardwareCreateProcessTap` (`CATapDescription`) guarded with `@available(macOS 14.2, *)` to capture raw 32-bit float audio directly from Spotify or Apple Music without virtual loopback drivers or kernel extensions.
+> [!NOTE]
+> **End users do NOT need Rust, Cargo, or Xcode installed.** The Rust engine is statically compiled into the universal macOS executable (`otool -L` links only standard macOS system frameworks).
 
-### 2. Force Touch Actuator Driver (`MultitouchSupport.framework`)
-- Communicates with the trackpad actuator via Apple's private `MultitouchSupport.framework` (`MTActuatorCreateFromDeviceID`, `MTActuatorOpen`, `MTActuatorActuate`) matched through `IOKit`, compensating for mechanical rise time ($T_{\text{haptic}} = T_{\text{dac}} - 5\,\text{ms}$).
-
-### 3. Precompiled Event-Driven IPC & Monotonic Clock Interpolation
-- Subscribes to `DistributedNotificationCenter` events from Spotify and Apple Music alongside precompiled `NSAppleScript` polling (`2.0s`, `tolerance = 0.4s` on a dedicated `.utility` serial queue) and monotonic clock interpolation:
-  $$t_{\text{current}} = t_{\text{polled}} + (t_{\text{now}} - t_{\text{poll}})$$
-
-### 4. Audio Spectrum Analysis (`vDSP` FFT)
-- In-place split-complex FFT via Apple Accelerate (`vDSP_fft_zrip`) across logarithmic perceptual bands (60 Hz – 16 kHz) with asymmetric ballistic smoothing. On macOS 13 or when Audio Tap is off, FFT buffers are not allocated.
-
----
-
-## Requirements
-
-- **macOS 13.0 (Ventura) or later** *(macOS 14.2+ required for CoreAudio Process Tap Visualizer & Beat Haptics)*
-- Apple Silicon (`arm64`) or Intel (`x86_64`) Mac
-- Spotify or Apple Music desktop app
-- MacBook with Force Touch trackpad *(optional, for macOS 14.2+ beat haptics)*
-
----
-
-## Installation
-
-### Pre-built Universal DMG
-1. Download **`LyricsMenuBar-2.0.0.dmg`** from [Releases](https://github.com/tum212/Lyrics-Menu-Bar/releases).
-2. Drag **Lyrics Menu Bar** into your `/Applications` folder.
-3. Grant **Automation** permissions when prompted on first launch *(and **System Audio Recording** on macOS 14.2+ if using the live audio visualizer)*.
+1. Download **`LyricsMenuBar-2.0.0.dmg`** (~7.5 MB Universal `arm64` + `x86_64`) from [GitHub Releases](https://github.com/tum212/Lyrics-Menu-Bar/releases).
+2. Drag **Lyrics Menu Bar** into `/Applications`.
+3. Open **Lyrics Menu Bar** from `/Applications` or Spotlight and allow **Automation** permissions when prompted *(and **System Audio Recording** on macOS 14.2+ if using the live waveform visualizer or haptics)*.
 
 > [!TIP]
-> **If macOS blocks the app on first launch (Gatekeeper):**  
-> Right-click the app in `/Applications` and select **Open**, or run:
+> **If macOS Gatekeeper blocks first launch (ad-hoc signed open-source build):**  
+> Right-click **Lyrics Menu Bar** in `/Applications` → **Open**, or run:
 > ```bash
 > xattr -cr "/Applications/Lyrics Menu Bar.app"
 > ```
@@ -159,14 +156,17 @@ Unsupported system-tap features on macOS 13 Ventura are **automatically greyed o
 ## Building from Source
 
 ```bash
-# 1. Install Rust toolchain with universal Apple Silicon + Intel targets
+# 1. Install Rust toolchain with Apple Silicon + Intel macOS targets
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 # 2. Clone the repository
 git clone https://github.com/tum212/Lyrics-Menu-Bar.git
 cd Lyrics-Menu-Bar
 
-# 3. Build universal Rust core + Universal macOS DMG (arm64 + x86_64, macOS 13.0+)
+# 3. Run Rust unit tests (18 tests)
+cargo test --manifest-path rust/lyrics-core/Cargo.toml
+
+# 4. Build Universal Rust staticlib + Universal macOS DMG (arm64 + x86_64, macOS 13.0+)
 bash build_dmg.sh
 ```
 
@@ -176,8 +176,8 @@ bash build_dmg.sh
 
 ```text
 SpoticatMenuBar/
-├── Package.swift                       # Swift 6 Package manifest (CLyricsCore + AppKit macOS 13.0+)
-├── build_dmg.sh                        # Universal Rust + Swift DMG packaging script (arm64 + x86_64)
+├── Package.swift                       # Swift 6 Package manifest (CLyricsCore + Pure AppKit macOS 13.0+)
+├── build_dmg.sh                        # Strict (set -euo pipefail) Universal Rust + Swift DMG packager
 ├── LyricsMenuBar.entitlements          # Hardened runtime & CoreAudio entitlements
 ├── remote_config.json                  # Remote OTA version & lyrics endpoints config
 ├── icon.icns                           # Application icon
@@ -185,29 +185,30 @@ SpoticatMenuBar/
 ├── rust/lyrics-core/                   # Rust staticlib Core Engine (liblyrics_core.a)
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs & ffi.rs             # C ABI exports & panic-safe FFI boundary
-│       ├── dsp.rs                      # Zero-alloc 4096-pt realfft DSP & equalizer physics
-│       ├── haptics.rs                  # MultitouchSupport / IOKit beat-synced Force Touch haptics
-│       ├── lyrics.rs                   # LRC/eLRC/TTML/Plain parsers, syllable timing & LRU fetcher
-│       ├── playback.rs                 # Monotonic clock & Menu Bar animation state machine
+│       ├── lib.rs & ffi.rs             # Shared native-tls pool, C ABI exports & panic-safe FFI
+│       ├── dsp.rs                      # Zero-alloc 4096-pt realfft DSP & ballistic equalizer physics
+│       ├── haptics.rs                  # Condvar MultitouchSupport / IOKit beat-synced Force Touch haptics
+│       ├── lyrics.rs                   # LRC/eLRC/TTML/Plain parsers, Thai/CJK handling & Arc LRU cache
+│       ├── playback.rs                 # Dynamic source_id monotonic clock & Menu Bar state machine
 │       ├── color.rs                    # 12-hue album palette extractor & artwork networking
-│       └── updater.rs                  # Remote config & streaming OTA DMG downloader
+│       └── updater.rs                  # Semver remote config & atomic streaming OTA DMG downloader
 ├── Sources/
 │   ├── CLyricsCore/include/
-│   │   ├── lyrics_core.h               # C header generated for Swift/Clang interop
+│   │   ├── lyrics_core.h               # C header for Swift/Clang FFI interop
 │   │   └── module.modulemap
 │   └── LyricsMenuBar/                  # Zero-SwiftUI AppKit / CALayer Shell
 │       ├── Info.plist                  # Universal bundle metadata (v2.0.0, LSMinimumSystemVersion 13.0)
-│       ├── AppSettings.swift           # Capability detection, Lightweight defaults & keys
-│       ├── RustBridge.swift            # Swift facade over liblyrics_core.a & NSCache images
-│       ├── LyricsMenuBarApp.swift      # App entry point, 60 FPS CVDisplayLink & Genie panel
-│       ├── MenuBarCanvasView.swift     # GPU-native CALayer menu bar renderer
-│       ├── HUDGlassView.swift          # Adaptive AppKit / CABackdropLayer glass backdrop
-│       ├── HUDContentView.swift        # Pure AppKit 480x240 HUD & Software Update modal
-│       ├── HUDLyricsView.swift         # Virtualized 60 FPS CALayer HUD karaoke stream
-│       ├── SettingsMenuController.swift# Native AppKit NSMenu settings
-│       ├── AudioTapBridge.swift        # CoreAudio Process Tap -> Rust DSP bridge (macOS 14.2+)
-│       ├── MusicIPCBridge.swift        # Spotify & Apple Music Notification/AppleScript bridge
+│       ├── AppSettings.swift           # Capability detection, Lightweight defaults & setting keys
+│       ├── MusicSourceRegistry.swift   # 20+ player & 10-domain web parser registry + YouTube ID extractor
+│       ├── RustBridge.swift            # Swift facade over liblyrics_core.a, ArtworkCache & OTA installer
+│       ├── LyricsMenuBarApp.swift      # App entry point, 60 FPS CVDisplayLink, Sleep/Wake & Genie panel
+│       ├── MenuBarCanvasView.swift     # GPU-native 22pt CALayer menu bar renderer
+│       ├── HUDGlassView.swift          # Adaptive dark-glass NSVisualEffectView / CABackdropLayer backdrop
+│       ├── HUDContentView.swift        # Pure AppKit 480x240 HUD, hover auto-fade controls & Update modal
+│       ├── HUDLyricsView.swift         # Virtualized 60 FPS CALayer karaoke stream with Thai/CJK wrap
+│       ├── SettingsMenuController.swift# Dynamic multi-app NSMenu settings with modal depth tracking
+│       ├── AudioTapBridge.swift        # Serial HAL Process-Tree CoreAudio Tap -> Rust DSP (macOS 14.2+)
+│       ├── MusicIPCBridge.swift        # 3-layer Universal IPC + YouTube oEmbed + serial OSA executor
 │       └── LaunchAtLoginManager.swift  # SMAppService login item manager
 └── README.md                           # Documentation & GitHub landing page
 ```

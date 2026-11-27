@@ -1,8 +1,8 @@
 {
   "version": "2.0.0",
   "build": 60,
-  "release_date": "2026-11-27",
-  "release_notes": "Major Release v2.0.0 (Build 60) — Rust Core Engine + Pure AppKit 60 FPS Edition: Replaced SwiftUI completely with a Rust staticlib core engine (real-time 4096-pt FFT DSP, MultitouchSupport/IOKit beat haptics, LRC/eLRC/TTML/Plain parsers, monotonic playback clock, color extractor, and streaming OTA updater) paired with a zero-SwiftUI AppKit/CALayer shell. Delivers locked 60 FPS VSync on both Apple Silicon and Intel MacBook 12\" 2017 with ~15-25 MB RAM and 0% CPU when paused or idle.",
+  "release_date": "2026-11-28",
+  "release_notes": "Major Release v2.0.0 (Build 60) — Rust Core Engine + Pure AppKit 60 FPS + Universal Streaming:\n• Rust Core Engine (liblyrics_core.a statically linked — zero Rust runtime required): zero-alloc 4096-pt realfft DSP, Condvar MultitouchSupport beat haptics, LRC/eLRC/TTML/Plain parsers, monotonic playback clock, 12-hue palette extractor, and atomic streaming OTA updater.\n• 100% Zero-SwiftUI Pure AppKit/CALayer UI: locked 60 FPS VSync on both Apple Silicon and Intel MacBook 12\" (2017) with 0 Hz idle sleep and instant HUD texture cleanup.\n• Universal Multi-App & Web Streaming Support: Spotify, Apple Music, YouTube Music (Desktop & Web), TIDAL, Deezer, Qobuz, Amazon Music, SoundCloud, Cider, Swinsian, VOX, VLC, Doppler, Cog, IINA, Bandcamp, and YouTube across Safari, Chrome, Brave, Arc, Edge, Vivaldi, Opera, and Firefox (with YouTube oEmbed Art Track resolution and Process-Tree CoreAudio Tap).\n• Polished HUD & Thai/CJK Typography: Hover auto-fading top-right controls, Light-Mode-safe dark glass, 22pt tone-mark clearance, and grapheme-safe Thai/CJK wrapping.",
   "download_url": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v2.0.0/LyricsMenuBar-2.0.0.dmg",
   "download_url_lite": "https://github.com/tum212/Lyrics-Menu-Bar/releases/download/v2.0.0/LyricsMenuBar-2.0.0.dmg",
   "mandatory": false,
